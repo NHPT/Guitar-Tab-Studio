@@ -1,0 +1,65 @@
+[project]
+name = "guitar-tab-worker"
+version = "0.1.0"
+description = "Local inference worker for Guitar Tab Studio"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+  "basic-pitch>=0.4.0",
+  "demucs>=4.0.1",
+  "librosa>=0.10.2",
+  "numpy>=1.26,<2.1",
+  "pretty-midi>=0.2.10",
+  "scikit-learn<=1.5.1",
+  "setuptools>=69,<81",
+  "soundfile>=0.12.1",
+  "torch>=2.2",
+  "yt-dlp>=2025.1.15"
+]
+
+[project.scripts]
+guitar-tab-worker = "worker:main"
+stringtrace-train = "stringtrace_ml.train:main"
+stringtrace-evaluate = "stringtrace_ml.evaluate:main"
+stringtrace-evaluate-hybrid = "stringtrace_ml.evaluate_hybrid:main"
+stringtrace-calibrate-decoder = "stringtrace_ml.calibrate_decoder:main"
+stringtrace-evaluate-worker = "stringtrace_ml.evaluate_worker:main"
+stringtrace-model-gate = "stringtrace_ml.gate:main"
+stringtrace-download-guitarset = "stringtrace_ml.download_guitarset:main"
+stringtrace-import-guitarset = "stringtrace_ml.import_guitarset:main"
+stringtrace-import-guitar-techs = "stringtrace_ml.import_guitar_techs:main"
+stringtrace-import-idmt-techniques = "stringtrace_ml.import_idmt_techniques:main"
+stringtrace-import-agpt-techniques = "stringtrace_ml.import_agpt_techniques:main"
+stringtrace-convert-technique-positions = "stringtrace_ml.convert_technique_positions:main"
+stringtrace-convert-technique-position-evaluation = "stringtrace_ml.convert_technique_position_evaluation:main"
+stringtrace-train-technique = "stringtrace_ml.train_technique:main"
+stringtrace-evaluate-technique = "stringtrace_ml.evaluate_technique:main"
+stringtrace-train-technique-svm = "stringtrace_ml.train_technique_svm:main"
+stringtrace-evaluate-technique-svm = "stringtrace_ml.evaluate_technique_svm:main"
+stringtrace-technique-ovr = "stringtrace_ml.technique_ovr:main"
+stringtrace-technique-gate = "stringtrace_ml.technique_gate:main"
+stringtrace-train-onset-position = "stringtrace_ml.train_onset_position:main"
+stringtrace-train-candidate-activity = "stringtrace_ml.train_candidate_activity:main"
+stringtrace-evaluate-onset-position = "stringtrace_ml.evaluate_onset_position:main"
+stringtrace-reference-review = "stringtrace_ml.reference_review:main"
+stringtrace-reference-queue = "stringtrace_ml.reference_queue:main"
+stringtrace-residual-onset-review = "stringtrace_ml.residual_onset_review:main"
+stringtrace-prepare-reference = "stringtrace_ml.prepare_reference:main"
+stringtrace-prepare-guitarset-stems = "stringtrace_ml.prepare_guitarset_stems:main"
+stringtrace-prepare-mixture-stems = "stringtrace_ml.prepare_mixture_stems:main"
+stringtrace-compose-training-manifest = "stringtrace_ml.compose_training_manifest:main"
+stringtrace-reference-coverage = "stringtrace_ml.reference_coverage:main"
+stringtrace-generate-synthetic = "stringtrace_ml.generate_synthetic:main"
+
+[build-system]
+requires = ["setuptools>=69,<81"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["worker"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stringtrace_ml*"]
+
+[tool.ruff]
+line-length = 100

@@ -1,0 +1,29 @@
+{
+  "name": "guitar-tab-studio",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,green \"npm run dev -w @gts/api\" \"npm run dev -w web\"",
+    "build": "npm run build -w @gts/api && npm run build -w web",
+    "test": "npm run test -w @gts/api && npm run lint -w web",
+    "test:gate": ".venv/bin/python -m unittest discover -s services/promotion_gate -p 'test_*.py'",
+    "test:runner": ".venv/bin/python -m unittest discover -s services/training_runner -p 'test_*.py'",
+    "test:sealed-gate": "PYTHONPATH=services/worker .venv/bin/python -m unittest discover -s services/sealed_gate -p 'test_*.py'",
+    "test:e2e": "PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright playwright test",
+    "promotion:gate": ".venv/bin/python services/promotion_gate/gate.py",
+    "sealed:gate": "PYTHONPATH=services/worker .venv/bin/python services/sealed_gate/gate.py",
+    "training:runner": ".venv/bin/python services/training_runner/runner.py",
+    "start": "npm run start -w @gts/api"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "concurrently": "^9.2.1",
+    "ffmpeg-static": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
