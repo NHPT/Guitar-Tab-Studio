@@ -12,7 +12,7 @@ import {
   renameSync,
   writeFileSync,
 } from 'node:fs'
-import { resolve } from 'node:path'
+import { relative, resolve } from 'node:path'
 import type { ReviewDocument, ReviewEvent, ReviewPackage } from './reviews.js'
 
 const SAFE_ALIAS = /^[\p{L}\p{N}][\p{L}\p{N}._-]{1,31}$/u
@@ -415,6 +415,61 @@ export interface ModelPromotion {
   previousChampionId?: string
 }
 
+export type InferenceDeploymentMode =
+  | 'baseline'
+  | 'shadow'
+  | 'canary'
+  | 'champion'
+
+export interface InferenceDeploymentPolicy {
+  mode: InferenceDeploymentMode
+  promotionId?: string
+  modelVersion?: string
+  artifactPath?: string
+  baselineModelVersion?: string
+  baselineArtifactPath?: string
+  baselineFallbackModelVersion?: string
+  baselineFallbackArtifactPath?: string
+}
+
+export interface InferenceObservation {
+  id: string
+  promotionId: string
+  jobId: string
+  mode: Exclude<InferenceDeploymentMode, 'baseline'>
+  success: boolean
+  fallbackUsed: boolean
+  durationMs: number
+  baselineNoteCount?: number
+  candidateNoteCount?: number
+  noteCountDelta?: number
+  error?: string
+  recordedAt: string
+}
+
+export interface InferenceDeploymentStatus {
+  config: {
+    shadowSamplePercent: number
+    canaryTrafficPercent: number
+    errorBudgetPercent: number
+    minimumObservations: number
+  }
+  active?: {
+    promotionId: string
+    modelVersion: string
+    mode: 'shadow' | 'canary' | 'champion'
+  }
+  observations: {
+    total: number
+    successful: number
+    fallbackCount: number
+    errorRate: number
+    averageDurationMs: number
+    lastRecordedAt?: string
+  }
+  recent: InferenceObservation[]
+}
+
 export interface PromotionGateJob {
   promotion: ModelPromotion
   experiment: ExperimentRun
@@ -473,6 +528,8 @@ interface CommunityState {
   experiments: ExperimentRecord[]
   promotions: ModelPromotion[]
   championPromotionId?: string
+  deploymentConfig: InferenceDeploymentStatus['config']
+  inferenceObservations: InferenceObservation[]
 }
 
 export interface CommunityDashboard {
@@ -668,6 +725,13 @@ function emptyState(): CommunityState {
     releases: [],
     experiments: [],
     promotions: [],
+    deploymentConfig: {
+      shadowSamplePercent: 10,
+      canaryTrafficPercent: 5,
+      errorBudgetPercent: 5,
+      minimumObservations: 10,
+    },
+    inferenceObservations: [],
   }
 }
 
@@ -794,6 +858,21 @@ function finiteInput(
     throw new CommunityRequestError(`${label} 超出允许范围`)
   }
   return parsed
+}
+
+function percentageBucket(value: string): number {
+  const prefix = createHash('sha256').update(value, 'utf8').digest().readUInt32BE(0)
+  return (prefix / 0x1_0000_0000) * 100
+}
+
+function statusLabelForDeployment(
+  mode: Exclude<InferenceDeploymentMode, 'baseline'>,
+): string {
+  return {
+    shadow: '影子',
+    canary: '灰度',
+    champion: '生产',
+  }[mode]
 }
 
 function normalizeExperimentMetrics(value: unknown): Record<string, number> {
@@ -974,6 +1053,8 @@ export class CommunityStore {
         attemptCount:
           experiment.attemptCount ?? experiment.lease?.attempt ?? 0,
       }))
+      value.deploymentConfig ??= emptyState().deploymentConfig
+      value.inferenceObservations ??= []
       return value
     } catch {
       throw new CommunityRequestError('社区状态文件无法读取', 500)
@@ -2869,6 +2950,292 @@ export class CommunityStore {
     return { ...current }
   }
 
+  configureInferenceDeployment(
+    account: CommunityAccount,
+    input: {
+      shadowSamplePercent?: unknown
+      canaryTrafficPercent?: unknown
+      errorBudgetPercent?: unknown
+      minimumObservations?: unknown
+    },
+  ): InferenceDeploymentStatus {
+    requiredRole(account, 'model-maintainer')
+    const current = this.state.deploymentConfig
+    this.state.deploymentConfig = {
+      shadowSamplePercent: finiteInput(
+        input.shadowSamplePercent ?? current.shadowSamplePercent,
+        'shadowSamplePercent',
+        0,
+        100,
+        false,
+      ),
+      canaryTrafficPercent: finiteInput(
+        input.canaryTrafficPercent ?? current.canaryTrafficPercent,
+        'canaryTrafficPercent',
+        0,
+        50,
+        false,
+      ),
+      errorBudgetPercent: finiteInput(
+        input.errorBudgetPercent ?? current.errorBudgetPercent,
+        'errorBudgetPercent',
+        0,
+        50,
+        false,
+      ),
+      minimumObservations: finiteInput(
+        input.minimumObservations ?? current.minimumObservations,
+        'minimumObservations',
+        1,
+        100,
+        true,
+      ),
+    }
+    this.persist()
+    this.audit(
+      account.id,
+      'deployment.configured',
+      'system',
+      'inference',
+      this.state.deploymentConfig,
+    )
+    return this.inferenceDeploymentStatus()
+  }
+
+  private promotionArtifactPath(
+    promotion: ModelPromotion | undefined,
+  ): string | undefined {
+    if (!promotion) return undefined
+    const experiment = this.state.experiments.find(
+      (candidate) => candidate.id === promotion.experimentId,
+    )
+    if (!experiment?.artifactObjectKey) return undefined
+    const artifactPath = resolve(this.root, experiment.artifactObjectKey)
+    const relativePath = relative(this.root, artifactPath)
+    if (relativePath.startsWith('..') || relativePath === '') return undefined
+    return existsSync(artifactPath) ? artifactPath : undefined
+  }
+
+  inferenceDeployment(jobId: string): InferenceDeploymentPolicy {
+    const champion = this.state.promotions.find(
+      (promotion) =>
+        promotion.id === this.state.championPromotionId &&
+        promotion.status === 'champion',
+    )
+    const championArtifact = this.promotionArtifactPath(champion)
+    const previousChampion = this.state.promotions.find(
+      (promotion) => promotion.id === champion?.previousChampionId,
+    )
+    const previousChampionArtifact =
+      this.promotionArtifactPath(previousChampion)
+    const active = [...this.state.promotions]
+      .filter(
+        (promotion) =>
+          promotion.status === 'canary' || promotion.status === 'shadow',
+      )
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
+    if (active) {
+      const artifactPath = this.promotionArtifactPath(active)
+      const samplePercent =
+        active.status === 'canary'
+          ? this.state.deploymentConfig.canaryTrafficPercent
+          : this.state.deploymentConfig.shadowSamplePercent
+      const selected =
+        Boolean(artifactPath) &&
+        percentageBucket(`${active.id}:${jobId}`) < samplePercent
+      if (selected) {
+        return {
+          mode: active.status as 'shadow' | 'canary',
+          promotionId: active.id,
+          modelVersion: active.modelVersion,
+          artifactPath,
+          baselineModelVersion: champion?.modelVersion,
+          baselineArtifactPath: championArtifact,
+          baselineFallbackModelVersion: previousChampion?.modelVersion,
+          baselineFallbackArtifactPath: previousChampionArtifact,
+        }
+      }
+    }
+    if (champion && championArtifact) {
+      return {
+        mode: 'champion',
+        promotionId: champion.id,
+        modelVersion: champion.modelVersion,
+        artifactPath: championArtifact,
+        baselineModelVersion: previousChampion?.modelVersion,
+        baselineArtifactPath: previousChampionArtifact,
+      }
+    }
+    return { mode: 'baseline' }
+  }
+
+  recordInferenceObservation(
+    input: Omit<InferenceObservation, 'id' | 'recordedAt'>,
+  ): InferenceDeploymentStatus {
+    const promotion = this.state.promotions.find(
+      (candidate) => candidate.id === input.promotionId,
+    )
+    if (!promotion) throw new CommunityRequestError('推理观测对应模型不存在', 404)
+    if (
+      input.mode !== 'shadow' &&
+      input.mode !== 'canary' &&
+      input.mode !== 'champion'
+    ) {
+      throw new CommunityRequestError('推理观测模式无效')
+    }
+    if (
+      this.state.inferenceObservations.some(
+        (observation) =>
+          observation.promotionId === input.promotionId &&
+          observation.jobId === input.jobId &&
+          observation.mode === input.mode,
+      )
+    ) {
+      return this.inferenceDeploymentStatus()
+    }
+    const observation: InferenceObservation = {
+      ...input,
+      durationMs: finiteInput(
+        input.durationMs,
+        'durationMs',
+        0,
+        86_400_000,
+        true,
+      ),
+      error:
+        typeof input.error === 'string'
+          ? input.error.trim().slice(0, 300)
+          : undefined,
+      id: randomUUID(),
+      recordedAt: this.now(),
+    }
+    this.state.inferenceObservations.push(observation)
+    this.state.inferenceObservations =
+      this.state.inferenceObservations.slice(-2000)
+
+    const recent = this.state.inferenceObservations
+      .filter(
+        (candidate) =>
+          candidate.promotionId === promotion.id &&
+          candidate.mode === input.mode,
+      )
+      .slice(-100)
+    const failures = recent.filter(
+      (candidate) => !candidate.success || candidate.fallbackUsed,
+    ).length
+    const errorRate = recent.length === 0 ? 0 : (failures / recent.length) * 100
+    const overBudget =
+      recent.length >= this.state.deploymentConfig.minimumObservations &&
+      errorRate > this.state.deploymentConfig.errorBudgetPercent
+    if (
+      overBudget &&
+      promotion.status === input.mode &&
+      (input.mode === 'canary' || input.mode === 'champion')
+    ) {
+      if (input.mode === 'canary') {
+        promotion.status = 'rejected'
+      } else {
+        promotion.status = 'retired'
+        const previous = this.state.promotions.find(
+          (candidate) => candidate.id === promotion.previousChampionId,
+        )
+        if (previous) {
+          previous.status = 'champion'
+          previous.updatedAt = this.now()
+          this.state.championPromotionId = previous.id
+        } else {
+          this.state.championPromotionId = undefined
+        }
+      }
+      promotion.updatedAt = this.now()
+      this.audit(
+        'system:inference-router',
+        'promotion.auto-rollback',
+        'promotion',
+        promotion.id,
+        { mode: input.mode, errorRate, observations: recent.length },
+      )
+    }
+    this.persist()
+    this.audit(
+      'system:inference-router',
+      'inference.observed',
+      'promotion',
+      promotion.id,
+      {
+        jobId: observation.jobId,
+        mode: observation.mode,
+        success: observation.success,
+        fallbackUsed: observation.fallbackUsed,
+        durationMs: observation.durationMs,
+      },
+    )
+    return this.inferenceDeploymentStatus()
+  }
+
+  inferenceDeploymentStatus(
+    account?: CommunityAccount,
+  ): InferenceDeploymentStatus {
+    if (account) requiredRole(account, 'model-maintainer')
+    const staged = [...this.state.promotions]
+      .filter(
+        (promotion) =>
+          promotion.status === 'shadow' || promotion.status === 'canary',
+      )
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
+    const champion = this.state.promotions.find(
+      (promotion) =>
+        promotion.id === this.state.championPromotionId &&
+        promotion.status === 'champion',
+    )
+    const active = staged ?? champion
+    const observations = active
+      ? this.state.inferenceObservations.filter(
+          (observation) =>
+            observation.promotionId === active.id &&
+            observation.mode === active.status,
+        )
+      : []
+    const successful = observations.filter(
+      (observation) => observation.success && !observation.fallbackUsed,
+    ).length
+    const fallbackCount = observations.filter(
+      (observation) => observation.fallbackUsed,
+    ).length
+    const failures = observations.filter(
+      (observation) => !observation.success || observation.fallbackUsed,
+    ).length
+    return {
+      config: { ...this.state.deploymentConfig },
+      ...(active
+        ? {
+            active: {
+              promotionId: active.id,
+              modelVersion: active.modelVersion,
+              mode: active.status as 'shadow' | 'canary' | 'champion',
+            },
+          }
+        : {}),
+      observations: {
+        total: observations.length,
+        successful,
+        fallbackCount,
+        errorRate: observations.length === 0 ? 0 : failures / observations.length,
+        averageDurationMs:
+          observations.length === 0
+            ? 0
+            : Math.round(
+                observations.reduce(
+                  (total, observation) => total + observation.durationMs,
+                  0,
+                ) / observations.length,
+              ),
+        lastRecordedAt: observations.at(-1)?.recordedAt,
+      },
+      recent: this.state.inferenceObservations.slice(-20).reverse(),
+    }
+  }
+
   setGovernanceMode(
     account: CommunityAccount,
     mode: unknown,
@@ -2923,6 +3290,7 @@ export class CommunityStore {
     const blockedReleases = this.state.releases.filter(
       (release) => release.status === 'blocked',
     ).length
+    const deployment = this.inferenceDeploymentStatus()
     if (escalated > 0) {
       maintenance.push({
         severity: 'warning',
@@ -2943,6 +3311,26 @@ export class CommunityStore {
       maintenance.push({
         severity: 'info',
         message: '受控训练队列有待执行任务',
+      })
+    }
+    if (deployment.active) {
+      const modeLabel = {
+        shadow: '影子',
+        canary: '灰度',
+        champion: '生产',
+      }[deployment.active.mode]
+      const observations = deployment.observations
+      maintenance.push({
+        severity:
+          observations.total >= deployment.config.minimumObservations &&
+          observations.errorRate >
+            deployment.config.errorBudgetPercent / 100
+            ? 'warning'
+            : 'info',
+        message:
+          observations.total < deployment.config.minimumObservations
+            ? `${modeLabel}部署正在收集观测：${observations.total}/${deployment.config.minimumObservations}`
+            : `${modeLabel}部署错误率 ${(observations.errorRate * 100).toFixed(1)}%，预算 ${deployment.config.errorBudgetPercent}%`,
       })
     }
     if (maintenance.length === 0) {
@@ -2991,13 +3379,15 @@ export class CommunityStore {
         id: 'C5',
         label: '模型晋级',
         status: this.state.promotions.length > 0 ? 'active' : 'waiting',
-        detail: '密封门禁、影子、灰度、生产与回滚',
+        detail: deployment.active
+          ? `${deployment.active.modelVersion} 正处于${statusLabelForDeployment(deployment.active.mode)}部署`
+          : '密封门禁、影子、灰度、生产与回滚',
       },
       {
         id: 'C6',
         label: '长期运营',
         status: 'active',
-        detail: '质量、队列、实验和治理异常持续观测',
+        detail: `质量、队列与部署持续观测；已保留 ${deployment.recent.length} 条近期推理记录`,
       },
     ]
     return {

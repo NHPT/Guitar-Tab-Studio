@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { accessSync, constants } from 'node:fs'
-import { mkdir, readFile } from 'node:fs/promises'
+import { mkdir, readFile, rm } from 'node:fs/promises'
 import { dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type {
@@ -21,6 +21,69 @@ import type {
   TrackRole,
   VisualizationPoint,
 } from './types.js'
+import type {
+  InferenceDeploymentPolicy,
+  InferenceObservation,
+} from './community.js'
+
+export interface PipelineExecutionOptions {
+  deployment?: InferenceDeploymentPolicy
+  onInferenceObservation?: (
+    observation: Omit<InferenceObservation, 'id' | 'recordedAt'>,
+  ) => void
+}
+
+export interface ResolvedInferenceExecution {
+  mode: InferenceDeploymentPolicy['mode']
+  promotionId?: string
+  modelVersion?: string
+  primaryModelPath?: string
+  fallbackModelPaths: Array<string | undefined>
+  shadowModelPath?: string
+}
+
+function fallbackModels(...paths: Array<string | undefined>): Array<string | undefined> {
+  const artifacts = paths.filter(
+    (path, index, values): path is string =>
+      typeof path === 'string' && values.indexOf(path) === index,
+  )
+  return [...artifacts, undefined]
+}
+
+export function resolveInferenceExecution(
+  deployment?: InferenceDeploymentPolicy,
+): ResolvedInferenceExecution {
+  if (
+    !deployment ||
+    deployment.mode === 'baseline' ||
+    !deployment.promotionId ||
+    !deployment.artifactPath
+  ) {
+    return { mode: 'baseline', fallbackModelPaths: [] }
+  }
+  if (deployment.mode === 'shadow') {
+    return {
+      mode: 'shadow',
+      promotionId: deployment.promotionId,
+      modelVersion: deployment.modelVersion,
+      primaryModelPath: deployment.baselineArtifactPath,
+      fallbackModelPaths: deployment.baselineArtifactPath
+        ? fallbackModels(deployment.baselineFallbackArtifactPath)
+        : [],
+      shadowModelPath: deployment.artifactPath,
+    }
+  }
+  return {
+    mode: deployment.mode,
+    promotionId: deployment.promotionId,
+    modelVersion: deployment.modelVersion,
+    primaryModelPath: deployment.artifactPath,
+    fallbackModelPaths: fallbackModels(
+      deployment.baselineArtifactPath,
+      deployment.baselineFallbackArtifactPath,
+    ),
+  }
+}
 
 interface WorkerTechniqueCandidate {
   technique: Technique
@@ -755,10 +818,141 @@ function workerProject(
   }
 }
 
+function workerSourceArguments(job: AnalysisJob, inputPath?: string): string[] {
+  return inputPath
+    ? ['--input', resolve(inputPath)]
+    : job.source.url
+      ? ['--url', job.source.url]
+      : []
+}
+
+async function executeWorker(
+  workerCommand: string,
+  ffmpegCommand: string,
+  sourceArguments: string[],
+  outputRoot: string,
+  modelPath?: string,
+): Promise<number> {
+  await mkdir(outputRoot, { recursive: true })
+  const startedAt = Date.now()
+  const argumentsList = [
+    ...sourceArguments,
+    '--output',
+    outputRoot,
+    ...(modelPath ? ['--tab-model', modelPath] : []),
+  ]
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      FFMPEG_BINARY: ffmpegCommand,
+      PATH: `${dirname(ffmpegCommand)}:${process.env.PATH ?? ''}`,
+      XDG_CACHE_HOME: resolve(projectRoot, '.cache'),
+      TORCH_HOME: resolve(projectRoot, '.cache', 'torch'),
+      HF_HOME: resolve(projectRoot, '.cache', 'huggingface'),
+    }
+    delete environment.STRINGTRACE_TAB_MODEL
+    const processHandle = spawn(workerCommand, argumentsList, {
+      cwd: process.cwd(),
+      env: environment,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    processHandle.stdout.resume()
+    let stderr = ''
+    processHandle.stderr.on('data', (chunk: Buffer) => {
+      stderr = `${stderr}${chunk.toString()}`.slice(-1200)
+    })
+    processHandle.on('error', rejectPromise)
+    processHandle.on('close', (code) => {
+      if (code === 0) {
+        resolvePromise()
+      } else {
+        rejectPromise(
+          new Error(stderr.trim() || `Worker exited with code ${code}`),
+        )
+      }
+    })
+  })
+  return Date.now() - startedAt
+}
+
+function reportInferenceObservation(
+  options: PipelineExecutionOptions,
+  observation: Omit<InferenceObservation, 'id' | 'recordedAt'>,
+): void {
+  try {
+    options.onInferenceObservation?.(observation)
+  } catch {
+    // Operational telemetry must not change the user-visible inference result.
+  }
+}
+
+async function runShadowInference(
+  job: AnalysisJob,
+  sourceArguments: string[],
+  baseline: WorkerAnalysis,
+  workerCommand: string,
+  ffmpegCommand: string,
+  deployment: ResolvedInferenceExecution,
+  options: PipelineExecutionOptions,
+): Promise<void> {
+  if (
+    deployment.mode !== 'shadow' ||
+    !deployment.promotionId ||
+    !deployment.shadowModelPath
+  ) {
+    return
+  }
+  const outputRoot = resolve(
+    process.cwd(),
+    'data',
+    'shadow',
+    job.id,
+    deployment.promotionId,
+  )
+  const startedAt = Date.now()
+  try {
+    const durationMs = await executeWorker(
+      workerCommand,
+      ffmpegCommand,
+      sourceArguments,
+      outputRoot,
+      deployment.shadowModelPath,
+    )
+    const candidate = JSON.parse(
+      await readFile(resolve(outputRoot, 'analysis.json'), 'utf8'),
+    ) as WorkerAnalysis
+    reportInferenceObservation(options, {
+      promotionId: deployment.promotionId,
+      jobId: job.id,
+      mode: 'shadow',
+      success: true,
+      fallbackUsed: false,
+      durationMs,
+      baselineNoteCount: baseline.notes.length,
+      candidateNoteCount: candidate.notes.length,
+      noteCountDelta: candidate.notes.length - baseline.notes.length,
+    })
+  } catch (error) {
+    reportInferenceObservation(options, {
+      promotionId: deployment.promotionId,
+      jobId: job.id,
+      mode: 'shadow',
+      success: false,
+      fallbackUsed: false,
+      durationMs: Date.now() - startedAt,
+      baselineNoteCount: baseline.notes.length,
+      error: error instanceof Error ? error.message : '影子推理失败',
+    })
+  } finally {
+    await rm(outputRoot, { recursive: true, force: true }).catch(() => undefined)
+  }
+}
+
 async function runInferencePipeline(
   job: AnalysisJob,
   onUpdate: (job: AnalysisJob) => void,
   inputPath?: string,
+  options: PipelineExecutionOptions = {},
 ): Promise<StudioProject> {
   const workerCommand = getWorkerCommand()
   const ffmpegCommand = getFfmpegCommand()
@@ -770,50 +964,93 @@ async function runInferencePipeline(
   }
 
   const outputRoot = resolve(process.cwd(), 'data', 'jobs', job.id)
-  await mkdir(outputRoot, { recursive: true })
+  const deployment = resolveInferenceExecution(options.deployment)
   Object.assign(job, {
     status: 'separating',
     progress: 35,
     stageLabel: 'Worker 正在分离音轨',
+    deployment: {
+      mode: deployment.mode,
+      modelVersion: deployment.modelVersion,
+      fallbackUsed: false,
+    },
     updatedAt: new Date().toISOString(),
   })
   onUpdate(job)
 
-  const sourceArguments = inputPath
-    ? ['--input', resolve(inputPath)]
-    : job.source.url
-      ? ['--url', job.source.url]
-      : []
+  const sourceArguments = workerSourceArguments(job, inputPath)
   if (sourceArguments.length === 0) {
     throw new Error('推理任务缺少媒体输入')
   }
 
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    const processHandle = spawn(workerCommand, [...sourceArguments, '--output', outputRoot], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        FFMPEG_BINARY: ffmpegCommand,
-        PATH: `${dirname(ffmpegCommand)}:${process.env.PATH ?? ''}`,
-        XDG_CACHE_HOME: resolve(projectRoot, '.cache'),
-        TORCH_HOME: resolve(projectRoot, '.cache', 'torch'),
-        HF_HOME: resolve(projectRoot, '.cache', 'huggingface'),
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let stderr = ''
-    processHandle.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString()
-    })
-    processHandle.on('error', rejectPromise)
-    processHandle.on('close', (code) => {
-      if (code === 0) {
-        resolvePromise()
-      } else {
-        rejectPromise(new Error(stderr.trim().slice(-1200) || `Worker exited with code ${code}`))
+  const primaryStartedAt = Date.now()
+  let analysis: WorkerAnalysis
+  try {
+    await executeWorker(
+      workerCommand,
+      ffmpegCommand,
+      sourceArguments,
+      outputRoot,
+      deployment.primaryModelPath,
+    )
+    analysis = JSON.parse(
+      await readFile(resolve(outputRoot, 'analysis.json'), 'utf8'),
+    ) as WorkerAnalysis
+    if (
+      deployment.mode === 'canary' ||
+      deployment.mode === 'champion'
+    ) {
+      reportInferenceObservation(options, {
+        promotionId: deployment.promotionId as string,
+        jobId: job.id,
+        mode: deployment.mode,
+        success: true,
+        fallbackUsed: false,
+        durationMs: Date.now() - primaryStartedAt,
+      })
+    }
+  } catch (error) {
+    if (deployment.fallbackModelPaths.length === 0) {
+      throw error
+    }
+    if (
+      (deployment.mode === 'canary' || deployment.mode === 'champion') &&
+      deployment.promotionId
+    ) {
+      reportInferenceObservation(options, {
+        promotionId: deployment.promotionId,
+        jobId: job.id,
+        mode: deployment.mode,
+        success: false,
+        fallbackUsed: true,
+        durationMs: Date.now() - primaryStartedAt,
+        error: error instanceof Error ? error.message : '候选推理失败',
+      })
+    }
+    let fallbackError: unknown = error
+    let fallbackAnalysis: WorkerAnalysis | undefined
+    for (const fallbackModelPath of deployment.fallbackModelPaths) {
+      try {
+        await rm(outputRoot, { recursive: true, force: true })
+        await executeWorker(
+          workerCommand,
+          ffmpegCommand,
+          sourceArguments,
+          outputRoot,
+          fallbackModelPath,
+        )
+        fallbackAnalysis = JSON.parse(
+          await readFile(resolve(outputRoot, 'analysis.json'), 'utf8'),
+        ) as WorkerAnalysis
+        break
+      } catch (cause) {
+        fallbackError = cause
       }
-    })
-  })
+    }
+    if (!fallbackAnalysis) throw fallbackError
+    analysis = fallbackAnalysis
+    if (job.deployment) job.deployment.fallbackUsed = true
+  }
 
   Object.assign(job, {
     status: 'mapping',
@@ -822,9 +1059,6 @@ async function runInferencePipeline(
     updatedAt: new Date().toISOString(),
   })
   onUpdate(job)
-  const analysis = JSON.parse(
-    await readFile(resolve(outputRoot, 'analysis.json'), 'utf8'),
-  ) as WorkerAnalysis
   const project = workerProject(analysis, job.source, job.id)
   Object.assign(job, {
     status: 'completed',
@@ -834,6 +1068,17 @@ async function runInferencePipeline(
     updatedAt: new Date().toISOString(),
   })
   onUpdate(job)
+  if (deployment.mode === 'shadow') {
+    void runShadowInference(
+      job,
+      sourceArguments,
+      analysis,
+      workerCommand,
+      ffmpegCommand,
+      deployment,
+      options,
+    )
+  }
   return project
 }
 
@@ -841,6 +1086,7 @@ export function runPipeline(
   job: AnalysisJob,
   onUpdate: (job: AnalysisJob) => void,
   inputPath?: string,
+  options: PipelineExecutionOptions = {},
 ): Promise<StudioProject> {
   const capabilities = getCapabilities()
   const platform = platforms.find((candidate) => candidate.id === job.source.kind)
@@ -856,7 +1102,7 @@ export function runPipeline(
       new Error('真实分析 Worker 尚未就绪，任务未执行；系统不会用示例结果替代'),
     )
   }
-  return runInferencePipeline(job, onUpdate, inputPath).catch((error: unknown) => {
+  return runInferencePipeline(job, onUpdate, inputPath, options).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : '媒体获取失败'
     if (
       !inputPath &&

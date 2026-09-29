@@ -8,6 +8,7 @@ import type {
   CommunityTask,
   DatasetRelease,
   ExperimentRun,
+  InferenceDeploymentStatus,
   ModelPromotion,
   PlatformDescriptor,
   ReviewDocument,
@@ -414,5 +415,21 @@ export function rollbackChampion(
   return communityRequest('/api/community/promotions/rollback', token, {
     method: 'POST',
     body: JSON.stringify({ reason }),
+  })
+}
+
+export function fetchInferenceDeployment(
+  token: string,
+): Promise<InferenceDeploymentStatus> {
+  return communityRequest('/api/community/deployment', token)
+}
+
+export function updateInferenceDeployment(
+  token: string,
+  config: InferenceDeploymentStatus['config'],
+): Promise<InferenceDeploymentStatus> {
+  return communityRequest('/api/community/deployment', token, {
+    method: 'PUT',
+    body: JSON.stringify(config),
   })
 }

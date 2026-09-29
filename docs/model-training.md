@@ -422,6 +422,15 @@ single-maintainer phase, the owner may approve after every automated gate
 passes and must record `approval_mode=single-maintainer`. Once another
 maintainer is available, the submitter cannot independently approve promotion.
 
+The API applies an approved promotion to real inference jobs through
+deterministic job hashing. Shadow execution writes to an isolated non-public
+directory and never replaces the response returned to the user. Canary and
+champion execution fail over to the current or previous champion artifact, then
+to the built-in baseline when no stable artifact is available. Observations are
+deduplicated by promotion, job and mode. Error budgets are evaluated only after
+the configured minimum number of mode-specific observations; exceeding the
+budget rejects a canary or restores the previous champion automatically.
+
 Enable an approved checkpoint explicitly:
 
 ```bash

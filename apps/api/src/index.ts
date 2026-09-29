@@ -197,6 +197,19 @@ function sealedPromotionGate(request: express.Request) {
   )
 }
 
+function inferenceExecution(jobId: string) {
+  return {
+    deployment: community.inferenceDeployment(jobId),
+    onInferenceObservation: (
+      observation: Parameters<
+        typeof community.recordInferenceObservation
+      >[0],
+    ) => {
+      community.recordInferenceObservation(observation)
+    },
+  }
+}
+
 function sendCommunityArtifact(
   objectKey: string,
   response: express.Response,
@@ -662,6 +675,23 @@ app.post('/api/community/promotions/rollback', (request, response) => {
   response.json(community.rollbackChampion(account, request.body?.reason))
 })
 
+app.get('/api/community/deployment', (request, response) => {
+  const account = communityAccount(request)
+  response.json(community.inferenceDeploymentStatus(account))
+})
+
+app.put('/api/community/deployment', (request, response) => {
+  const account = communityAccount(request)
+  response.json(
+    community.configureInferenceDeployment(account, {
+      shadowSamplePercent: request.body?.shadowSamplePercent,
+      canaryTrafficPercent: request.body?.canaryTrafficPercent,
+      errorBudgetPercent: request.body?.errorBudgetPercent,
+      minimumObservations: request.body?.minimumObservations,
+    }),
+  )
+})
+
 app.put('/api/community/governance-mode', (request, response) => {
   const account = communityAccount(request)
   response.json({ mode: community.setGovernanceMode(account, request.body?.mode) })
@@ -753,7 +783,7 @@ app.post('/api/import/link', (request, response) => {
 
   try {
     const source = sourceFromLink(url)
-    const job = createJob(source)
+    const job = createJob(source, undefined, inferenceExecution)
     response.status(202).json(job)
   } catch (error) {
     response.status(400).json({
@@ -790,6 +820,7 @@ app.post('/api/import/upload', upload.single('media'), (request, response) => {
       filename: request.file.originalname,
     },
     request.file.path,
+    inferenceExecution,
   )
   response.status(202).json(job)
 })

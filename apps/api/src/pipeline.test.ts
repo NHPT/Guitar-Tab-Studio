@@ -4,6 +4,7 @@ import {
   createStudioProject,
   detectPlatform,
   normalizeSharedUrl,
+  resolveInferenceExecution,
   sourceFromLink,
   tabFromWorker,
 } from './pipeline.js'
@@ -320,5 +321,70 @@ test('does not advertise unsupported protected music platforms', () => {
   assert.throws(
     () => sourceFromLink('https://y.qq.com/n/ryqq/songDetail/example'),
     /当前仅支持哔哩哔哩、抖音和网易云音乐/,
+  )
+})
+
+test('resolves isolated shadow execution and candidate fallback models', () => {
+  assert.deepEqual(
+    resolveInferenceExecution({
+      mode: 'shadow',
+      promotionId: 'promotion-shadow',
+      modelVersion: 'model-shadow',
+      artifactPath: '/models/shadow.bin',
+      baselineArtifactPath: '/models/champion.bin',
+      baselineFallbackArtifactPath: '/models/previous.bin',
+    }),
+    {
+      mode: 'shadow',
+      promotionId: 'promotion-shadow',
+      modelVersion: 'model-shadow',
+      primaryModelPath: '/models/champion.bin',
+      fallbackModelPaths: ['/models/previous.bin', undefined],
+      shadowModelPath: '/models/shadow.bin',
+    },
+  )
+  assert.deepEqual(
+    resolveInferenceExecution({
+      mode: 'canary',
+      promotionId: 'promotion-canary',
+      modelVersion: 'model-canary',
+      artifactPath: '/models/canary.bin',
+      baselineArtifactPath: '/models/champion.bin',
+      baselineFallbackArtifactPath: '/models/previous.bin',
+    }),
+    {
+      mode: 'canary',
+      promotionId: 'promotion-canary',
+      modelVersion: 'model-canary',
+      primaryModelPath: '/models/canary.bin',
+      fallbackModelPaths: [
+        '/models/champion.bin',
+        '/models/previous.bin',
+        undefined,
+      ],
+    },
+  )
+  assert.deepEqual(
+    resolveInferenceExecution({
+      mode: 'champion',
+      promotionId: 'promotion-champion',
+      modelVersion: 'model-champion',
+      artifactPath: '/models/champion.bin',
+      baselineArtifactPath: '/models/previous.bin',
+    }),
+    {
+      mode: 'champion',
+      promotionId: 'promotion-champion',
+      modelVersion: 'model-champion',
+      primaryModelPath: '/models/champion.bin',
+      fallbackModelPaths: ['/models/previous.bin', undefined],
+    },
+  )
+  assert.deepEqual(
+    resolveInferenceExecution({
+      mode: 'canary',
+      promotionId: 'promotion-invalid',
+    }),
+    { mode: 'baseline', fallbackModelPaths: [] },
   )
 })

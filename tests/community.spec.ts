@@ -104,8 +104,46 @@ const failedExperiment = {
   failureReason: 'transient runner failure',
 }
 
+const deployment = {
+  config: {
+    shadowSamplePercent: 10,
+    canaryTrafficPercent: 5,
+    errorBudgetPercent: 5,
+    minimumObservations: 10,
+  },
+  active: {
+    promotionId: 'promotion-shadow',
+    modelVersion: 'gts-shadow-01',
+    mode: 'shadow',
+  },
+  observations: {
+    total: 4,
+    successful: 4,
+    fallbackCount: 0,
+    errorRate: 0,
+    averageDurationMs: 1240,
+    lastRecordedAt: '2026-09-29T00:04:00.000Z',
+  },
+  recent: [
+    {
+      id: 'observation-1',
+      promotionId: 'promotion-shadow',
+      jobId: 'analysis-job-01',
+      mode: 'shadow',
+      success: true,
+      fallbackUsed: false,
+      durationMs: 1240,
+      baselineNoteCount: 22,
+      candidateNoteCount: 24,
+      noteCountDelta: 2,
+      recordedAt: '2026-09-29T00:04:00.000Z',
+    },
+  ],
+}
+
 async function mockCommunity(page: Page): Promise<void> {
   let submitted = false
+  let deploymentState = structuredClone(deployment)
   await page.addInitScript(() => {
     window.localStorage.setItem('gts-community-token', 'account-owner.secret')
   })
@@ -153,6 +191,15 @@ async function mockCommunity(page: Page): Promise<void> {
   await page.route('**/api/community/promotions', (route) =>
     route.fulfill({ json: { promotions: [] } }),
   )
+  await page.route('**/api/community/deployment', async (route) => {
+    if (route.request().method() === 'PUT') {
+      deploymentState = {
+        ...deploymentState,
+        config: route.request().postDataJSON(),
+      }
+    }
+    await route.fulfill({ json: deploymentState })
+  })
   await page.route('**/api/community/tasks/task-1/submissions', async (route) => {
     submitted = true
     await route.fulfill({
@@ -217,6 +264,21 @@ test('supports the contributor task and owner operations', async ({
   ).toBeVisible()
   await page.screenshot({
     path: `test-results/${testInfo.project.name}-community-data.png`,
+    fullPage: true,
+  })
+
+  await page.getByRole('button', { name: '模型晋级' }).click()
+  await expect(page.getByRole('heading', { name: '模型晋级' })).toBeVisible()
+  await expect(page.getByText('推理部署', { exact: true })).toBeVisible()
+  await expect(page.getByText('gts-shadow-01')).toBeVisible()
+  await expect(page.getByLabel('影子采样比例')).toHaveValue('10')
+  await page.getByLabel('影子采样比例').fill('20')
+  await page.getByRole('button', { name: '保存策略' }).click()
+  await expect(page.getByText('推理部署策略已更新')).toBeVisible()
+  await expect(page.getByLabel('影子采样比例')).toHaveValue('20')
+  await expect(page.getByText('analysis')).toBeVisible()
+  await page.screenshot({
+    path: `test-results/${testInfo.project.name}-community-models.png`,
     fullPage: true,
   })
 

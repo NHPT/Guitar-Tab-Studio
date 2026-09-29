@@ -155,6 +155,18 @@ The complete state model, role matrix, quality thresholds and delivery phases
 are defined in the
 [community annotation and open training roadmap](community-ml-roadmap.md).
 
+Inference jobs now resolve the active promotion before execution. A stable hash
+of promotion and job identity selects shadow or canary traffic without mutable
+request counters. Shadow jobs return only the baseline result, run the candidate
+in a separate non-public directory, retain an aggregate observation and delete
+the candidate output. Canary and champion jobs run the selected artifact first;
+on failure they immediately rerun the current champion, the previous champion,
+or the built-in baseline in that order. Mode-specific observations are
+idempotent per job. After the configured minimum sample count, a canary that
+exceeds its error budget is rejected and an unhealthy champion is retired while
+its previous champion is restored. Deployment policy and recent observations
+are visible only to model maintainers.
+
 The current development implementation uses an atomic repository-local JSON
 state file and append-only JSONL audit log behind the same API boundary. It
 already supports account bootstrap, review-package import, calibration,

@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { createStudioProject, runPipeline } from './pipeline.js'
+import {
+  createStudioProject,
+  runPipeline,
+  type PipelineExecutionOptions,
+} from './pipeline.js'
 import type { AnalysisJob, SourceDescriptor, StudioProject } from './types.js'
 
 const jobs = new Map<string, AnalysisJob>()
@@ -70,7 +74,11 @@ export function listJobs(): AnalysisJob[] {
   return [...jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
 }
 
-export function createJob(source: SourceDescriptor, inputPath?: string): AnalysisJob {
+export function createJob(
+  source: SourceDescriptor,
+  inputPath?: string,
+  executionResolver?: (jobId: string) => PipelineExecutionOptions,
+): AnalysisJob {
   const now = new Date().toISOString()
   const job: AnalysisJob = {
     id: randomUUID(),
@@ -84,6 +92,7 @@ export function createJob(source: SourceDescriptor, inputPath?: string): Analysi
 
   jobs.set(job.id, job)
   persistJob(job)
+  const execution = executionResolver?.(job.id)
 
   void runPipeline(
     job,
@@ -92,6 +101,7 @@ export function createJob(source: SourceDescriptor, inputPath?: string): Analysi
       persistJob(updated)
     },
     inputPath,
+    execution,
   )
     .then((project) => {
       projects.set(project.id, project)

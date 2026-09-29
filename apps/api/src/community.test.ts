@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, rmSync } from 'node:fs'
-import { resolve } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
 import test from 'node:test'
 import {
   CommunityRequestError,
   createCommunityStore,
+  type ModelPromotion,
   type CommunityStore,
   type CommunityStoreOptions,
 } from './community.js'
@@ -96,7 +97,7 @@ const sealedGateCredentials = {
 }
 
 function withStore(
-  run: (store: CommunityStore) => void,
+  run: (store: CommunityStore, root: string) => void,
   options: CommunityStoreOptions = {},
 ): void {
   const root = resolve(process.cwd(), 'data', `.test-community-${randomUUID()}`)
@@ -115,6 +116,7 @@ function withStore(
         },
         ...options,
       }),
+      root,
     )
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -130,6 +132,103 @@ function register(
   const credential = store.registerAccount({ alias, riskHint, bootstrapKey })
   const account = store.authenticate(`Bearer ${credential.token}`)
   return { account, credential }
+}
+
+function createPromotionFixture(
+  store: CommunityStore,
+  root: string,
+  owner: Parameters<CommunityStore['createExperiment']>[0],
+  suffix: string,
+): ModelPromotion {
+  const experiment = store.createExperiment(owner, {
+    recipeId: 'onset-position-guitarset-v1',
+    datasetReleaseId: 'builtin:guitarset-v1',
+    parameters: { epochs: 2, seed: 20260929 },
+  })
+  const runner = store.authenticateRunner(
+    `Runner runner-a.${runnerCredentials['runner-a']}`,
+  )
+  const claim = store.claimExperiment(runner)
+  assert.ok(claim)
+  const artifact = Buffer.from(`model-${suffix}`)
+  const artifactSha256 = createHash('sha256').update(artifact).digest('hex')
+  const objectKey = `artifacts/${experiment.id}/1/${artifactSha256}.bin`
+  const artifactPath = resolve(root, objectKey)
+  mkdirSync(dirname(artifactPath), { recursive: true })
+  writeFileSync(artifactPath, artifact)
+  store.registerRunnerArtifact(
+    runner,
+    experiment.id,
+    claim.leaseToken,
+    {
+      sha256: artifactSha256,
+      sizeBytes: artifact.length,
+      mediaType: 'application/octet-stream',
+      objectKey,
+    },
+  )
+  store.recordRunnerResult(runner, experiment.id, {
+    leaseToken: claim.leaseToken,
+    status: 'completed',
+    metrics: { tablatureF1: 0.8, repeatedRecall: 0.86 },
+    artifactSha256,
+    executionEvidence: {
+      isolation: 'sandbox-exec',
+      durationMs: 1200,
+      stdoutSha256: 'b'.repeat(64),
+      stderrSha256: 'c'.repeat(64),
+      reportSha256: 'd'.repeat(64),
+    },
+  })
+  const promotion = store.createPromotion(owner, experiment.id)
+  const gate = store.authenticatePromotionGate(
+    `Gate gate-a.${gateCredentials['gate-a']}`,
+  )
+  for (const check of [
+    'reproduction',
+    'public-validation',
+    'robustness',
+  ] as const) {
+    store.recordAutomatedPromotionCheck(gate, promotion.id, {
+      check,
+      passed: true,
+      summary: `${check} passed`,
+      evidenceSha256: 'e'.repeat(64),
+    })
+  }
+  const sealedGate = store.authenticateSealedPromotionGate(
+    `SealedGate sealed-a.${sealedGateCredentials['sealed-a']}`,
+  )
+  store.recordAutomatedPromotionCheck(sealedGate, promotion.id, {
+    check: 'sealed-evaluation',
+    passed: true,
+    summary: 'sealed-evaluation passed',
+    evidenceSha256: 'f'.repeat(64),
+  })
+  return promotion
+}
+
+function advancePromotionTo(
+  store: CommunityStore,
+  owner: Parameters<CommunityStore['advancePromotion']>[0],
+  promotionId: string,
+  target: 'shadow' | 'canary' | 'champion',
+): ModelPromotion {
+  let promotion = store.advancePromotion(owner, promotionId, 'shadow')
+  if (target === 'shadow') return promotion
+  store.recordPromotionCheck(owner, promotionId, {
+    check: 'shadow',
+    passed: true,
+    summary: 'shadow passed',
+  })
+  promotion = store.advancePromotion(owner, promotionId, 'canary')
+  if (target === 'canary') return promotion
+  store.recordPromotionCheck(owner, promotionId, {
+    check: 'canary',
+    passed: true,
+    summary: 'canary passed',
+  })
+  return store.advancePromotion(owner, promotionId, 'champion')
 }
 
 test('bootstraps one owner and authenticates opaque credentials', () => {
@@ -671,5 +770,185 @@ test('enforces recipe bounds and the single-maintainer promotion sequence', () =
     )
     assert.equal(store.dashboard().counts.completedExperiments, 1)
     assert.ok(store.auditEvents(owner).length > 0)
+  })
+})
+
+test('selects shadow and canary traffic deterministically and validates deployment bounds', () => {
+  withStore((store, root) => {
+    const owner = register(
+      store,
+      'owner',
+      'device-owner',
+      'bootstrap-secret',
+    ).account
+    const promotion = createPromotionFixture(store, root, owner, 'routing')
+    advancePromotionTo(store, owner, promotion.id, 'shadow')
+
+    assert.throws(
+      () =>
+        store.configureInferenceDeployment(owner, {
+          shadowSamplePercent: 101,
+        }),
+      /超出允许范围/,
+    )
+    assert.throws(
+      () =>
+        store.configureInferenceDeployment(owner, {
+          canaryTrafficPercent: 51,
+        }),
+      /超出允许范围/,
+    )
+    assert.throws(
+      () =>
+        store.configureInferenceDeployment(owner, {
+          minimumObservations: 1.5,
+        }),
+      /超出允许范围/,
+    )
+
+    store.configureInferenceDeployment(owner, {
+      shadowSamplePercent: 50,
+      canaryTrafficPercent: 50,
+    })
+    const shadowSelections = Array.from({ length: 200 }, (_, index) =>
+      store.inferenceDeployment(`shadow-job-${index}`).mode,
+    )
+    assert.ok(shadowSelections.includes('shadow'))
+    assert.ok(shadowSelections.includes('baseline'))
+    assert.deepEqual(
+      store.inferenceDeployment('stable-job'),
+      store.inferenceDeployment('stable-job'),
+    )
+
+    store.recordInferenceObservation({
+      promotionId: promotion.id,
+      jobId: 'stable-job',
+      mode: 'shadow',
+      success: true,
+      fallbackUsed: false,
+      durationMs: 1250,
+      baselineNoteCount: 10,
+      candidateNoteCount: 12,
+      noteCountDelta: 2,
+    })
+    store.recordInferenceObservation({
+      promotionId: promotion.id,
+      jobId: 'stable-job',
+      mode: 'shadow',
+      success: false,
+      fallbackUsed: false,
+      durationMs: 9999,
+    })
+    const shadowStatus = store.inferenceDeploymentStatus(owner)
+    assert.equal(shadowStatus.observations.total, 1)
+    assert.equal(shadowStatus.observations.averageDurationMs, 1250)
+    assert.equal(shadowStatus.recent.length, 1)
+
+    store.recordPromotionCheck(owner, promotion.id, {
+      check: 'shadow',
+      passed: true,
+      summary: 'shadow passed',
+    })
+    store.advancePromotion(owner, promotion.id, 'canary')
+    const canarySelections = Array.from({ length: 200 }, (_, index) =>
+      store.inferenceDeployment(`canary-job-${index}`).mode,
+    )
+    assert.ok(canarySelections.includes('canary'))
+    assert.ok(canarySelections.includes('baseline'))
+    assert.equal(
+      store.inferenceDeploymentStatus(owner).observations.total,
+      0,
+    )
+  })
+})
+
+test('rejects a canary automatically when its error budget is exceeded', () => {
+  withStore((store, root) => {
+    const owner = register(
+      store,
+      'owner',
+      'device-owner',
+      'bootstrap-secret',
+    ).account
+    const promotion = createPromotionFixture(store, root, owner, 'canary')
+    advancePromotionTo(store, owner, promotion.id, 'canary')
+    store.configureInferenceDeployment(owner, {
+      canaryTrafficPercent: 50,
+      errorBudgetPercent: 49,
+      minimumObservations: 2,
+    })
+
+    store.recordInferenceObservation({
+      promotionId: promotion.id,
+      jobId: 'canary-success',
+      mode: 'canary',
+      success: true,
+      fallbackUsed: false,
+      durationMs: 1000,
+    })
+    const status = store.recordInferenceObservation({
+      promotionId: promotion.id,
+      jobId: 'canary-fallback',
+      mode: 'canary',
+      success: false,
+      fallbackUsed: true,
+      durationMs: 1200,
+      error: 'candidate failed',
+    })
+
+    assert.equal(
+      store.listPromotions(owner).find((item) => item.id === promotion.id)
+        ?.status,
+      'rejected',
+    )
+    assert.equal(status.active, undefined)
+    assert.equal(status.recent.length, 2)
+    assert.equal(status.recent[0].fallbackUsed, true)
+  })
+})
+
+test('uses the previous champion artifact and restores it after an automatic rollback', () => {
+  withStore((store, root) => {
+    const owner = register(
+      store,
+      'owner',
+      'device-owner',
+      'bootstrap-secret',
+    ).account
+    const first = createPromotionFixture(store, root, owner, 'champion-a')
+    advancePromotionTo(store, owner, first.id, 'champion')
+    const second = createPromotionFixture(store, root, owner, 'champion-b')
+    advancePromotionTo(store, owner, second.id, 'champion')
+
+    const deployment = store.inferenceDeployment('production-job')
+    assert.equal(deployment.mode, 'champion')
+    assert.equal(deployment.promotionId, second.id)
+    assert.equal(deployment.baselineModelVersion, first.modelVersion)
+    assert.ok(deployment.baselineArtifactPath?.endsWith('.bin'))
+
+    store.configureInferenceDeployment(owner, {
+      errorBudgetPercent: 0,
+      minimumObservations: 1,
+    })
+    const status = store.recordInferenceObservation({
+      promotionId: second.id,
+      jobId: 'production-job',
+      mode: 'champion',
+      success: false,
+      fallbackUsed: true,
+      durationMs: 900,
+      error: 'candidate failed',
+    })
+    const promotions = store.listPromotions(owner)
+    assert.equal(
+      promotions.find((promotion) => promotion.id === second.id)?.status,
+      'retired',
+    )
+    assert.equal(
+      promotions.find((promotion) => promotion.id === first.id)?.status,
+      'champion',
+    )
+    assert.equal(status.active?.promotionId, first.id)
+    assert.equal(status.recent[0].promotionId, second.id)
   })
 })

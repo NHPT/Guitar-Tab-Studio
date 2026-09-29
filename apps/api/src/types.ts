@@ -177,4 +177,9 @@ export interface AnalysisJob {
   updatedAt: string
   projectId?: string
   error?: string
+  deployment?: {
+    mode: 'baseline' | 'shadow' | 'canary' | 'champion'
+    modelVersion?: string
+    fallbackUsed?: boolean
+  }
 }

@@ -164,6 +164,11 @@ export interface AnalysisJob {
   stageLabel: string
   projectId?: string
   error?: string
+  deployment?: {
+    mode: 'baseline' | 'shadow' | 'canary' | 'champion'
+    modelVersion?: string
+    fallbackUsed?: boolean
+  }
 }
 
 export interface TrackMix {
@@ -519,4 +524,42 @@ export interface ModelPromotion {
   createdAt: string
   updatedAt: string
   previousChampionId?: string
+}
+
+export interface InferenceObservation {
+  id: string
+  promotionId: string
+  jobId: string
+  mode: 'shadow' | 'canary' | 'champion'
+  success: boolean
+  fallbackUsed: boolean
+  durationMs: number
+  baselineNoteCount?: number
+  candidateNoteCount?: number
+  noteCountDelta?: number
+  error?: string
+  recordedAt: string
+}
+
+export interface InferenceDeploymentStatus {
+  config: {
+    shadowSamplePercent: number
+    canaryTrafficPercent: number
+    errorBudgetPercent: number
+    minimumObservations: number
+  }
+  active?: {
+    promotionId: string
+    modelVersion: string
+    mode: 'shadow' | 'canary' | 'champion'
+  }
+  observations: {
+    total: number
+    successful: number
+    fallbackCount: number
+    errorRate: number
+    averageDurationMs: number
+    lastRecordedAt?: string
+  }
+  recent: InferenceObservation[]
 }

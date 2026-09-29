@@ -10,6 +10,7 @@ apps/api/data/uploads/*
 !apps/api/data/uploads/.gitkeep
 apps/api/data/jobs/*
 !apps/api/data/jobs/.gitkeep
+apps/api/data/shadow/
 apps/api/data/fixtures/
 apps/api/data/training/
 apps/api/data/worker-smoke/

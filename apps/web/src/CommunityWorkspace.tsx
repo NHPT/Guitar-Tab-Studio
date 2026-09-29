@@ -6,6 +6,7 @@ import {
   ClipboardCheck,
   Database,
   FlaskConical,
+  Gauge,
   Guitar,
   KeyRound,
   LogOut,
@@ -14,6 +15,7 @@ import {
   RefreshCw,
   Rocket,
   RotateCcw,
+  Save,
   ShieldCheck,
   SkipForward,
   UploadCloud,
@@ -33,6 +35,7 @@ import {
   fetchCommunityTasks,
   fetchDatasetReleases,
   fetchExperiments,
+  fetchInferenceDeployment,
   fetchPromotions,
   fetchTrainingRecipes,
   importCommunityReviews,
@@ -41,6 +44,7 @@ import {
   reproduceExperiment,
   retryExperiment,
   submitCommunityTask,
+  updateInferenceDeployment,
   withdrawCommunityContribution,
 } from './api'
 import './CommunityWorkspace.css'
@@ -52,6 +56,7 @@ import type {
   CommunityTask,
   DatasetRelease,
   ExperimentRun,
+  InferenceDeploymentStatus,
   ModelPromotion,
   TrainingRecipe,
 } from './types'
@@ -128,6 +133,7 @@ function statusLabel(status: string): string {
     failed: '失败',
     cancelled: '已取消',
     candidate: '候选',
+    baseline: '基线',
     shadow: '影子',
     canary: '灰度',
     champion: '生产',
@@ -285,6 +291,16 @@ export default function CommunityWorkspace() {
   >([])
   const [experiments, setExperiments] = useState<ExperimentRun[]>([])
   const [promotions, setPromotions] = useState<ModelPromotion[]>([])
+  const [deployment, setDeployment] =
+    useState<InferenceDeploymentStatus | null>(null)
+  const [deploymentConfig, setDeploymentConfig] = useState<
+    InferenceDeploymentStatus['config']
+  >({
+    shadowSamplePercent: 10,
+    canaryTrafficPercent: 5,
+    errorBudgetPercent: 5,
+    minimumObservations: 10,
+  })
   const [view, setView] = useState<CommunityView>('tasks')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -303,6 +319,9 @@ export default function CommunityWorkspace() {
   const taskStartedAt = useRef(0)
 
   const isOwner = Boolean(account?.roles.includes('owner'))
+  const canMaintainModels = Boolean(
+    isOwner || account?.roles.includes('model-maintainer'),
+  )
   const activeTask = tasks[0]
 
   const refreshPublic = useCallback(async () => {
@@ -314,6 +333,8 @@ export default function CommunityWorkspace() {
       const currentAccount =
         knownAccount ?? (await fetchCommunityAccount(credential))
       const owner = currentAccount.roles.includes('owner')
+      const modelMaintainer =
+        owner || currentAccount.roles.includes('model-maintainer')
       const [
         nextTasks,
         nextContributions,
@@ -321,13 +342,17 @@ export default function CommunityWorkspace() {
         recipeData,
         nextExperiments,
         nextPromotions,
+        nextDeployment,
       ] = await Promise.all([
         fetchCommunityTasks(credential),
         fetchCommunityContributions(credential),
         fetchDatasetReleases(),
         fetchTrainingRecipes(),
         fetchExperiments(credential),
-        owner ? fetchPromotions(credential) : Promise.resolve([]),
+        modelMaintainer ? fetchPromotions(credential) : Promise.resolve([]),
+        modelMaintainer
+          ? fetchInferenceDeployment(credential)
+          : Promise.resolve(null),
       ])
       setAccount(currentAccount)
       setTasks(nextTasks)
@@ -337,6 +362,8 @@ export default function CommunityWorkspace() {
       setBuiltinDatasets(recipeData.builtinDatasets)
       setExperiments(nextExperiments)
       setPromotions(nextPromotions)
+      setDeployment(nextDeployment)
+      if (nextDeployment) setDeploymentConfig(nextDeployment.config)
       taskStartedAt.current = Date.now()
       if (!datasetId && recipeData.builtinDatasets[0]) {
         setDatasetId(recipeData.builtinDatasets[0].id)
@@ -458,6 +485,13 @@ export default function CommunityWorkspace() {
         : selectedPromotion?.status === 'canary'
           ? 'champion'
           : null
+  const deploymentOverBudget = Boolean(
+    deployment &&
+      deployment.observations.total >=
+        deployment.config.minimumObservations &&
+      deployment.observations.errorRate >
+        deployment.config.errorBudgetPercent / 100,
+  )
 
   if (!token || !account) {
     if (loading && token) {
@@ -927,7 +961,7 @@ export default function CommunityWorkspace() {
                               <RotateCcw aria-hidden="true" />
                             </button>
                           )}
-                        {isOwner &&
+                        {canMaintainModels &&
                           experiment.status === 'completed' &&
                           experiment.modelVersion && (
                             <button
@@ -988,7 +1022,7 @@ export default function CommunityWorkspace() {
                 <span className="community-section-label">C5</span>
                 <h1>模型晋级</h1>
               </div>
-              {isOwner && (
+              {canMaintainModels && (
                 <div className="community-actions">
                   <select
                     aria-label="已完成模型实验"
@@ -1043,7 +1077,179 @@ export default function CommunityWorkspace() {
               ))}
               {promotions.length === 0 && <div className="community-empty-row">暂无模型候选</div>}
             </div>
-            {isOwner && selectedPromotion && (
+            {canMaintainModels && deployment && (
+              <div className="community-deployment-panel">
+                <div className="community-deployment-heading">
+                  <div>
+                    <Gauge aria-hidden="true" />
+                    <span>
+                      <strong>推理部署</strong>
+                      <small>
+                        {deployment.active?.modelVersion ?? '内置基线'}
+                      </small>
+                    </span>
+                  </div>
+                  <i
+                    className={
+                      deploymentOverBudget ? 'is-warning' : 'is-healthy'
+                    }
+                  >
+                    {deploymentOverBudget
+                      ? '超出错误预算'
+                      : statusLabel(deployment.active?.mode ?? 'baseline')}
+                  </i>
+                </div>
+                <dl className="community-deployment-metrics">
+                  <div>
+                    <dt>当前模式</dt>
+                    <dd>{statusLabel(deployment.active?.mode ?? 'baseline')}</dd>
+                  </div>
+                  <div>
+                    <dt>有效观测</dt>
+                    <dd>
+                      {deployment.observations.total}
+                      <small> / {deployment.config.minimumObservations}</small>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>错误率</dt>
+                    <dd>{percent(deployment.observations.errorRate)}</dd>
+                  </div>
+                  <div>
+                    <dt>自动回退</dt>
+                    <dd>{deployment.observations.fallbackCount}</dd>
+                  </div>
+                  <div>
+                    <dt>平均耗时</dt>
+                    <dd>
+                      {deployment.observations.averageDurationMs > 0
+                        ? `${deployment.observations.averageDurationMs} ms`
+                        : '—'}
+                    </dd>
+                  </div>
+                </dl>
+                <form
+                  className="community-deployment-form"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    void runAction(
+                      () =>
+                        updateInferenceDeployment(token, deploymentConfig),
+                      '推理部署策略已更新',
+                    )
+                  }}
+                >
+                  <label>
+                    <span>影子采样</span>
+                    <input
+                      aria-label="影子采样比例"
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value={deploymentConfig.shadowSamplePercent}
+                      onChange={(event) =>
+                        setDeploymentConfig((current) => ({
+                          ...current,
+                          shadowSamplePercent: Number(event.target.value),
+                        }))
+                      }
+                    />
+                    <small>%</small>
+                  </label>
+                  <label>
+                    <span>灰度流量</span>
+                    <input
+                      aria-label="灰度流量比例"
+                      type="number"
+                      min="0"
+                      max="50"
+                      step="1"
+                      value={deploymentConfig.canaryTrafficPercent}
+                      onChange={(event) =>
+                        setDeploymentConfig((current) => ({
+                          ...current,
+                          canaryTrafficPercent: Number(event.target.value),
+                        }))
+                      }
+                    />
+                    <small>%</small>
+                  </label>
+                  <label>
+                    <span>错误预算</span>
+                    <input
+                      aria-label="错误预算比例"
+                      type="number"
+                      min="0"
+                      max="50"
+                      step="0.1"
+                      value={deploymentConfig.errorBudgetPercent}
+                      onChange={(event) =>
+                        setDeploymentConfig((current) => ({
+                          ...current,
+                          errorBudgetPercent: Number(event.target.value),
+                        }))
+                      }
+                    />
+                    <small>%</small>
+                  </label>
+                  <label>
+                    <span>最小观测</span>
+                    <input
+                      aria-label="最小观测数量"
+                      type="number"
+                      min="1"
+                      max="100"
+                      step="1"
+                      value={deploymentConfig.minimumObservations}
+                      onChange={(event) =>
+                        setDeploymentConfig((current) => ({
+                          ...current,
+                          minimumObservations: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    className="community-secondary"
+                    disabled={busy}
+                  >
+                    <Save aria-hidden="true" />
+                    保存策略
+                  </button>
+                </form>
+                {deployment.recent.length > 0 && (
+                  <div className="community-deployment-history">
+                    <strong>近期推理记录</strong>
+                    {deployment.recent.slice(0, 5).map((observation) => (
+                      <div key={observation.id}>
+                        <i
+                          className={
+                            observation.success && !observation.fallbackUsed
+                              ? 'is-success'
+                              : 'is-warning'
+                          }
+                        />
+                        <span>{statusLabel(observation.mode)}</span>
+                        <code>{observation.jobId.slice(0, 8)}</code>
+                        <small>
+                          {observation.fallbackUsed
+                            ? '已回退'
+                            : observation.success
+                              ? '成功'
+                              : '失败'}
+                        </small>
+                        <time dateTime={observation.recordedAt}>
+                          {formatDate(observation.recordedAt)}
+                        </time>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {canMaintainModels && selectedPromotion && (
               <div className="community-gate-panel">
                 <div className="community-gate-grid">
                   {(Object.keys(promotionCheckLabels) as PromotionCheck[]).map(
