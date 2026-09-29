@@ -181,3 +181,7 @@ npm run test:e2e
 - [系统架构](docs/architecture.md)
 - [吉他技法精准识别实施计划](docs/technique-recognition-roadmap.md)
 - [模型训练与数据规范](docs/model-training.md)
+
+## License
+
+本项目采用 [Apache License 2.0](LICENSE) 开源。
