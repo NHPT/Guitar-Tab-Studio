@@ -100,6 +100,7 @@ jobs:
                -o -name '*.blockmap' -o -name 'latest*.yml' \) \
             -exec cp '{}' release-assets/ \;
           cp RELEASE_NOTES.md release-assets/
+          test -z "$(find release-assets -maxdepth 1 -name '* *' -print -quit)"
           test "$(find release-assets -maxdepth 1 -name '*.dmg' | wc -l)" -ge 1
           test "$(find release-assets -maxdepth 1 -name '*.exe' | wc -l)" -ge 1
           test "$(find release-assets -maxdepth 1 -name '*.zip' | wc -l)" -ge 2

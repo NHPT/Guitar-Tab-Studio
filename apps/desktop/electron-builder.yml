@@ -59,4 +59,4 @@ publish:
   provider: github
   owner: NHPT
   repo: Guitar-Tab-Studio
-artifactName: "${productName}-${version}-${os}-${arch}.${ext}"
+artifactName: "Guitar-Tab-Studio-${version}-${os}-${arch}.${ext}"
