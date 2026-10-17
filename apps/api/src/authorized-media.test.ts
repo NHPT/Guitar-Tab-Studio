@@ -96,7 +96,9 @@ test('decodes QMC1 entirely offline into an ephemeral standard file', async () =
       originalName: 'song.qmcflac',
     })
     assert.deepEqual(await readFile(outputPath), standardAudio)
-    assert.equal((await stat(outputPath)).mode & 0o777, 0o600)
+    if (process.platform !== 'win32') {
+      assert.equal((await stat(outputPath)).mode & 0o777, 0o600)
+    }
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -176,7 +178,9 @@ test('decodes a keyless MusicEx QMC2 file after official authorization', async (
     })
     assert.equal(requestedSignal, controller.signal)
     assert.deepEqual(await readFile(outputPath), standardAudio)
-    assert.equal((await stat(outputPath)).mode & 0o777, 0o600)
+    if (process.platform !== 'win32') {
+      assert.equal((await stat(outputPath)).mode & 0o777, 0o600)
+    }
   } finally {
     await rm(root, { recursive: true, force: true })
   }

@@ -2,7 +2,14 @@ import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { accessSync, constants } from 'node:fs'
 import { mkdir, open, readFile, readdir, rm } from 'node:fs/promises'
-import { basename, dirname, relative, resolve, sep } from 'node:path'
+import {
+  basename,
+  delimiter,
+  dirname,
+  relative,
+  resolve,
+  sep,
+} from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   guitarGestures,
@@ -815,7 +822,7 @@ export async function executeWorker(
     const environment: NodeJS.ProcessEnv = {
       ...process.env,
       FFMPEG_BINARY: ffmpegCommand,
-      PATH: `${dirname(ffmpegCommand)}:${process.env.PATH ?? ''}`,
+      PATH: `${dirname(ffmpegCommand)}${delimiter}${process.env.PATH ?? ''}`,
       XDG_CACHE_HOME:
         process.env.XDG_CACHE_HOME ?? resolve(projectRoot, '.cache'),
       TORCH_HOME:

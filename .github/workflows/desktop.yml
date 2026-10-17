@@ -28,6 +28,8 @@ jobs:
       - run: npm run build
       - if: runner.os == 'macOS'
         run: npx playwright install chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: .cache/ms-playwright
       - if: runner.os == 'macOS'
         run: npm run test:e2e:timing
       - run: npm run smoke:binary -w @gts/desktop

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import test from 'node:test'
@@ -614,16 +614,15 @@ test('resolves isolated shadow execution and candidate fallback models', () => {
 
 test('terminates a worker when inference is cancelled or times out', async () => {
   const root = resolve(process.cwd(), 'data', `.test-worker-${randomUUID()}`)
-  const command = resolve(root, 'worker.sh')
+  const script = resolve(root, 'worker.mjs')
   mkdirSync(root, { recursive: true })
-  writeFileSync(command, '#!/bin/sh\nsleep 30\n', 'utf8')
-  chmodSync(command, 0o755)
+  writeFileSync(script, 'setTimeout(() => undefined, 30_000)\n', 'utf8')
   try {
     const controller = new AbortController()
     const cancelled = executeWorker(
-      command,
-      '/bin/true',
-      ['--input', 'fixture.wav'],
+      process.execPath,
+      process.execPath,
+      [script],
       resolve(root, 'cancelled'),
       undefined,
       controller.signal,
@@ -634,9 +633,9 @@ test('terminates a worker when inference is cancelled or times out', async () =>
 
     await assert.rejects(
       executeWorker(
-        command,
-        '/bin/true',
-        ['--input', 'fixture.wav'],
+        process.execPath,
+        process.execPath,
+        [script],
         resolve(root, 'timed-out'),
         undefined,
         undefined,

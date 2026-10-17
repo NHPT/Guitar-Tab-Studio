@@ -26,16 +26,23 @@ const outputRoot = resolve(
   'apps/desktop/build-resources/sidecar',
 )
 const buildRoot = resolve(repositoryRoot, 'apps/desktop/.sidecar-build')
+const localPython = resolve(
+  repositoryRoot,
+  process.platform === 'win32'
+    ? '.venv/Scripts/python.exe'
+    : '.venv/bin/python',
+)
 const python =
   process.env.PYTHON ??
-  resolve(
-    repositoryRoot,
-    process.platform === 'win32'
-      ? '.venv/Scripts/python.exe'
-      : '.venv/bin/python',
-  )
-
-if (!existsSync(python)) {
+  (existsSync(localPython)
+    ? localPython
+    : process.platform === 'win32'
+      ? 'python.exe'
+      : 'python3')
+const pythonProbe = spawnSync(python, ['--version'], {
+  encoding: 'utf8',
+})
+if (pythonProbe.status !== 0) {
   throw new Error(`Python environment is unavailable: ${python}`)
 }
 
