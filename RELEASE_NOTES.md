@@ -1,4 +1,4 @@
-# Guitar Tab Studio v0.1.0-preview.2
+# Guitar Tab Studio v0.1.0-preview.3
 
 This is the first public desktop preview for macOS Apple Silicon and Windows
 x64. It is intended for functional testing and early feedback, not production

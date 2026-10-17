@@ -65,9 +65,9 @@ test('installs, activates and rolls back verified model packages', async () => {
     await manager.activate('gts-tab', '1.1.0')
     assert.equal(manager.activeManifest()?.version, '1.1.0')
     assert.equal(manager.activeManifest()?.releaseChannel, 'research')
-    assert.match(
-      manager.resolveActiveFile('transcription-model') ?? '',
-      /gts-tab\/1\.1\.0\/models\/tab\.bin$/u,
+    assert.equal(
+      manager.resolveActiveFile('transcription-model'),
+      resolve(installed, 'gts-tab', '1.1.0', 'models', 'tab.bin'),
     )
     assert.throws(() => manager.remove('gts-tab', '1.1.0'), /active/)
     await manager.rollback()

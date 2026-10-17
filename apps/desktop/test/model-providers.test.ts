@@ -39,7 +39,9 @@ test('manual variant overrides the automatic hardware recommendation', () => {
   }
 })
 
-test('does not run the CPU-only MR-MT3 verifier on MPS', () => {
+test('does not run the CPU-only MR-MT3 verifier on MPS', {
+  skip: process.platform === 'win32' && 'requires a POSIX worker fixture',
+}, () => {
   const root = resolve(process.cwd(), 'data', `.test-providers-${randomUUID()}`)
   const worker = resolve(root, 'worker.sh')
   mkdirSync(root, { recursive: true })
@@ -118,7 +120,9 @@ test('imports a local MuScriptor weight into managed private storage', async () 
   }
 })
 
-test('downloads and verifies weights before persisting high-accuracy mode', async () => {
+test('downloads and verifies weights before persisting high-accuracy mode', {
+  skip: process.platform === 'win32' && 'requires a POSIX worker fixture',
+}, async () => {
   const root = resolve(process.cwd(), 'data', `.test-providers-${randomUUID()}`)
   const cache = resolve(root, 'cache')
   const worker = resolve(root, 'worker.sh')
@@ -193,7 +197,9 @@ printf '%s\\n' '{"schemaVersion":1,"provider":"mr-mt3","version":"1.0.0","sizeBy
   }
 })
 
-test('accepts imported MuScriptor weights after preparing missing auxiliaries', async () => {
+test('accepts imported MuScriptor weights after preparing missing auxiliaries', {
+  skip: process.platform === 'win32' && 'requires a POSIX worker fixture',
+}, async () => {
   const root = resolve(process.cwd(), 'data', `.test-providers-${randomUUID()}`)
   const cache = resolve(root, 'cache')
   const source = resolve(root, 'imported-small.safetensors')
@@ -239,7 +245,9 @@ printf '%s\\n' '{"schemaVersion":1,"provider":"noise2fret","version":"1.0.0","si
   }
 })
 
-test('keeps Basic Pitch active when high-accuracy preparation fails', async () => {
+test('keeps Basic Pitch active when high-accuracy preparation fails', {
+  skip: process.platform === 'win32' && 'requires a POSIX worker fixture',
+}, async () => {
   const root = resolve(process.cwd(), 'data', `.test-providers-${randomUUID()}`)
   const worker = resolve(root, 'worker.sh')
   mkdirSync(root, { recursive: true })
@@ -282,7 +290,9 @@ exit 1
   }
 })
 
-test('cancels an authorization wait and allows a later retry', async () => {
+test('cancels an authorization wait and allows a later retry', {
+  skip: process.platform === 'win32' && 'requires a POSIX worker fixture',
+}, async () => {
   const root = resolve(process.cwd(), 'data', `.test-providers-${randomUUID()}`)
   const worker = resolve(root, 'worker.sh')
   mkdirSync(root, { recursive: true })
@@ -368,7 +378,9 @@ test('activates an installed guitar-specialist research bundle', async () => {
   }
 })
 
-test('downloads and activates the multitrack research provider', async () => {
+test('downloads and activates the multitrack research provider', {
+  skip: process.platform === 'win32' && 'requires a POSIX worker fixture',
+}, async () => {
   const root = resolve(process.cwd(), 'data', `.test-providers-${randomUUID()}`)
   const worker = resolve(root, 'worker.sh')
   mkdirSync(root, { recursive: true })

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { resolve } from 'node:path'
 import test from 'node:test'
 import {
   desktopMediaSources,
@@ -42,7 +43,17 @@ test('opens the macOS QQ Music container download directory directly', () => {
   })
   assert.equal(
     path,
-    '/home/tester/Library/Containers/com.tencent.QQMusicMac/Data/Library/Application Support/QQMusicMac/iQmc',
+    resolve(
+      defaults.homePath,
+      'Library',
+      'Containers',
+      'com.tencent.QQMusicMac',
+      'Data',
+      'Library',
+      'Application Support',
+      'QQMusicMac',
+      'iQmc',
+    ),
   )
 })
 
