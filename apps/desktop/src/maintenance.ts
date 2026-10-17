@@ -7,11 +7,11 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
+import { rename } from 'node:fs/promises'
 import { basename, relative, resolve } from 'node:path'
 import { DesktopStateStore } from './state.js'
 
@@ -97,6 +97,25 @@ function directorySize(root: string): number {
   )
 }
 
+async function renameWithRetry(
+  source: string,
+  destination: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      await rename(source, destination)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      const retryable = code === 'EPERM' || code === 'EACCES' || code === 'EBUSY'
+      if (!retryable || attempt === 11) throw error
+      await new Promise((resolveDelay) =>
+        setTimeout(resolveDelay, 50 * (attempt + 1)),
+      )
+    }
+  }
+}
+
 export class DesktopMaintenance {
   constructor(
     private readonly applicationVersion: string,
@@ -140,7 +159,7 @@ export class DesktopMaintenance {
         `${JSON.stringify(manifest, null, 2)}\n`,
         'utf8',
       )
-      renameSync(staging, destination)
+      await renameWithRetry(staging, destination)
       return basename(destination)
     } catch (error) {
       rmSync(staging, { recursive: true, force: true })
@@ -186,7 +205,7 @@ export class DesktopMaintenance {
     this.stateStore.restoreFrom(resolve(source, 'desktop.sqlite'))
     if (staging) {
       rmSync(this.runtimeRoot, { recursive: true, force: true })
-      renameSync(staging, this.runtimeRoot)
+      await renameWithRetry(staging, this.runtimeRoot)
     }
   }
 
