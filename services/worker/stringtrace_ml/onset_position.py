@@ -71,6 +71,7 @@ class OnsetGroupIndex:
     onset: float | None = None
     input_pitches: tuple[int, ...] | None = None
     input_confidences: tuple[float, ...] | None = None
+    input_durations: tuple[float, ...] | None = None
 
 
 def basic_pitch_cache_path(
@@ -357,6 +358,19 @@ class OnsetPositionDataset(Dataset[dict[str, Tensor]]):
                         ),
                         input_confidences=tuple(
                             float(candidates[index].get("confidence", 1.0))
+                            for index in indexes
+                        ),
+                        input_durations=tuple(
+                            max(
+                                0.0,
+                                float(
+                                    candidates[index].get(
+                                        "offset",
+                                        candidate_onset,
+                                    )
+                                )
+                                - float(candidates[index]["onset"]),
+                            )
                             for index in indexes
                         ),
                     )

@@ -21,6 +21,53 @@ from .schema import TrackAnnotation, load_manifest
 CACHE_STORAGE_DTYPE = np.float16
 
 
+def augment_cqt_features(
+    features: np.ndarray,
+    *,
+    noise_std: float = 0.0,
+    frequency_mask_bins: int = 0,
+    contrast_range: float = 0.0,
+    spectral_tilt: float = 0.0,
+) -> np.ndarray:
+    if features.ndim != 2:
+        raise ValueError("CQT features must have shape [frames, bins]")
+    if noise_std < 0:
+        raise ValueError("feature noise must be non-negative")
+    if frequency_mask_bins < 0:
+        raise ValueError("frequency mask bins must be non-negative")
+    if not 0 <= contrast_range < 1:
+        raise ValueError("feature contrast range must be in [0, 1)")
+    if spectral_tilt < 0:
+        raise ValueError("spectral tilt must be non-negative")
+    result = np.asarray(features, dtype=np.float32).copy()
+    if contrast_range:
+        contrast = np.random.uniform(
+            1 - contrast_range,
+            1 + contrast_range,
+        )
+        result = (result - 0.5) * contrast + 0.5
+    if spectral_tilt:
+        tilt = np.random.uniform(-spectral_tilt, spectral_tilt)
+        result += tilt * np.linspace(
+            -1,
+            1,
+            result.shape[1],
+            dtype=np.float32,
+        )[None, :]
+    if noise_std:
+        result += np.random.normal(
+            0,
+            noise_std,
+            result.shape,
+        ).astype(np.float32)
+    maximum_mask = min(frequency_mask_bins, result.shape[1])
+    if maximum_mask:
+        width = np.random.randint(1, maximum_mask + 1)
+        start = np.random.randint(0, result.shape[1] - width + 1)
+        result[:, start : start + width] = 0
+    return np.clip(result, 0, 1).astype(np.float32)
+
+
 @dataclass(frozen=True)
 class WindowIndex:
     annotation_index: int
@@ -40,6 +87,11 @@ class GuitarTabDataset(Dataset[dict[str, Tensor | str | float]]):
         pitch_shift_probability: float = 0.0,
         pitch_shift_min: int = 1,
         pitch_shift_max: int = 3,
+        feature_augmentation_probability: float = 0.0,
+        feature_noise_std: float = 0.0,
+        feature_frequency_mask_bins: int = 0,
+        feature_contrast_range: float = 0.0,
+        feature_spectral_tilt: float = 0.0,
     ) -> None:
         self.manifest_path = manifest_path.resolve()
         self.feature_config = feature_config or FeatureConfig()
@@ -52,6 +104,23 @@ class GuitarTabDataset(Dataset[dict[str, Tensor | str | float]]):
         self.pitch_shift_probability = pitch_shift_probability
         self.pitch_shift_min = pitch_shift_min
         self.pitch_shift_max = pitch_shift_max
+        if not 0 <= feature_augmentation_probability <= 1:
+            raise ValueError("feature augmentation probability must be in 0..1")
+        if feature_noise_std < 0:
+            raise ValueError("feature noise must be non-negative")
+        if feature_frequency_mask_bins < 0:
+            raise ValueError("frequency mask bins must be non-negative")
+        if not 0 <= feature_contrast_range < 1:
+            raise ValueError("feature contrast range must be in [0, 1)")
+        if feature_spectral_tilt < 0:
+            raise ValueError("feature spectral tilt must be non-negative")
+        self.feature_augmentation_probability = (
+            feature_augmentation_probability
+        )
+        self.feature_noise_std = feature_noise_std
+        self.feature_frequency_mask_bins = feature_frequency_mask_bins
+        self.feature_contrast_range = feature_contrast_range
+        self.feature_spectral_tilt = feature_spectral_tilt
         self.feature_cache_directory = (
             feature_cache_directory.resolve()
             if feature_cache_directory is not None
@@ -406,6 +475,17 @@ class GuitarTabDataset(Dataset[dict[str, Tensor | str | float]]):
             shifted_features[:, bin_shift:] = padded_features[:, :-bin_shift]
             padded_features = shifted_features
             fret_targets[fret_targets > 0] += pitch_shift
+        if (
+            self.feature_augmentation_probability
+            and random.random() < self.feature_augmentation_probability
+        ):
+            padded_features = augment_cqt_features(
+                padded_features,
+                noise_std=self.feature_noise_std,
+                frequency_mask_bins=self.feature_frequency_mask_bins,
+                contrast_range=self.feature_contrast_range,
+                spectral_tilt=self.feature_spectral_tilt,
+            )
         return {
             "features": torch.from_numpy(padded_features),
             "fret_targets": torch.from_numpy(fret_targets),

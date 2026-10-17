@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path'
+import { runtimeDataRoot } from './runtime.js'
 
 const REVIEW_NAME_PATTERN = /^(?:real-reference|residual-onset)-\d{2}$/
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
@@ -161,11 +162,11 @@ function requiredChecksForReview(
 }
 
 export function defaultReviewRoot(): string {
-  return resolve(process.cwd(), 'data', 'training', 'reviews')
+  return resolve(runtimeDataRoot(), 'training', 'reviews')
 }
 
 function defaultProjectRoot(): string {
-  return resolve(process.cwd(), 'data', 'state', 'projects')
+  return resolve(runtimeDataRoot(), 'state', 'projects')
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

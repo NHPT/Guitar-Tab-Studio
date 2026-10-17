@@ -223,6 +223,7 @@ def main() -> None:
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--repeat-interval", type=float, default=0.75)
     parser.add_argument("--temporal-context", action="store_true")
+    parser.add_argument("--extended-temporal-context", action="store_true")
     parser.add_argument("--temporal-max-interval", type=float, default=2.0)
     parser.add_argument("--initialize-from", type=Path)
     parser.add_argument(
@@ -262,6 +263,11 @@ def main() -> None:
         parser.error("loss weights must be non-negative with repeat enabled")
     if arguments.temporal_max_interval <= 0:
         parser.error("--temporal-max-interval must be positive")
+    if arguments.temporal_context and arguments.extended_temporal_context:
+        parser.error(
+            "--temporal-context and --extended-temporal-context "
+            "cannot be combined"
+        )
     try:
         dataset_sampling_weights = parse_dataset_sampling_weights(
             arguments.dataset_sampling_weight
@@ -297,7 +303,13 @@ def main() -> None:
         hidden_size=arguments.hidden_size,
         dropout=arguments.dropout,
         repeat_interval=arguments.repeat_interval,
-        temporal_feature_count=6 if arguments.temporal_context else 0,
+        temporal_feature_count=(
+            12
+            if arguments.extended_temporal_context
+            else 6
+            if arguments.temporal_context
+            else 0
+        ),
         temporal_max_interval=arguments.temporal_max_interval,
     )
     train_dataset = CandidateActivityDataset(

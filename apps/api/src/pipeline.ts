@@ -1,9 +1,17 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { accessSync, constants } from 'node:fs'
-import { mkdir, readFile, rm } from 'node:fs/promises'
-import { dirname, relative, resolve, sep } from 'node:path'
+import { mkdir, open, readFile, readdir, rm } from 'node:fs/promises'
+import { basename, dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  guitarGestures,
+  detectStandardAudioSignature,
+  parseAnalysisDocument,
+  requiresAuthorizedMediaDecode,
+  STUDIO_PROJECT_SCHEMA_VERSION,
+  type AnalysisDocument,
+} from '@gts/core'
 import type {
   AnalysisJob,
   CapabilityState,
@@ -13,21 +21,29 @@ import type {
   StudioProject,
   TabBeat,
   TabMeasure,
-  TabNote,
   Technique,
   TechniqueCandidate,
-  TechniqueModelInfo,
-  TranscriptionModelInfo,
   TrackRole,
-  VisualizationPoint,
 } from './types.js'
 import type {
   InferenceDeploymentPolicy,
   InferenceObservation,
 } from './community.js'
+import {
+  decodeAuthorizedMediaLocally,
+  localAuthorizedMediaDecoderAvailable,
+} from './authorized-media.js'
+import {
+  builtinDemoAnalysis,
+  builtinDemoStemFilenames,
+} from './builtin-demo.js'
+import { runtimeDataRoot } from './runtime.js'
 
 export interface PipelineExecutionOptions {
   deployment?: InferenceDeploymentPolicy
+  signal?: AbortSignal
+  timeoutMs?: number
+  skipShadow?: boolean
   onInferenceObservation?: (
     observation: Omit<InferenceObservation, 'id' | 'recordedAt'>,
   ) => void
@@ -85,55 +101,77 @@ export function resolveInferenceExecution(
   }
 }
 
-interface WorkerTechniqueCandidate {
-  technique: Technique
-  confidence: number
-  evidence: string[]
-}
-
-interface WorkerNote {
-  start: number
-  end: number
-  pitch: number
-  velocity: number
-  string: 1 | 2 | 3 | 4 | 5 | 6
-  fret: number
-  technique: Technique
-  harmonic_type?: 'natural' | 'artificial' | null
-  harmonic_touch_fret?: number | null
-  confidence: number
-  position_confidence?: number
-  position_source?: string
-  technique_confidence?: number
-  technique_source?: string
-  technique_evidence?: string[]
-  technique_candidates?: WorkerTechniqueCandidate[]
-  related_note_index?: number | null
-}
-
-export interface WorkerAnalysis {
+export type WorkerAnalysis = Omit<AnalysisDocument, 'version'> & {
   version: number
-  transcription_model?: TranscriptionModelInfo
-  technique_model?: TechniqueModelInfo
-  metadata?: {
-    title?: string
-    artist?: string
-    duration?: number
-    webpage_url?: string
+}
+
+export interface WorkerProgress {
+  progress: number
+  status: Extract<
+    AnalysisJob['status'],
+    'acquiring' | 'separating' | 'transcribing' | 'mapping'
+  >
+  stageLabel: string
+}
+
+export function parseWorkerProgress(line: string): WorkerProgress | null {
+  try {
+    const message = JSON.parse(line) as {
+      type?: string
+      progress?: number
+      status?: WorkerProgress['status']
+      stageLabel?: string
+    }
+    if (
+      message.type !== 'gts-progress' ||
+      !Number.isFinite(message.progress) ||
+      !['acquiring', 'separating', 'transcribing', 'mapping'].includes(
+        message.status ?? '',
+      ) ||
+      typeof message.stageLabel !== 'string'
+    ) {
+      return null
+    }
+    return {
+      progress: Math.max(0, Math.min(99, message.progress!)),
+      status: message.status!,
+      stageLabel: message.stageLabel,
+    }
+  } catch {
+    return null
   }
-  bpm: number
-  beats?: number[]
-  onsets?: number[]
-  stems: Partial<Record<TrackRole, string>>
-  levels?: Partial<Record<TrackRole, number>>
-  waveforms?: Partial<Record<TrackRole, number[]>>
-  visualization?: VisualizationPoint[]
-  notes: WorkerNote[]
-  chords: Array<{ start: number; duration: number; chord: string }>
-  warnings: string[]
+}
+
+export function describeWorkerFailure(
+  stderr: string,
+  code: number | null,
+): string {
+  if (
+    /no space left on device|errno\s*28|可用磁盘空间不足/iu.test(stderr)
+  ) {
+    return '可用磁盘空间不足，无法完成音轨分离。请释放更多磁盘空间后重试。'
+  }
+  const detail =
+    stderr
+      .split(/\r?\n/u)
+      .reverse()
+      .map((line) =>
+        /^(?:RuntimeError|ValueError|FileNotFoundError|OSError):\s*(.+)$/u.exec(
+          line.trim(),
+        )?.[1]?.trim(),
+      )
+      .find(Boolean) ?? ''
+  if (/command failed.*demucs\.separate/iu.test(detail)) {
+    return '音轨分离进程异常退出。请确认磁盘空间充足后重试。'
+  }
+  if (detail && !/[\\/](?:Users|home|var|tmp|private)[\\/]/u.test(detail)) {
+    return detail.slice(0, 500)
+  }
+  return `媒体分析进程异常退出${code === null ? '' : `（代码 ${code}）`}`
 }
 
 const projectRoot = fileURLToPath(new URL('../../../', import.meta.url))
+const DEFAULT_INFERENCE_TIMEOUT_MS = 2 * 60 * 60 * 1000
 
 function executableFile(path: string): boolean {
   try {
@@ -173,27 +211,88 @@ export const platforms: PlatformDescriptor[] = [
     label: '哔哩哔哩',
     hosts: ['bilibili.com', 'b23.tv', 'bili2233.cn'],
     acquisition: 'public-media',
-    note: '仅处理公开且用户有权使用的非 DRM 媒体。',
+    note: '支持提取器能够直接读取的音视频页面。',
   },
   {
     id: 'douyin',
     label: '抖音',
     hosts: ['douyin.com', 'iesdouyin.com'],
     acquisition: 'public-media',
-    note: '公开页面可交给已配置的媒体 worker，登录内容不抓取。',
+    note: '支持提取器能够直接读取的公开视频页面。',
   },
   {
     id: 'netease',
     label: '网易云音乐',
     hosts: ['music.163.com', 'y.music.163.com', '163cn.tv', '163.fm'],
     acquisition: 'public-media',
-    note: '尝试处理无需登录即可取得的公开非 DRM 媒体，受版权保护的音频不抓取。',
+    note: '支持可直接返回标准音频流的歌曲链接。',
+  },
+  {
+    id: 'qqmusic',
+    label: 'QQ 音乐',
+    hosts: ['y.qq.com', 'c.y.qq.com'],
+    acquisition: 'public-media',
+    note: '支持可直接返回标准音频流的歌曲链接；登录曲目需配置会话。',
+  },
+  {
+    id: 'youtube',
+    label: 'YouTube',
+    hosts: ['youtube.com', 'youtu.be', 'youtube-nocookie.com'],
+    acquisition: 'public-media',
+    note: '支持视频、Shorts 与音乐链接；登录或风控页面需配置会话。',
+  },
+  {
+    id: 'vimeo',
+    label: 'Vimeo',
+    hosts: ['vimeo.com'],
+    acquisition: 'public-media',
+    note: '支持无需登录即可访问的公开视频。',
+  },
+  {
+    id: 'soundcloud',
+    label: 'SoundCloud',
+    hosts: ['soundcloud.com', 'on.soundcloud.com'],
+    acquisition: 'public-media',
+    note: '支持提取器能够直接读取的曲目、集合与播放列表。',
+  },
+  {
+    id: 'bandcamp',
+    label: 'Bandcamp',
+    hosts: ['bandcamp.com'],
+    acquisition: 'public-media',
+    note: '支持创作者公开提供试听的曲目与专辑。',
+  },
+  {
+    id: 'jamendo',
+    label: 'Jamendo',
+    hosts: ['jamendo.com', 'jamen.do'],
+    acquisition: 'public-media',
+    note: '支持可直接返回标准媒体流的曲目。',
+  },
+  {
+    id: 'audius',
+    label: 'Audius',
+    hosts: ['audius.co'],
+    acquisition: 'public-media',
+    note: '支持公开曲目、专辑和播放列表。',
+  },
+  {
+    id: 'internet-archive',
+    label: 'Internet Archive',
+    hosts: ['archive.org'],
+    acquisition: 'public-media',
+    note: '支持可直接访问的音视频馆藏。',
+  },
+  {
+    id: 'wikimedia',
+    label: 'Wikimedia Commons',
+    hosts: ['commons.wikimedia.org', 'upload.wikimedia.org'],
+    acquisition: 'public-media',
+    note: '支持媒体页面与文件直链。',
   },
 ]
 
 const unsupportedMusicHosts = [
-  'y.qq.com',
-  'c.y.qq.com',
   'qishui.douyin.com',
   'music.douyin.com',
   'qishui.com',
@@ -207,6 +306,15 @@ export function normalizeSharedUrl(input: string): string {
   const parsed = new URL(withProtocol)
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     throw new Error('仅支持 HTTP 或 HTTPS 链接')
+  }
+  if (
+    parsed.hostname.toLowerCase() === 'y.qq.com' &&
+    parsed.pathname.startsWith('/n/ryqq_v2/songDetail/')
+  ) {
+    parsed.pathname = parsed.pathname.replace(
+      '/n/ryqq_v2/songDetail/',
+      '/n/ryqq/songDetail/',
+    )
   }
   return parsed.toString()
 }
@@ -255,243 +363,61 @@ export function getCapabilities(): CapabilityState {
     ffprobe,
     ytDlp,
     worker,
+    localAuthorizedMediaDecoder: localAuthorizedMediaDecoderAvailable(),
     mode: worker ? 'inference' : ffmpeg || ytDlp ? 'hybrid' : 'demo',
   }
 }
 
-const chordShapes: Record<string, Array<[1 | 2 | 3 | 4 | 5 | 6, number]>> = {
-  Em: [
-    [6, 0],
-    [5, 2],
-    [4, 2],
-    [3, 0],
-    [2, 0],
-    [1, 0],
-  ],
-  G: [
-    [6, 3],
-    [5, 2],
-    [4, 0],
-    [3, 0],
-    [2, 0],
-    [1, 3],
-  ],
-  C: [
-    [5, 3],
-    [4, 2],
-    [3, 0],
-    [2, 1],
-    [1, 0],
-  ],
-  D: [
-    [4, 0],
-    [3, 2],
-    [2, 3],
-    [1, 2],
-  ],
-}
-
-const techniqueSequence: Technique[] = [
-  'pick',
-  'hammer-on',
-  'pull-off',
-  'slide',
-  'harmonic',
-  'palm-mute',
-  'dead-note',
-  'slap',
-  'tremolo',
-  'body-tap',
-]
-
-function seededValue(seed: string, index: number): number {
-  const digest = createHash('sha256').update(`${seed}:${index}`).digest()
-  return digest[index % digest.length] / 255
-}
-
-function buildWaveform(role: TrackRole): number[] {
-  return Array.from({ length: 120 }, (_, index) => {
-    const base = seededValue(role, index)
-    const pulse = index % 15 < 3 ? 0.28 : 0
-    const roleScale = role === 'drums' ? 0.95 : role === 'guitar' ? 0.78 : 0.58
-    return Math.min(1, 0.08 + (base * 0.58 + pulse) * roleScale)
-  })
-}
-
-function clamp01(value: number): number {
-  return Math.max(0, Math.min(1, value))
-}
-
-function buildVisualization(pointCount = 720): VisualizationPoint[] {
-  return Array.from({ length: pointCount }, (_, index) => {
-    const beat = index % 90
-    const impact = beat < 5 ? 0.82 * (1 - beat / 5) : 0
-    const phrase = 0.35 + seededValue('visual', index) * 0.45
-    const energy = clamp01(phrase + impact * 0.35)
-    const pitch = clamp01(0.28 + seededValue('pitch', Math.floor(index / 12)) * 0.44)
-    return {
-      energy: Number(energy.toFixed(4)),
-      pitch: Number(pitch.toFixed(4)),
-      low: Number(clamp01(0.32 + impact * 0.62).toFixed(4)),
-      mid: Number(clamp01(energy * 0.74).toFixed(4)),
-      high: Number(clamp01(energy * 0.38).toFixed(4)),
-      impact: Number(impact.toFixed(4)),
-    }
-  })
-}
-
-function buildMeasures(bpm: number): TabMeasure[] {
-  const beatDuration = 60 / bpm
-  const measureDuration = beatDuration * 4
-  const progression = ['Em', 'G', 'C', 'D', 'Em', 'G', 'C', 'D']
-  const lyrics = [
-    '沿着节拍 慢慢靠近',
-    '听见琴弦 清楚回应',
-    '每个和弦 留下位置',
-    '下一小节 继续前行',
-    '拨动旋律 跟随呼吸',
-    '扫过节奏 保持稳定',
-    '反复练习 记住声音',
-    '回到开头 再弹一次',
-  ]
-
-  return progression.map((chord, measureIndex) => {
-    const shape = chordShapes[chord]
-    const beats = Array.from({ length: 4 }, (_, beatIndex): TabBeat => {
-      const direction: 'down' | 'up' = beatIndex % 2 === 0 ? 'down' : 'up'
-      const picked = beatIndex < 2
-      const selected = picked
-        ? [shape[(beatIndex * 2) % shape.length], shape[(beatIndex * 2 + 2) % shape.length]]
-        : shape
-      const notes: TabNote[] = selected.map(([string, fret], noteIndex) => {
-        const technique =
-          picked && noteIndex === selected.length - 1
-            ? techniqueSequence[(measureIndex + beatIndex) % techniqueSequence.length]
-            : direction === 'down'
-              ? 'strum-down'
-              : 'strum-up'
-        const harmonicType =
-          technique === 'harmonic'
-            ? measureIndex % 2 === 0
-              ? 'natural'
-              : 'artificial'
-            : undefined
-
-        return {
-          id: `m${measureIndex + 1}-b${beatIndex + 1}-n${noteIndex + 1}`,
-          string,
-          fret:
-            technique === 'harmonic'
-              ? harmonicType === 'natural'
-                ? 12
-                : 7
-              : fret,
-          at: measureIndex * measureDuration + beatIndex * beatDuration,
-          duration: picked ? beatDuration * 0.72 : beatDuration * 0.86,
-          technique,
-          harmonicType,
-          harmonicTouchFret:
-            harmonicType === 'artificial' ? 19 : undefined,
-          confidence: Number((0.68 + seededValue(chord, measureIndex * 12 + beatIndex + noteIndex) * 0.28).toFixed(2)),
-          positionConfidence: Number(
-            (
-              0.64 +
-              seededValue(
-                `position-${chord}`,
-                measureIndex * 12 + beatIndex + noteIndex,
-              ) *
-                0.3
-            ).toFixed(2),
-          ),
-          positionSource:
-            technique === 'harmonic'
-              ? 'harmonic-optimizer-v1'
-              : 'playable-optimizer-v2',
-          techniqueConfidence: Number(
-            (
-              0.62 +
-              seededValue(
-                `technique-${chord}`,
-                measureIndex * 12 + beatIndex + noteIndex,
-              ) *
-                0.3
-            ).toFixed(2),
-          ),
-          techniqueSource: 'demo',
-          techniqueEvidence: ['demo-fixture'],
-          techniqueCandidates: [
-            {
-              technique,
-              confidence: Number(
-                (
-                  0.62 +
-                  seededValue(
-                    `technique-${chord}`,
-                    measureIndex * 12 + beatIndex + noteIndex,
-                  ) *
-                    0.3
-                ).toFixed(2),
-              ),
-              evidence: ['demo-fixture'],
-            },
-          ],
-        }
-      })
-
-      return {
-        at: measureIndex * measureDuration + beatIndex * beatDuration,
-        duration: beatDuration,
-        direction,
-        style:
-          notes.some((note) => note.technique === 'tremolo')
-            ? 'tremolo'
-            : !picked && measureIndex % 4 === 1 && beatIndex === 2
-            ? 'arpeggio'
-            : !picked && measureIndex % 4 === 2 && beatIndex === 3
-              ? 'rasgueado'
-              : !picked
-                ? 'strum'
-                : 'pick',
-        notes,
-      }
-    })
-
-    return {
-      number: measureIndex + 1,
-      start: measureIndex * measureDuration,
-      duration: measureDuration,
-      chord,
-      section: measureIndex === 0 ? '前奏' : measureIndex === 4 ? '主歌' : undefined,
-      lyric: lyrics[measureIndex],
-      beats,
-    }
-  })
-}
-
 export function createStudioProject(
   source: SourceDescriptor,
-  title = '午夜练习段落',
+  title = builtinDemoAnalysis.metadata?.title ?? 'Wayfaring Stranger',
 ): StudioProject {
-  const bpm = 96
-  const measures = buildMeasures(bpm)
-  const duration = measures.reduce((sum, measure) => sum + measure.duration, 0)
+  const analysis = builtinDemoAnalysis
+  const tab = tabFromWorker(analysis)
+  tab.capo = analysis.capo ?? 0
+  tab.measures.forEach((measure, index) => {
+    measure.section = index === 0 ? '前奏' : undefined
+  })
+  const duration =
+    analysis.metadata?.duration ??
+    tab.measures.reduce(
+      (maximum, measure) =>
+        Math.max(maximum, measure.start + measure.duration),
+      0,
+    )
+  const separatedGuitars = (analysis.stem_tracks ?? []).filter(
+    (track) => track.role === 'guitar',
+  )
   return {
+    schemaVersion: STUDIO_PROJECT_SCHEMA_VERSION,
     id: randomUUID(),
     title,
-    artist: '本地分析',
+    artist: analysis.metadata?.artist ?? '未知艺术家',
     source,
-    bpm,
-    key: 'E minor',
+    bpm: analysis.bpm,
+    key: analysis.key ?? 'Unknown',
     duration,
     createdAt: new Date().toISOString(),
     analysisMode: 'demo',
-    techniqueModel: {
-      name: 'stringtrace-demo-fixture',
-      version: 'demo-1',
-      kind: 'heuristic',
-      labels: techniqueSequence,
-    },
-    visualization: buildVisualization(),
+    transcriptionModel: analysis.transcription_model,
+    techniqueModel: analysis.technique_model
+      ? {
+          ...analysis.technique_model,
+          labels: [
+            ...new Set([
+              ...analysis.technique_model.labels,
+              'strum-up' as const,
+              'strum-down' as const,
+            ]),
+          ],
+        }
+      : {
+          name: 'ordered-string-attacks',
+          version: 'heuristic-v1',
+          kind: 'heuristic',
+          labels: ['unknown', 'strum-up', 'strum-down'],
+        },
+    visualization: analysis.visualization,
     tracks: [
       ['vocals', '人声', '#ef7d5f'],
       ['guitar', '吉他', '#19c37d'],
@@ -499,37 +425,55 @@ export function createStudioProject(
       ['drums', '鼓组', '#f2b84b'],
       ['piano', '键盘', '#9673d3'],
       ['other', '其他', '#8d92a1'],
-    ].map(([role, name, color]) => ({
-      id: role,
-      role: role as TrackRole,
-      name,
-      color,
-      url: null,
-      waveform: buildWaveform(role as TrackRole),
-      available: ['guitar', 'bass', 'drums'].includes(role),
-    })),
-    tab: {
-      tuning: ['E4', 'B3', 'G3', 'D3', 'A2', 'E2'],
-      capo: 0,
-      measures,
-    },
-    warnings: [
-      '当前为演示识别结果；配置 GTS_WORKER_COMMAND 后启用真实模型。',
-      '演奏技法是带置信度的建议，需要人工校对。',
-    ],
+    ].flatMap(([role, name, color]) => {
+      if (role === 'guitar' && separatedGuitars.length > 1) {
+        return separatedGuitars.map((part, index) => ({
+          id: part.id,
+          role: 'guitar' as const,
+          name: part.name,
+          color: ['#19c37d', '#d97706', '#2563eb'][index % 3],
+          url: `/media/builtin/${part.path}`,
+          waveform: part.waveform ?? [],
+          level: part.level,
+          available: true,
+        }))
+      }
+      const filename =
+        builtinDemoStemFilenames[role as keyof typeof builtinDemoStemFilenames]
+      return [{
+        id: role,
+        role: role as TrackRole,
+        name,
+        color,
+        url: filename ? `/media/builtin/${filename}` : null,
+        waveform: analysis.waveforms?.[role as TrackRole] ?? [],
+        level: analysis.levels?.[role as TrackRole],
+        available: Boolean(filename),
+      }]
+    }),
+    tab,
+    warnings: analysis.warnings,
   }
 }
 
 export function tabFromWorker(analysis: WorkerAnalysis): StudioProject['tab'] {
   const bpm = analysis.bpm > 0 ? analysis.bpm : 120
+  const timeSignature: StudioProject['tab']['timeSignature'] =
+    analysis.time_signature ?? [4, 4]
+  const beatsPerMeasure = timeSignature[0]
   const beatDuration = 60 / bpm
-  const measureDuration = beatDuration * 4
+  const measureDuration = beatDuration * beatsPerMeasure
   const noteDuration = analysis.notes.reduce((maximum, note) => Math.max(maximum, note.end), 0)
   const chordDuration = analysis.chords.reduce(
     (maximum, chord) => Math.max(maximum, chord.start + chord.duration),
     0,
   )
-  const duration = Math.max(noteDuration, chordDuration, measureDuration)
+  const duration = Math.max(
+    noteDuration,
+    chordDuration,
+    analysis.metadata?.duration ?? 0,
+    measureDuration,
+  )
   const detectedBeats = (analysis.beats ?? [])
     .filter((beat) => Number.isFinite(beat) && beat >= 0)
     .sort((left, right) => left - right)
@@ -559,14 +503,14 @@ export function tabFromWorker(analysis: WorkerAnalysis): StudioProject['tab'] {
   const measureCount = Math.max(
     1,
     Array.from(
-      { length: Math.ceil(beatStarts.length / 4) },
-      (_, index) => index * 4,
-    ).filter((beatIndex) => beatStarts[beatIndex] < duration).length,
+      { length: Math.ceil(beatStarts.length / beatsPerMeasure) },
+      (_, index) => index * beatsPerMeasure,
+    ).filter((beatIndex) => beatStarts[beatIndex] < duration - 0.05).length,
   )
   const measures: TabMeasure[] = Array.from({ length: measureCount }, (_, measureIndex) => {
-    const firstBeatIndex = measureIndex * 4
+    const firstBeatIndex = measureIndex * beatsPerMeasure
     const start = beatStarts[firstBeatIndex]
-    const end = beatStarts[firstBeatIndex + 4]
+    const end = beatStarts[firstBeatIndex + beatsPerMeasure]
     const chord =
       analysis.chords.find(
         (candidate) => candidate.start <= start && candidate.start + candidate.duration > start,
@@ -583,7 +527,7 @@ export function tabFromWorker(analysis: WorkerAnalysis): StudioProject['tab'] {
           : measureIndex % 16 === 0
             ? `段落 ${Math.floor(measureIndex / 16) + 1}`
             : undefined,
-      beats: Array.from({ length: 4 }, (_, beatIndex): TabBeat => ({
+      beats: Array.from({ length: beatsPerMeasure }, (_, beatIndex): TabBeat => ({
         at: beatStarts[firstBeatIndex + beatIndex],
         duration:
           beatStarts[firstBeatIndex + beatIndex + 1] -
@@ -594,73 +538,39 @@ export function tabFromWorker(analysis: WorkerAnalysis): StudioProject['tab'] {
     }
   })
 
-  const detectedOnsets = (analysis.onsets ?? [])
-    .filter((onset) => Number.isFinite(onset) && onset >= 0)
-    .sort((left, right) => left - right)
-  const notationTimeFor = (start: number) => {
-    if (detectedOnsets.length === 0) return start
-    let lowerBound = 0
-    let upperBound = detectedOnsets.length
-    while (lowerBound < upperBound) {
-      const middle = Math.floor((lowerBound + upperBound) / 2)
-      if (detectedOnsets[middle] < start) {
-        lowerBound = middle + 1
-      } else {
-        upperBound = middle
-      }
-    }
-    const candidates = [
-      detectedOnsets[Math.max(0, lowerBound - 1)],
-      detectedOnsets[Math.min(detectedOnsets.length - 1, lowerBound)],
-    ]
-    const nearest = candidates.reduce((best, candidate) =>
-      Math.abs(candidate - start) < Math.abs(best - start) ? candidate : best,
-    )
-    return Math.abs(nearest - start) <= 0.08 ? nearest : start
-  }
-
-  analysis.notes.forEach((workerNote, index) => {
-    const notationAt = notationTimeFor(workerNote.start)
+  const beatIndexAt = (at: number) => {
     let beatLowerBound = 0
     let beatUpperBound = beatStarts.length
     while (beatLowerBound < beatUpperBound) {
       const middle = Math.floor((beatLowerBound + beatUpperBound) / 2)
-      if (beatStarts[middle] <= notationAt) {
+      if (beatStarts[middle] <= at) {
         beatLowerBound = middle + 1
       } else {
         beatUpperBound = middle
       }
     }
-    const previousBeatIndex = Math.max(0, beatLowerBound - 1)
-    const nextBeatIndex = Math.min(beatStarts.length - 1, beatLowerBound)
-    const nextBeatDistance = beatStarts[nextBeatIndex] - notationAt
-    const previousBeatDuration =
-      beatStarts[Math.min(beatStarts.length - 1, previousBeatIndex + 1)] -
-      beatStarts[previousBeatIndex]
-    const absoluteBeatIndex =
-      nextBeatIndex > previousBeatIndex &&
-      nextBeatDistance >= 0 &&
-      nextBeatDistance <= previousBeatDuration * 0.1
-        ? nextBeatIndex
-        : previousBeatIndex
-    const measureIndex = Math.min(
-      measures.length - 1,
-      Math.floor(absoluteBeatIndex / 4),
+    return Math.max(
+      0,
+      Math.min(measures.length * beatsPerMeasure - 1, beatLowerBound - 1),
     )
-    const beatIndex = Math.min(3, absoluteBeatIndex % 4)
-    const beat = measures[measureIndex].beats[beatIndex]
+  }
+  const beatDurationAt = (at: number) => {
+    const index = beatIndexAt(at)
+    return beatStarts[index + 1] - beatStarts[index]
+  }
+  const notes: TabBeat['notes'] = analysis.notes.map((workerNote, index) => {
     const techniqueCandidates: TechniqueCandidate[] =
       workerNote.technique_candidates?.map((candidate) => ({
         technique: candidate.technique,
         confidence: candidate.confidence,
         evidence: candidate.evidence,
       })) ?? []
-    beat.notes.push({
+    return {
       id: `worker-${index + 1}`,
       string: workerNote.string,
       fret: workerNote.fret,
       at: workerNote.start,
-      notationAt,
+      notationAt: workerNote.start,
       duration: Math.max(0.04, workerNote.end - workerNote.start),
       technique: workerNote.technique,
       harmonicType: workerNote.harmonic_type ?? undefined,
@@ -685,74 +595,61 @@ export function tabFromWorker(analysis: WorkerAnalysis): StudioProject['tab'] {
         typeof workerNote.related_note_index === 'number'
           ? `worker-${workerNote.related_note_index + 1}`
           : undefined,
-    })
+    }
   })
 
+  const gestures = guitarGestures(notes, beatDurationAt)
+  const gestureByNote = new Map(
+    gestures.flatMap((gesture) => gesture.notes.map((note) => [note.id, gesture] as const)),
+  )
+  for (const note of notes) {
+    const gesture = gestureByNote.get(note.id)
+    const anchor = gesture?.at ?? note.at
+    const index = beatIndexAt(anchor)
+    // Quantize only to a nearby beat (<= 20ms); never snap successive strings
+    // to a broadband attack and destroy the evidence of sweep direction.
+    const nearestBeat = [beatStarts[index], beatStarts[index + 1]]
+      .reduce((best, at) => Math.abs(at - anchor) < Math.abs(best - anchor) ? at : best)
+    const notationAnchor = Math.abs(nearestBeat - anchor) <= 0.02 ? nearestBeat : anchor
+    const performedNotationAt =
+      gesture?.style === 'arpeggio' ? note.at : notationAnchor
+    if (gesture?.style === 'strum') {
+      note.technique = gesture.direction === 'up' ? 'strum-up' : 'strum-down'
+      note.techniqueConfidence = Math.min(0.82, ...gesture.notes.map((item) => item.confidence))
+      note.techniqueSource = 'ordered-string-attacks-v1'
+      note.techniqueEvidence = [
+        `ordered-strings:${gesture.notes.map((item) => item.string).join(',')}`,
+        `spread-ms:${Math.round((gesture.notes.at(-1)!.at - gesture.at) * 1000)}`,
+      ]
+    }
+    const physicalIndex = beatIndexAt(performedNotationAt)
+    const earlyBy = beatStarts[physicalIndex + 1] - performedNotationAt
+    // A slightly anticipated beat belongs to its notated beat. Keep the
+    // performance timestamp, and make this decision once for the whole sweep.
+    const assignedIndex = Math.min(
+      measures.length * beatsPerMeasure - 1,
+      earlyBy >= 0 && earlyBy <= beatDurationAt(performedNotationAt) * 0.16
+        ? physicalIndex + 1
+        : physicalIndex,
+    )
+    note.notationAt =
+      performedNotationAt < beatStarts[0] || assignedIndex !== physicalIndex
+        ? beatStarts[assignedIndex]
+        : performedNotationAt
+    const beat = measures[
+      Math.floor(assignedIndex / beatsPerMeasure)
+    ].beats[assignedIndex % beatsPerMeasure]
+    beat.notes.push(note)
+  }
   measures.forEach((measure) => {
     measure.beats.forEach((beat) => {
-      const notes = [...beat.notes].sort((left, right) => left.at - right.at)
-      const uniqueStrings = new Set(notes.map((note) => note.string))
-      const spread = notes.length > 1 ? notes.at(-1)!.at - notes[0].at : 0
-      const stringDeltas = notes
-        .slice(1)
-        .map((note, index) => note.string - notes[index].string)
-        .filter((delta) => delta !== 0)
-      const direction = Math.sign(stringDeltas[0] ?? 0)
-      const directionalRun =
-        stringDeltas.length >= 2 &&
-        direction !== 0 &&
-        stringDeltas.every(
-          (delta) => Math.sign(delta) === direction && Math.abs(delta) <= 3,
-        )
-      const maximumOnsetGap = notes
-        .slice(1)
-        .reduce(
-          (maximum, note, index) =>
-            Math.max(maximum, note.at - notes[index].at),
-          0,
-        )
-      const containsLegato = notes.some((note) =>
-        ['hammer-on', 'pull-off', 'slide'].includes(note.technique),
-      )
-      const rapidRepeatedString =
-        notes.length >= 4 &&
-        uniqueStrings.size === 1 &&
-        maximumOnsetGap <= Math.min(0.14, beat.duration * 0.3)
-
-      if (
-        rapidRepeatedString ||
-        notes.filter((note) => note.technique === 'tremolo').length >= 2
-      ) {
+      const gesture = gestureByNote.get(beat.notes[0]?.id)
+      if (gesture && (gesture.style === 'arpeggio' || beat.notes.length === gesture.notes.length) &&
+        beat.notes.every((note) => gestureByNote.get(note.id) === gesture)) {
+        beat.style = gesture.style
+        beat.direction = gesture.direction
+      } else if (beat.notes.some((note) => note.technique === 'tremolo')) {
         beat.style = 'tremolo'
-        return
-      }
-      if (
-        uniqueStrings.size < 3 ||
-        containsLegato ||
-        !directionalRun ||
-        maximumOnsetGap > Math.min(0.18, beat.duration * 0.5)
-      ) {
-        beat.style = 'pick'
-        beat.direction = undefined
-        return
-      }
-
-      if (spread <= 0.035) {
-        beat.style = 'pick'
-        beat.direction = undefined
-        return
-      }
-
-      beat.direction = direction < 0 ? 'down' : 'up'
-      if (spread <= 0.14) {
-        beat.style = 'strum'
-      } else if (spread <= Math.min(0.26, beat.duration * 0.55) && notes.length >= 5) {
-        beat.style = 'rasgueado'
-      } else if (spread <= beat.duration * 0.85) {
-        beat.style = 'arpeggio'
-      } else {
-        beat.style = 'pick'
-        beat.direction = undefined
       }
     })
   })
@@ -760,11 +657,20 @@ export function tabFromWorker(analysis: WorkerAnalysis): StudioProject['tab'] {
   return {
     tuning: ['E4', 'B3', 'G3', 'D3', 'A2', 'E2'],
     capo: 0,
+    timeSignature,
+    vocalMelody: analysis.vocal_melody?.map((note, index) => ({
+      id: `vocal-${index + 1}`,
+      at: note.start,
+      duration: Math.max(0.04, note.end - note.start),
+      pitch: note.pitch,
+      confidence: note.confidence,
+    })),
+    lyrics: analysis.lyrics?.map((lyric) => ({ ...lyric })),
     measures,
   }
 }
 
-function workerProject(
+export function workerProject(
   analysis: WorkerAnalysis,
   source: SourceDescriptor,
   jobId: string,
@@ -775,39 +681,69 @@ function workerProject(
       (source.kind === 'upload' ? '未命名录音' : `${source.label} 导入`),
   )
   const tab = tabFromWorker(analysis)
-  const duration = tab.measures.reduce(
-    (maximum, measure) =>
-      Math.max(maximum, measure.start + measure.duration),
-    0,
+  const duration =
+    analysis.metadata?.duration ??
+    tab.measures.reduce(
+      (maximum, measure) =>
+        Math.max(maximum, measure.start + measure.duration),
+      0,
+    )
+  const dataRoot = runtimeDataRoot()
+  const separatedGuitars = (analysis.stem_tracks ?? []).filter(
+    (track) => track.role === 'guitar',
   )
-  const dataRoot = resolve(process.cwd(), 'data')
-  const maximumLevel = Math.max(0, ...Object.values(analysis.levels ?? {}))
+  const baseTrackTemplates = base.tracks.filter(
+    (track, index, tracks) =>
+      tracks.findIndex((candidate) => candidate.role === track.role) === index,
+  )
+  const trackUrl = (path: string | undefined) => {
+    const relativePath = path
+      ? relative(dataRoot, path).split(sep).join('/')
+      : ''
+    return relativePath.length > 0 && !relativePath.startsWith('..')
+      ? `/media/${relativePath}`
+      : null
+  }
 
   return {
     ...base,
     id: randomUUID(),
-    title: source.kind === 'upload' ? base.title : (analysis.metadata?.title ?? base.title),
-    artist: source.kind === 'upload' ? base.artist : (analysis.metadata?.artist ?? base.artist),
+    title: analysis.metadata?.title ?? base.title,
+    artist: analysis.metadata?.artist ?? base.artist,
     bpm: analysis.bpm,
+    key: analysis.key ?? 'Unknown',
     duration,
     analysisMode: 'inference',
     transcriptionModel: analysis.transcription_model,
     techniqueModel: analysis.technique_model,
+    provenance: undefined,
     visualization: analysis.visualization,
-    tracks: base.tracks.map((track) => {
+    tracks: baseTrackTemplates.flatMap((track) => {
+      if (track.role === 'guitar' && separatedGuitars.length > 1) {
+        return separatedGuitars.map((part, index) => {
+          const url = trackUrl(part.path)
+          return {
+            ...track,
+            id: part.id,
+            name: part.name,
+            color: ['#19c37d', '#d97706', '#2563eb'][index % 3],
+            url,
+            waveform: part.waveform ?? [],
+            level: part.level,
+            available: Boolean(url),
+          }
+        })
+      }
       const stemPath = analysis.stems[track.role]
-      const relativePath = stemPath ? relative(dataRoot, stemPath).split(sep).join('/') : ''
-      const isInsideDataRoot = relativePath.length > 0 && !relativePath.startsWith('..')
+      const url = trackUrl(stemPath)
       const level = analysis.levels?.[track.role]
-      return {
+      return [{
         ...track,
-        url: isInsideDataRoot ? `/media/${relativePath}` : null,
+        url,
         waveform: analysis.waveforms?.[track.role] ?? track.waveform,
         level,
-        available:
-          Boolean(stemPath) &&
-          (level === undefined || maximumLevel === 0 || level >= maximumLevel * 0.02),
-      }
+        available: Boolean(url),
+      }]
     }),
     tab,
     warnings: analysis.warnings,
@@ -826,19 +762,53 @@ function workerSourceArguments(job: AnalysisJob, inputPath?: string): string[] {
       : []
 }
 
-async function executeWorker(
+export function transcriptionWorkerArguments(
+  environment: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const requestedProvider = environment.GTS_TRANSCRIPTION_PROVIDER
+  const provider = [
+    'basic-pitch',
+    'muscriptor',
+    'guitar-specialist',
+    'multitrack-research',
+  ].includes(requestedProvider ?? '')
+    ? requestedProvider!
+    : 'basic-pitch'
+  const model = environment.GTS_TRANSCRIPTION_MODEL?.trim()
+  const variant = environment.GTS_TRANSCRIPTION_VARIANT
+  return [
+    '--transcription-provider',
+    provider,
+    ...((provider === 'muscriptor' ||
+      provider === 'multitrack-research') &&
+    model
+      ? ['--transcription-model', model]
+      : []),
+    ...(provider === 'muscriptor' &&
+    (variant === 'small' || variant === 'medium' || variant === 'large')
+      ? ['--transcription-variant', variant]
+      : []),
+  ]
+}
+
+export async function executeWorker(
   workerCommand: string,
   ffmpegCommand: string,
   sourceArguments: string[],
   outputRoot: string,
   modelPath?: string,
+  signal?: AbortSignal,
+  timeoutMs = DEFAULT_INFERENCE_TIMEOUT_MS,
+  onProgress?: (progress: WorkerProgress) => void,
 ): Promise<number> {
+  if (signal?.aborted) throw new Error('任务已取消')
   await mkdir(outputRoot, { recursive: true })
   const startedAt = Date.now()
   const argumentsList = [
     ...sourceArguments,
     '--output',
     outputRoot,
+    ...transcriptionWorkerArguments(),
     ...(modelPath ? ['--tab-model', modelPath] : []),
   ]
   await new Promise<void>((resolvePromise, rejectPromise) => {
@@ -846,28 +816,86 @@ async function executeWorker(
       ...process.env,
       FFMPEG_BINARY: ffmpegCommand,
       PATH: `${dirname(ffmpegCommand)}:${process.env.PATH ?? ''}`,
-      XDG_CACHE_HOME: resolve(projectRoot, '.cache'),
-      TORCH_HOME: resolve(projectRoot, '.cache', 'torch'),
-      HF_HOME: resolve(projectRoot, '.cache', 'huggingface'),
+      XDG_CACHE_HOME:
+        process.env.XDG_CACHE_HOME ?? resolve(projectRoot, '.cache'),
+      TORCH_HOME:
+        process.env.TORCH_HOME ?? resolve(projectRoot, '.cache', 'torch'),
+      HF_HUB_CACHE:
+        process.env.HF_HUB_CACHE ??
+        resolve(projectRoot, '.cache', 'huggingface', 'hub'),
     }
     delete environment.STRINGTRACE_TAB_MODEL
     const processHandle = spawn(workerCommand, argumentsList, {
       cwd: process.cwd(),
       env: environment,
+      detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
     })
-    processHandle.stdout.resume()
+    let timedOut = false
+    let aborted = false
+    let killTimer: NodeJS.Timeout | undefined
+    const terminate = () => {
+      if (processHandle.exitCode !== null || processHandle.pid === undefined) return
+      const target = process.platform === 'win32' ? processHandle.pid : -processHandle.pid
+      try {
+        process.kill(target, 'SIGTERM')
+      } catch {
+        processHandle.kill('SIGTERM')
+      }
+      killTimer = setTimeout(() => {
+        try {
+          process.kill(target, 'SIGKILL')
+        } catch {
+          processHandle.kill('SIGKILL')
+        }
+      }, 5000)
+    }
+    const abortHandler = () => {
+      aborted = true
+      terminate()
+    }
+    signal?.addEventListener('abort', abortHandler, { once: true })
+    if (signal?.aborted) abortHandler()
+    const timeout = setTimeout(() => {
+      timedOut = true
+      terminate()
+    }, Math.max(1000, timeoutMs))
+    const cleanup = () => {
+      clearTimeout(timeout)
+      if (killTimer) clearTimeout(killTimer)
+      signal?.removeEventListener('abort', abortHandler)
+    }
+    let stdout = ''
+    processHandle.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString()
+      const lines = stdout.split(/\r?\n/u)
+      stdout = lines.pop() ?? ''
+      for (const line of lines) {
+        const progress = parseWorkerProgress(line)
+        if (progress) onProgress?.(progress)
+      }
+    })
     let stderr = ''
     processHandle.stderr.on('data', (chunk: Buffer) => {
       stderr = `${stderr}${chunk.toString()}`.slice(-1200)
     })
-    processHandle.on('error', rejectPromise)
+    processHandle.on('error', (error) => {
+      cleanup()
+      rejectPromise(error)
+    })
     processHandle.on('close', (code) => {
+      cleanup()
       if (code === 0) {
         resolvePromise()
       } else {
         rejectPromise(
-          new Error(stderr.trim() || `Worker exited with code ${code}`),
+          new Error(
+            aborted
+              ? '任务已取消'
+              : timedOut
+                ? '推理任务超时'
+                : describeWorkerFailure(stderr, code),
+          ),
         )
       }
     })
@@ -884,6 +912,10 @@ function reportInferenceObservation(
   } catch {
     // Operational telemetry must not change the user-visible inference result.
   }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error('任务已取消')
 }
 
 async function runShadowInference(
@@ -903,8 +935,7 @@ async function runShadowInference(
     return
   }
   const outputRoot = resolve(
-    process.cwd(),
-    'data',
+    runtimeDataRoot(),
     'shadow',
     job.id,
     deployment.promotionId,
@@ -917,10 +948,12 @@ async function runShadowInference(
       sourceArguments,
       outputRoot,
       deployment.shadowModelPath,
+      options.signal,
+      options.timeoutMs,
     )
-    const candidate = JSON.parse(
-      await readFile(resolve(outputRoot, 'analysis.json'), 'utf8'),
-    ) as WorkerAnalysis
+    const candidate = parseAnalysisDocument(
+      JSON.parse(await readFile(resolve(outputRoot, 'analysis.json'), 'utf8')),
+    )
     reportInferenceObservation(options, {
       promotionId: deployment.promotionId,
       jobId: job.id,
@@ -948,7 +981,7 @@ async function runShadowInference(
   }
 }
 
-async function runInferencePipeline(
+async function runPreparedInferencePipeline(
   job: AnalysisJob,
   onUpdate: (job: AnalysisJob) => void,
   inputPath?: string,
@@ -962,13 +995,16 @@ async function runInferencePipeline(
   if (!ffmpegCommand) {
     throw new Error('FFmpeg 尚未安装或不可执行')
   }
+  throwIfAborted(options.signal)
+  const configuredModelPath =
+    process.env.STRINGTRACE_TAB_MODEL?.trim() || undefined
 
-  const outputRoot = resolve(process.cwd(), 'data', 'jobs', job.id)
+  const outputRoot = resolve(runtimeDataRoot(), 'jobs', job.id)
   const deployment = resolveInferenceExecution(options.deployment)
   Object.assign(job, {
-    status: 'separating',
-    progress: 35,
-    stageLabel: 'Worker 正在分离音轨',
+    status: 'acquiring',
+    progress: 1,
+    stageLabel: inputPath ? '准备分析本地媒体' : '准备获取在线媒体',
     deployment: {
       mode: deployment.mode,
       modelVersion: deployment.modelVersion,
@@ -977,6 +1013,7 @@ async function runInferencePipeline(
     updatedAt: new Date().toISOString(),
   })
   onUpdate(job)
+  throwIfAborted(options.signal)
 
   const sourceArguments = workerSourceArguments(job, inputPath)
   if (sourceArguments.length === 0) {
@@ -984,6 +1021,14 @@ async function runInferencePipeline(
   }
 
   const primaryStartedAt = Date.now()
+  const reportWorkerProgress = (progress: WorkerProgress) => {
+    if (progress.progress < job.progress) return
+    Object.assign(job, {
+      ...progress,
+      updatedAt: new Date().toISOString(),
+    })
+    onUpdate(job)
+  }
   let analysis: WorkerAnalysis
   try {
     await executeWorker(
@@ -991,11 +1036,14 @@ async function runInferencePipeline(
       ffmpegCommand,
       sourceArguments,
       outputRoot,
-      deployment.primaryModelPath,
+      deployment.primaryModelPath ?? configuredModelPath,
+      options.signal,
+      options.timeoutMs,
+      reportWorkerProgress,
     )
-    analysis = JSON.parse(
-      await readFile(resolve(outputRoot, 'analysis.json'), 'utf8'),
-    ) as WorkerAnalysis
+    analysis = parseAnalysisDocument(
+      JSON.parse(await readFile(resolve(outputRoot, 'analysis.json'), 'utf8')),
+    )
     if (
       deployment.mode === 'canary' ||
       deployment.mode === 'champion'
@@ -1010,6 +1058,7 @@ async function runInferencePipeline(
       })
     }
   } catch (error) {
+    if (options.signal?.aborted) throw error
     if (deployment.fallbackModelPaths.length === 0) {
       throw error
     }
@@ -1038,10 +1087,15 @@ async function runInferencePipeline(
           sourceArguments,
           outputRoot,
           fallbackModelPath,
+          options.signal,
+          options.timeoutMs,
+          reportWorkerProgress,
         )
-        fallbackAnalysis = JSON.parse(
-          await readFile(resolve(outputRoot, 'analysis.json'), 'utf8'),
-        ) as WorkerAnalysis
+        fallbackAnalysis = parseAnalysisDocument(
+          JSON.parse(
+            await readFile(resolve(outputRoot, 'analysis.json'), 'utf8'),
+          ),
+        )
         break
       } catch (cause) {
         fallbackError = cause
@@ -1052,14 +1106,16 @@ async function runInferencePipeline(
     if (job.deployment) job.deployment.fallbackUsed = true
   }
 
+  throwIfAborted(options.signal)
   Object.assign(job, {
     status: 'mapping',
-    progress: 92,
+    progress: Math.max(job.progress, 92),
     stageLabel: '整理分轨与 TAB',
     updatedAt: new Date().toISOString(),
   })
   onUpdate(job)
   const project = workerProject(analysis, job.source, job.id)
+  throwIfAborted(options.signal)
   Object.assign(job, {
     status: 'completed',
     progress: 100,
@@ -1068,7 +1124,7 @@ async function runInferencePipeline(
     updatedAt: new Date().toISOString(),
   })
   onUpdate(job)
-  if (deployment.mode === 'shadow') {
+  if (deployment.mode === 'shadow' && !options.skipShadow) {
     void runShadowInference(
       job,
       sourceArguments,
@@ -1082,6 +1138,155 @@ async function runInferencePipeline(
   return project
 }
 
+async function readMediaHeader(path: string): Promise<Buffer> {
+  const handle = await open(path, 'r')
+  const header = Buffer.alloc(16)
+  try {
+    const { bytesRead } = await handle.read(header, 0, header.length, 0)
+    return header.subarray(0, bytesRead)
+  } finally {
+    await handle.close()
+  }
+}
+
+async function acquireAuthorizedLink(
+  job: AnalysisJob,
+  onUpdate: (job: AnalysisJob) => void,
+  options: PipelineExecutionOptions,
+): Promise<{ root: string; path: string; name: string }> {
+  const workerCommand = getWorkerCommand()
+  const ffmpegCommand = getFfmpegCommand()
+  if (!workerCommand || !ffmpegCommand || !job.source.url) {
+    throw new Error('本地媒体提取器不可用，无法准备受保护链接')
+  }
+  const root = resolve(
+    runtimeDataRoot(),
+    'uploads',
+    `${job.id}.authorized-source`,
+  )
+  Object.assign(job, {
+    status: 'acquiring',
+    progress: 1,
+    stageLabel: '正在将在线媒体下载到本机临时目录',
+    updatedAt: new Date().toISOString(),
+  })
+  onUpdate(job)
+  await executeWorker(
+    workerCommand,
+    ffmpegCommand,
+    ['--url', job.source.url, '--acquire-only'],
+    root,
+    undefined,
+    options.signal,
+    options.timeoutMs,
+    (progress) => {
+      Object.assign(job, {
+        status: 'acquiring',
+        progress: Math.max(1, Math.min(8, progress.progress * 0.08)),
+        stageLabel: progress.stageLabel,
+        updatedAt: new Date().toISOString(),
+      })
+      onUpdate(job)
+    },
+  )
+  const name = (await readdir(root))
+    .filter(
+      (candidate) =>
+        candidate.startsWith('source.') &&
+        !candidate.endsWith('.json') &&
+        !candidate.endsWith('.part') &&
+        !candidate.endsWith('.ytdl'),
+    )
+    .sort()[0]
+  if (!name) throw new Error('本地媒体提取器未生成可分析文件')
+  return { root, path: resolve(root, name), name }
+}
+
+async function runInferencePipeline(
+  job: AnalysisJob,
+  onUpdate: (job: AnalysisJob) => void,
+  inputPath?: string,
+  options: PipelineExecutionOptions = {},
+): Promise<StudioProject> {
+  const authorization = job.source.authorizedMedia
+  if (!authorization) {
+    return runPreparedInferencePipeline(
+      job,
+      onUpdate,
+      inputPath,
+      options,
+    )
+  }
+
+  let preparedPath = inputPath
+  let preparedName = job.source.filename
+  let acquiredRoot: string | undefined
+  const decodedPath = resolve(
+    runtimeDataRoot(),
+    'uploads',
+    `${job.id}.authorized-media`,
+  )
+  try {
+    if (!preparedPath) {
+      const acquired = await acquireAuthorizedLink(job, onUpdate, options)
+      acquiredRoot = acquired.root
+      preparedPath = acquired.path
+      preparedName = acquired.name
+    }
+    if (!preparedName) preparedName = basename(preparedPath)
+    const encryptedHeader = await readMediaHeader(preparedPath)
+    const requiresLocalDecode = requiresAuthorizedMediaDecode(
+      preparedName,
+      encryptedHeader,
+    )
+    if (!requiresLocalDecode) {
+      return await runPreparedInferencePipeline(
+        job,
+        onUpdate,
+        preparedPath,
+        { ...options, skipShadow: true },
+      )
+    }
+    Object.assign(job, {
+      status: 'validating',
+      progress: Math.max(2, job.progress),
+      stageLabel: '正在本机临时解码受保护媒体',
+      updatedAt: new Date().toISOString(),
+    })
+    onUpdate(job)
+    await decodeAuthorizedMediaLocally({
+      provider: authorization.provider,
+      outputPath: decodedPath,
+      originalName: preparedName,
+      inputPath: preparedPath,
+      signal: options.signal,
+    })
+    const decodedHeader = await readMediaHeader(decodedPath)
+    if (!detectStandardAudioSignature(decodedHeader)) {
+      throw new Error('本地解码器未生成受支持的标准音频容器')
+    }
+    Object.assign(job, {
+      progress: 4,
+      stageLabel: '本地临时媒体已就绪，开始分析',
+      updatedAt: new Date().toISOString(),
+    })
+    onUpdate(job)
+    return await runPreparedInferencePipeline(
+      job,
+      onUpdate,
+      decodedPath,
+      { ...options, skipShadow: true },
+    )
+  } finally {
+    await rm(decodedPath, { force: true }).catch(() => undefined)
+    if (acquiredRoot) {
+      await rm(acquiredRoot, { recursive: true, force: true }).catch(
+        () => undefined,
+      )
+    }
+  }
+}
+
 export function runPipeline(
   job: AnalysisJob,
   onUpdate: (job: AnalysisJob) => void,
@@ -1093,7 +1298,7 @@ export function runPipeline(
   if (platform?.acquisition === 'metadata-only') {
     return Promise.reject(
       new Error(
-        `${platform.label}链接不提供可授权下载的公开音频；会员可播放权限不等于导出或解密授权，请上传你合法持有的标准音频文件`,
+        `${platform.label}链接当前只支持读取元数据，未实现音频流获取`,
       ),
     )
   }
@@ -1104,24 +1309,48 @@ export function runPipeline(
   }
   return runInferencePipeline(job, onUpdate, inputPath, options).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : '媒体获取失败'
-    if (
-      !inputPath &&
-      platform &&
-      /yt-dlp|calledprocesserror|unsupported url|http error|sign in|login|drm/i.test(message)
-    ) {
-      throw new Error(
-        `${platform.label}未返回可直接处理的公开非 DRM 音频。页面可播放或未标 VIP，不代表平台提供可下载媒体流；请上传你合法导出的标准音频文件`,
-      )
+    if (!inputPath && platform) {
+      throw new Error(describeMediaAcquisitionFailure(platform, message))
     }
     throw error
   })
+}
+
+export function describeMediaAcquisitionFailure(
+  platform: PlatformDescriptor,
+  message: string,
+): string {
+  if (/drm|encrypted|encryption/iu.test(message)) {
+    return `${platform.label}返回了当前解码器不支持的 DRM 或加密媒体流`
+  }
+  if (
+    /sign in|login|cookie|captcha|confirm you.re not a bot|http error (?:401|403|429)/iu.test(
+      message,
+    )
+  ) {
+    return `${platform.label}要求登录会话、人机验证，或限制了当前网络请求；可配置本地 Cookie 文件或代理后重试`
+  }
+  if (/unsupported url|no suitable extractor/iu.test(message)) {
+    return `${platform.label}链接格式暂未被当前提取器识别，请使用标准歌曲/视频详情页链接`
+  }
+  if (/unavailable|private|removed|geo|region|not available/iu.test(message)) {
+    return `${platform.label}媒体在当前账号或网络区域不可用`
+  }
+  if (/requested format|no video formats|no formats/iu.test(message)) {
+    return `${platform.label}没有返回可解码的音频格式`
+  }
+  return `${platform.label}媒体获取失败；请检查链接状态、登录会话、网络限制或提取器版本`
 }
 
 export function sourceFromLink(url: string): SourceDescriptor {
   const normalizedUrl = normalizeSharedUrl(url)
   const platform = detectPlatform(normalizedUrl)
   if (!platform) {
-    throw new Error('当前仅支持哔哩哔哩、抖音和网易云音乐的公开非 DRM 链接')
+    throw new Error(
+      `当前支持以下在线来源：${platforms
+        .map((candidate) => candidate.label)
+        .join('、')}`,
+    )
   }
 
   return {

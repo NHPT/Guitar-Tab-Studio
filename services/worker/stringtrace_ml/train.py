@@ -18,6 +18,7 @@ from .model import (
     PITCH_MIN,
     ModelConfig,
     StringFretNet,
+    build_pitch_onset_targets,
     transcription_loss,
 )
 
@@ -62,10 +63,18 @@ def configure_trainable_parameters(
     *,
     freeze_position_backbone: bool = False,
     onset_head_only: bool = False,
+    pitch_onset_head_only: bool = False,
 ) -> None:
-    if freeze_position_backbone and onset_head_only:
+    exclusive_modes = sum(
+        (
+            freeze_position_backbone,
+            onset_head_only,
+            pitch_onset_head_only,
+        )
+    )
+    if exclusive_modes > 1:
         raise ValueError(
-            "freeze_position_backbone and onset_head_only are mutually exclusive"
+            "parameter freezing modes are mutually exclusive"
         )
     for name, parameter in model.named_parameters():
         if freeze_position_backbone:
@@ -75,6 +84,8 @@ def configure_trainable_parameters(
             )
         elif onset_head_only:
             parameter.requires_grad = name.startswith("onset_head.")
+        elif pitch_onset_head_only:
+            parameter.requires_grad = name.startswith("pitch_onset_head.")
         else:
             parameter.requires_grad = True
 
@@ -133,23 +144,33 @@ def run_epoch(
     pitch_consistency_weight: float,
     pitch_positive_weight: float,
     position_loss_weight: float,
+    pitch_onset_loss_weight: float,
+    pitch_onset_positive_weight: float,
     string_loss_weights: torch.Tensor,
     freeze_position_backbone: bool = False,
     onset_head_only: bool = False,
+    pitch_onset_head_only: bool = False,
 ) -> dict[str, float]:
     training = optimizer is not None
     model.train(training)
-    if training and (freeze_position_backbone or onset_head_only):
+    if training and (
+        freeze_position_backbone
+        or onset_head_only
+        or pitch_onset_head_only
+    ):
         model.encoder.eval()
         model.frequency_projection.eval()
         model.temporal.eval()
         model.dropout.eval()
-    if training and onset_head_only:
+    if training and (onset_head_only or pitch_onset_head_only):
         model.fret_head.eval()
+        model.onset_head.eval()
         if model.pitch_embedding is not None:
             model.pitch_embedding.eval()
         if model.position_head is not None:
             model.position_head.eval()
+    if training and onset_head_only and model.pitch_onset_head is not None:
+        model.pitch_onset_head.eval()
     totals = {
         "loss": torch.zeros((), device=device),
         "fret_loss": torch.zeros((), device=device),
@@ -157,6 +178,7 @@ def run_epoch(
         "fret_distance_loss": torch.zeros((), device=device),
         "pitch_consistency_loss": torch.zeros((), device=device),
         "position_loss": torch.zeros((), device=device),
+        "pitch_onset_loss": torch.zeros((), device=device),
     }
     counts = {
         "frame_tablature_true_positive": torch.zeros(
@@ -185,6 +207,21 @@ def run_epoch(
             dtype=torch.long,
         ),
         "frame_onset_false_negative": torch.zeros(
+            (),
+            device=device,
+            dtype=torch.long,
+        ),
+        "frame_pitch_onset_true_positive": torch.zeros(
+            (),
+            device=device,
+            dtype=torch.long,
+        ),
+        "frame_pitch_onset_false_positive": torch.zeros(
+            (),
+            device=device,
+            dtype=torch.long,
+        ),
+        "frame_pitch_onset_false_negative": torch.zeros(
             (),
             device=device,
             dtype=torch.long,
@@ -252,6 +289,8 @@ def run_epoch(
                 pitch_consistency_weight=pitch_consistency_weight,
                 pitch_positive_weight=pitch_positive_weight,
                 position_loss_weight=position_loss_weight,
+                pitch_onset_loss_weight=pitch_onset_loss_weight,
+                pitch_onset_positive_weight=pitch_onset_positive_weight,
                 string_loss_weights=string_loss_weights,
             )
             if optimizer:
@@ -300,6 +339,34 @@ def run_epoch(
                 & onset_targets_active
                 & valid_strings
             ).sum()
+            if "pitch_onset_logits" in outputs:
+                pitch_onset_targets = build_pitch_onset_targets(
+                    fret_targets,
+                    onset_targets,
+                )
+                valid_pitches = valid_frames.unsqueeze(-1)
+                pitch_onset_predictions = (
+                    outputs["pitch_onset_logits"] >= 0
+                )
+                pitch_onset_targets_active = pitch_onset_targets > 0
+                pitch_onset_matches = (
+                    pitch_onset_predictions
+                    & pitch_onset_targets_active
+                    & valid_pitches
+                )
+                counts["frame_pitch_onset_true_positive"] += (
+                    pitch_onset_matches.sum()
+                )
+                counts["frame_pitch_onset_false_positive"] += (
+                    pitch_onset_predictions
+                    & ~pitch_onset_targets_active
+                    & valid_pitches
+                ).sum()
+                counts["frame_pitch_onset_false_negative"] += (
+                    ~pitch_onset_predictions
+                    & pitch_onset_targets_active
+                    & valid_pitches
+                ).sum()
             if "position_logits" in outputs:
                 if position_string_indexes.numel():
                     predictions = outputs["position_logits"].argmax(dim=-1)
@@ -339,6 +406,12 @@ def run_epoch(
             false_positive,
             false_negative,
         )
+    if "pitch_onset_logits" in outputs:
+        result["frame_pitch_onset_f1"] = _f1(
+            resolved_counts["frame_pitch_onset_true_positive"],
+            resolved_counts["frame_pitch_onset_false_positive"],
+            resolved_counts["frame_pitch_onset_false_negative"],
+        )
     if resolved_counts["position_events"]:
         result["frame_position_accuracy"] = (
             resolved_counts["position_correct"]
@@ -369,7 +442,14 @@ def main() -> None:
     parser.add_argument("--pitch-consistency-weight", type=float, default=0.0)
     parser.add_argument("--pitch-positive-weight", type=float, default=5.0)
     parser.add_argument("--position-loss-weight", type=float, default=0.0)
+    parser.add_argument("--pitch-onset-loss-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--pitch-onset-positive-weight",
+        type=float,
+        default=40.0,
+    )
     parser.add_argument("--enable-position-head", action="store_true")
+    parser.add_argument("--enable-pitch-onset-head", action="store_true")
     parser.add_argument(
         "--freeze-position-backbone",
         action="store_true",
@@ -383,6 +463,14 @@ def main() -> None:
             "position branches frozen."
         ),
     )
+    parser.add_argument(
+        "--pitch-onset-head-only",
+        action="store_true",
+        help=(
+            "Train only the pitch-independent onset head while keeping the "
+            "shared encoder and legacy heads frozen."
+        ),
+    )
     parser.add_argument("--string-balance-exponent", type=float, default=0.0)
     parser.add_argument(
         "--selection-metric",
@@ -390,6 +478,7 @@ def main() -> None:
             "loss",
             "frame_tablature_f1",
             "frame_onset_f1",
+            "frame_pitch_onset_f1",
             "frame_position_accuracy",
         ),
         default="loss",
@@ -407,6 +496,27 @@ def main() -> None:
     parser.add_argument("--pitch-shift-probability", type=float, default=0.0)
     parser.add_argument("--pitch-shift-min", type=int, default=1)
     parser.add_argument("--pitch-shift-max", type=int, default=3)
+    parser.add_argument(
+        "--feature-augmentation-probability",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument("--feature-noise-std", type=float, default=0.0)
+    parser.add_argument(
+        "--feature-frequency-mask-bins",
+        type=int,
+        default=0,
+    )
+    parser.add_argument(
+        "--feature-contrast-range",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--feature-spectral-tilt",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=20260921)
     parser.add_argument(
@@ -441,6 +551,10 @@ def main() -> None:
         parser.error("--pitch-positive-weight must be at least one")
     if arguments.position_loss_weight < 0:
         parser.error("--position-loss-weight must be non-negative")
+    if arguments.pitch_onset_loss_weight < 0:
+        parser.error("--pitch-onset-loss-weight must be non-negative")
+    if arguments.pitch_onset_positive_weight < 1:
+        parser.error("--pitch-onset-positive-weight must be at least one")
     if (
         arguments.position_learning_rate is not None
         and arguments.position_learning_rate <= 0
@@ -448,12 +562,27 @@ def main() -> None:
         parser.error("--position-learning-rate must be positive")
     if arguments.string_balance_exponent < 0:
         parser.error("--string-balance-exponent must be non-negative")
+    if not 0 <= arguments.feature_augmentation_probability <= 1:
+        parser.error("--feature-augmentation-probability must be in 0..1")
+    if arguments.feature_noise_std < 0:
+        parser.error("--feature-noise-std must be non-negative")
+    if arguments.feature_frequency_mask_bins < 0:
+        parser.error("--feature-frequency-mask-bins must be non-negative")
+    if not 0 <= arguments.feature_contrast_range < 1:
+        parser.error("--feature-contrast-range must be in [0, 1)")
+    if arguments.feature_spectral_tilt < 0:
+        parser.error("--feature-spectral-tilt must be non-negative")
     if arguments.resume is not None and arguments.initialize_from is not None:
         parser.error("--resume and --initialize-from are mutually exclusive")
-    if arguments.freeze_position_backbone and arguments.onset_head_only:
+    if sum(
+        (
+            arguments.freeze_position_backbone,
+            arguments.onset_head_only,
+            arguments.pitch_onset_head_only,
+        )
+    ) > 1:
         parser.error(
-            "--freeze-position-backbone and --onset-head-only are "
-            "mutually exclusive"
+            "parameter freezing modes are mutually exclusive"
         )
     if (
         arguments.onset_head_only
@@ -462,6 +591,14 @@ def main() -> None:
     ):
         parser.error(
             "--onset-head-only requires --resume or --initialize-from"
+        )
+    if (
+        arguments.pitch_onset_head_only
+        and arguments.resume is None
+        and arguments.initialize_from is None
+    ):
+        parser.error(
+            "--pitch-onset-head-only requires --resume or --initialize-from"
         )
     try:
         dataset_sampling_weights = parse_dataset_sampling_weights(
@@ -499,6 +636,11 @@ def main() -> None:
             model_config,
             pitch_conditioned_position=True,
         )
+    if arguments.enable_pitch_onset_head:
+        model_config = replace(
+            model_config,
+            pitch_onset_head=True,
+        )
     if arguments.position_loss_weight > 0 and not (
         model_config.pitch_conditioned_position
     ):
@@ -513,6 +655,27 @@ def main() -> None:
         parser.error(
             "--selection-metric frame_position_accuracy requires a "
             "pitch-conditioned position head"
+        )
+    if (
+        arguments.pitch_onset_loss_weight > 0
+        and not model_config.pitch_onset_head
+    ):
+        parser.error(
+            "--pitch-onset-loss-weight requires "
+            "--enable-pitch-onset-head or a compatible checkpoint"
+        )
+    if (
+        arguments.selection_metric == "frame_pitch_onset_f1"
+        and not model_config.pitch_onset_head
+    ):
+        parser.error(
+            "--selection-metric frame_pitch_onset_f1 requires a "
+            "pitch onset head"
+        )
+    if arguments.pitch_onset_head_only and not model_config.pitch_onset_head:
+        parser.error(
+            "--pitch-onset-head-only requires --enable-pitch-onset-head "
+            "or a compatible checkpoint"
         )
     if (
         arguments.freeze_position_backbone
@@ -541,6 +704,15 @@ def main() -> None:
         pitch_shift_probability=arguments.pitch_shift_probability,
         pitch_shift_min=arguments.pitch_shift_min,
         pitch_shift_max=arguments.pitch_shift_max,
+        feature_augmentation_probability=(
+            arguments.feature_augmentation_probability
+        ),
+        feature_noise_std=arguments.feature_noise_std,
+        feature_frequency_mask_bins=(
+            arguments.feature_frequency_mask_bins
+        ),
+        feature_contrast_range=arguments.feature_contrast_range,
+        feature_spectral_tilt=arguments.feature_spectral_tilt,
     )
     validation_dataset = GuitarTabDataset(
         arguments.manifest,
@@ -686,6 +858,7 @@ def main() -> None:
             if not (
                 key.startswith("pitch_embedding.")
                 or key.startswith("position_head.")
+                or key.startswith("pitch_onset_head.")
             )
         ]
         if unexpected or invalid_missing:
@@ -697,6 +870,7 @@ def main() -> None:
         model,
         freeze_position_backbone=arguments.freeze_position_backbone,
         onset_head_only=arguments.onset_head_only,
+        pitch_onset_head_only=arguments.pitch_onset_head_only,
     )
     model.to(device)
     position_parameters = [
@@ -782,6 +956,10 @@ def main() -> None:
         "pitch_consistency_weight": arguments.pitch_consistency_weight,
         "pitch_positive_weight": arguments.pitch_positive_weight,
         "position_loss_weight": arguments.position_loss_weight,
+        "pitch_onset_loss_weight": arguments.pitch_onset_loss_weight,
+        "pitch_onset_positive_weight": (
+            arguments.pitch_onset_positive_weight
+        ),
         "string_balance_exponent": arguments.string_balance_exponent,
     }
     training_config: dict[str, object] = {
@@ -791,10 +969,22 @@ def main() -> None:
             "pitch_shift_probability": arguments.pitch_shift_probability,
             "pitch_shift_min": arguments.pitch_shift_min,
             "pitch_shift_max": arguments.pitch_shift_max,
+            "feature_augmentation_probability": (
+                arguments.feature_augmentation_probability
+            ),
+            "feature_noise_std": arguments.feature_noise_std,
+            "feature_frequency_mask_bins": (
+                arguments.feature_frequency_mask_bins
+            ),
+            "feature_contrast_range": (
+                arguments.feature_contrast_range
+            ),
+            "feature_spectral_tilt": arguments.feature_spectral_tilt,
         },
         "selection_metric": arguments.selection_metric,
         "freeze_position_backbone": arguments.freeze_position_backbone,
         "onset_head_only": arguments.onset_head_only,
+        "pitch_onset_head_only": arguments.pitch_onset_head_only,
     }
     best_validation_metric = best_compatible_validation_metric(
         history,
@@ -818,9 +1008,14 @@ def main() -> None:
             pitch_consistency_weight=arguments.pitch_consistency_weight,
             pitch_positive_weight=arguments.pitch_positive_weight,
             position_loss_weight=arguments.position_loss_weight,
+            pitch_onset_loss_weight=arguments.pitch_onset_loss_weight,
+            pitch_onset_positive_weight=(
+                arguments.pitch_onset_positive_weight
+            ),
             string_loss_weights=string_loss_weights,
             freeze_position_backbone=arguments.freeze_position_backbone,
             onset_head_only=arguments.onset_head_only,
+            pitch_onset_head_only=arguments.pitch_onset_head_only,
         )
         validation_metrics = (
             run_epoch(
@@ -837,9 +1032,18 @@ def main() -> None:
                 ),
                 pitch_positive_weight=arguments.pitch_positive_weight,
                 position_loss_weight=arguments.position_loss_weight,
+                pitch_onset_loss_weight=(
+                    arguments.pitch_onset_loss_weight
+                ),
+                pitch_onset_positive_weight=(
+                    arguments.pitch_onset_positive_weight
+                ),
                 string_loss_weights=string_loss_weights,
                 freeze_position_backbone=arguments.freeze_position_backbone,
                 onset_head_only=arguments.onset_head_only,
+                pitch_onset_head_only=(
+                    arguments.pitch_onset_head_only
+                ),
             )
             if validation_loader
             else training_metrics
@@ -872,12 +1076,19 @@ def main() -> None:
                 "metadata": {
                     "name": "stringtrace-string-fret-net",
                     "version": (
-                        "tabcnn-gru-v3-pitch-conditioned"
-                        if model_config.pitch_conditioned_position
+                        "tabcnn-gru-v4-pitch-onset"
+                        if model_config.pitch_onset_head
                         else (
-                            "tabcnn-gru-v2"
-                            if model_config.frequency_encoding == "position-aware"
-                            else "tabcnn-gru-v1"
+                            "tabcnn-gru-v3-pitch-conditioned"
+                            if model_config.pitch_conditioned_position
+                            else (
+                                "tabcnn-gru-v2"
+                                if (
+                                    model_config.frequency_encoding
+                                    == "position-aware"
+                                )
+                                else "tabcnn-gru-v1"
+                            )
                         )
                     ),
                     "kind": "trained",
@@ -910,6 +1121,12 @@ def main() -> None:
                     "position_loss_weight": (
                         arguments.position_loss_weight
                     ),
+                    "pitch_onset_loss_weight": (
+                        arguments.pitch_onset_loss_weight
+                    ),
+                    "pitch_onset_positive_weight": (
+                        arguments.pitch_onset_positive_weight
+                    ),
                     "pitch_conditioned_position": (
                         model_config.pitch_conditioned_position
                     ),
@@ -917,6 +1134,9 @@ def main() -> None:
                         arguments.freeze_position_backbone
                     ),
                     "onset_head_only": arguments.onset_head_only,
+                    "pitch_onset_head_only": (
+                        arguments.pitch_onset_head_only
+                    ),
                     "string_balance_exponent": (
                         arguments.string_balance_exponent
                     ),
@@ -932,6 +1152,19 @@ def main() -> None:
                     ),
                     "pitch_shift_min": arguments.pitch_shift_min,
                     "pitch_shift_max": arguments.pitch_shift_max,
+                    "feature_augmentation_probability": (
+                        arguments.feature_augmentation_probability
+                    ),
+                    "feature_noise_std": arguments.feature_noise_std,
+                    "feature_frequency_mask_bins": (
+                        arguments.feature_frequency_mask_bins
+                    ),
+                    "feature_contrast_range": (
+                        arguments.feature_contrast_range
+                    ),
+                    "feature_spectral_tilt": (
+                        arguments.feature_spectral_tilt
+                    ),
                     "resumed_from": (
                         arguments.resume.name
                         if arguments.resume is not None

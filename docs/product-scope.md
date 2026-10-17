@@ -70,18 +70,30 @@ controls, and ten selectable color systems with vermilion as the default.
 
 ## Deliberate limitations
 
-- QQ Music and Qishui Music online import is not offered because authenticated
-  media acquisition is not supported.
-- Proprietary QMC, MFLAC, MGG, NCM, KGM, and VPR files must first be legally
-  exported to a standard audio format.
+- Qishui Music online import is not offered because a stable acquisition
+  adapter is not available.
+- Keyless MusicEx QMC2 files require the macOS desktop runtime, a current
+  QQ Music login and a successful per-file authorization response from the
+  official `music.vkey.GetEVkey` endpoint. macOS Full Disk Access may be
+  required to read the nested client plist. Browser, Windows and Linux clients
+  do not extract that local credential.
+- The application does not use a third-party decoder or key lookup service,
+  and it does not retain QQ Music credentials or returned ekeys.
+- Key-separated KWM v2 and KGM v5 require a desktop user to explicitly import
+  a matching Kuwo MMKV or Kugou MMKV/encrypted SQLite key database. Parsed
+  mappings remain only in local process memory; mobile database extraction is
+  not automated and remains subject to the operating-system sandbox.
+- Proprietary QMC, MFLAC, MGG, NCM, KWM, KGM and VPR files require explicit
+  rights-and-processing confirmation before the ephemeral API decoder runs.
 - Public-link adapters only process media that the user is authorized to use.
 - Fine guitar-technique labels combine note transitions with acoustic features,
   remain experimental suggestions, and require confirmation.
 - Import jobs never fall back to demo audio or demo notation.
-- The current repository is not yet a signed desktop application and does not
-  contain a distributable offline Worker.
-- The current local JSON state store is not the target database for cloud or
-  desktop production releases.
+- The repository builds unsigned desktop candidates and defines the frozen
+  offline Worker pipeline; official releases still require platform signing,
+  notarization and generated sidecar artifacts.
+- Desktop metadata uses SQLite. The API's local JSON adapter remains a
+  development store and is not the target cloud production database.
 - Commercial-song uploads are not redistributed to community reviewers merely
   because a user volunteers a correction; rights verification is mandatory.
 - Community users cannot read hidden evaluation labels, run arbitrary server
@@ -90,9 +102,9 @@ controls, and ten selectable color systems with vermilion as the default.
 ## Next milestone
 
 The immediate milestone remains transcription accuracy and data automation.
-Shared application-core extraction and the Electron development shell follow
-without forking the current Web UI. Consumer desktop and offline inference
-releases require both the model gates and the platform gates in the
+The shared application core, Electron development shell and offline packaging
+pipeline are implemented without forking the Web UI. Consumer desktop and
+offline inference releases still require both the model gates and the platform gates in the
 [product and platform roadmap](product-roadmap.md).
 
 Long-term annotation, review and training participation is governed by the

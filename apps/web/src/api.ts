@@ -1,5 +1,6 @@
 import type {
   AnalysisJob,
+  AuthorizedMediaConsent,
   CapabilityState,
   CommunityAccount,
   CommunityAnswer,
@@ -11,12 +12,19 @@ import type {
   InferenceDeploymentStatus,
   ModelPromotion,
   PlatformDescriptor,
+  ProjectRevision,
+  ProjectRevisionKind,
   ReviewDocument,
   ReviewDraft,
   ReviewSummary,
   StudioProject,
   TrainingRecipe,
 } from './types'
+import {
+  migrateStudioProject,
+  type StudioApplication,
+} from '@gts/core'
+import { prepareScorePages } from './scoreImport'
 
 const API_ROOT =
   import.meta.env.VITE_API_ROOT ??
@@ -33,44 +41,143 @@ async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return body
 }
 
-export async function fetchHealth(): Promise<CapabilityState> {
-  const response = await jsonRequest<{ capabilities: CapabilityState }>('/health')
-  return response.capabilities
+export class HttpStudioApplication implements StudioApplication<File> {
+  async getCapabilities(): Promise<CapabilityState> {
+    const response = await jsonRequest<{ capabilities: CapabilityState }>(
+      '/health',
+    )
+    return response.capabilities
+  }
+
+  async listPlatforms(): Promise<PlatformDescriptor[]> {
+    const response = await jsonRequest<{ platforms: PlatformDescriptor[] }>(
+      '/api/platforms',
+    )
+    return response.platforms
+  }
+
+  async getDemoProject(): Promise<StudioProject> {
+    return migrateStudioProject(
+      await jsonRequest<unknown>('/api/projects/demo'),
+    )
+  }
+
+  async getProject(id: string): Promise<StudioProject> {
+    return migrateStudioProject(
+      await jsonRequest<unknown>(`/api/projects/${id}`),
+    )
+  }
+
+  listProjectRevisions(projectId: string): Promise<ProjectRevision[]> {
+    return jsonRequest<{ revisions: ProjectRevision[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/revisions`,
+    ).then((response) => response.revisions)
+  }
+
+  saveProjectRevision(
+    project: StudioProject,
+    label: string,
+    kind: ProjectRevisionKind = 'manual',
+    expectedParentRevisionId?: string | null,
+  ): Promise<ProjectRevision> {
+    return jsonRequest(`/api/projects/${encodeURIComponent(project.id)}/revisions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project,
+        label,
+        kind,
+        expectedParentRevisionId,
+      }),
+    })
+  }
+
+  restoreProjectRevision(
+    projectId: string,
+    revisionId: string,
+  ): Promise<ProjectRevision> {
+    return jsonRequest(
+      `/api/projects/${encodeURIComponent(projectId)}/revisions/${encodeURIComponent(revisionId)}/restore`,
+      { method: 'POST' },
+    )
+  }
+
+  getJob(id: string): Promise<AnalysisJob> {
+    return jsonRequest<AnalysisJob>(`/api/jobs/${id}`)
+  }
+
+  cancelJob(id: string): Promise<AnalysisJob> {
+    return jsonRequest<AnalysisJob>(`/api/jobs/${id}/cancel`, {
+      method: 'POST',
+    })
+  }
+
+  submitLink(
+    url: string,
+    authorizedMedia?: AuthorizedMediaConsent,
+  ): Promise<AnalysisJob> {
+    return jsonRequest<AnalysisJob>('/api/import/link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url,
+        authorizedProcessingConsent: authorizedMedia?.accepted,
+        authorizationPolicyVersion: authorizedMedia?.policyVersion,
+      }),
+    })
+  }
+
+  submitUpload(
+    file: File,
+    authorizedMedia?: AuthorizedMediaConsent,
+  ): Promise<AnalysisJob> {
+    const body = new FormData()
+    body.append('media', file)
+    if (authorizedMedia?.accepted) {
+      body.append('authorizedProcessingConsent', 'true')
+      body.append(
+        'authorizationPolicyVersion',
+        String(authorizedMedia.policyVersion),
+      )
+    }
+    return jsonRequest<AnalysisJob>('/api/import/upload', {
+      method: 'POST',
+      body,
+    })
+  }
+
+  async submitScore(file: File): Promise<StudioProject> {
+    const body = new FormData()
+    const pages = await prepareScorePages(file)
+    for (const page of pages) body.append('score', page)
+    body.append('originalName', file.name)
+    return migrateStudioProject(
+      await jsonRequest<unknown>('/api/import/score', {
+        method: 'POST',
+        body,
+      }),
+    )
+  }
 }
 
-export async function fetchPlatforms(): Promise<PlatformDescriptor[]> {
-  const response = await jsonRequest<{ platforms: PlatformDescriptor[] }>('/api/platforms')
-  return response.platforms
-}
+export const studioApplication = new HttpStudioApplication()
 
-export function fetchDemoProject(): Promise<StudioProject> {
-  return jsonRequest<StudioProject>('/api/projects/demo')
-}
-
-export function fetchProject(id: string): Promise<StudioProject> {
-  return jsonRequest<StudioProject>(`/api/projects/${id}`)
-}
-
-export function fetchJob(id: string): Promise<AnalysisJob> {
-  return jsonRequest<AnalysisJob>(`/api/jobs/${id}`)
-}
-
-export function submitLink(url: string): Promise<AnalysisJob> {
-  return jsonRequest<AnalysisJob>('/api/import/link', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url }),
-  })
-}
-
-export function submitUpload(file: File): Promise<AnalysisJob> {
-  const body = new FormData()
-  body.append('media', file)
-  return jsonRequest<AnalysisJob>('/api/import/upload', {
-    method: 'POST',
-    body,
-  })
-}
+export const fetchHealth = () => studioApplication.getCapabilities()
+export const fetchPlatforms = () => studioApplication.listPlatforms()
+export const fetchDemoProject = () => studioApplication.getDemoProject()
+export const fetchProject = (id: string) => studioApplication.getProject(id)
+export const fetchJob = (id: string) => studioApplication.getJob(id)
+export const cancelJob = (id: string) => studioApplication.cancelJob(id)
+export const submitLink = (
+  url: string,
+  authorizedMedia?: AuthorizedMediaConsent,
+) => studioApplication.submitLink(url, authorizedMedia)
+export const submitUpload = (
+  file: File,
+  authorizedMedia?: AuthorizedMediaConsent,
+) => studioApplication.submitUpload(file, authorizedMedia)
+export const submitScore = (file: File) =>
+  studioApplication.submitScore(file)
 
 function reviewApiPath(path: string, queue?: string): string {
   if (!queue) return path

@@ -1,0 +1,62 @@
+appId: com.guitartabstudio.app
+productName: Guitar Tab Studio
+asar: true
+directories:
+  output: release
+files:
+  - dist/**/*
+  - package.json
+  - "!data/**/*"
+extraResources:
+  - from: ../../THIRD_PARTY_NOTICES.md
+    to: THIRD_PARTY_NOTICES.md
+  - from: ../web/dist
+    to: web
+    filter:
+      - "**/*"
+  - from: build-resources/api
+    to: api
+    filter:
+      - "**/*"
+  - from: ../api/assets
+    to: api/assets
+    filter:
+      - "wayfaring-stranger-beginner*"
+      - "wayfaring-stranger-guide-vocals.wav"
+  - from: build-resources/sidecar
+    to: sidecar
+    filter:
+      - "**/*"
+      - "!README.md"
+extraMetadata:
+  main: dist/main.cjs
+mac:
+  icon: build-resources/icon.png
+  category: public.app-category.music
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  target:
+    - target: dmg
+      arch:
+        - arm64
+    - target: zip
+      arch:
+        - arm64
+win:
+  icon: build-resources/icon.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+publish:
+  provider: github
+  owner: NHPT
+  repo: Guitar-Tab-Studio
+artifactName: "${productName}-${version}-${os}-${arch}.${ext}"

@@ -777,7 +777,7 @@ export default function ReviewWorkspace() {
           </span>
           <div>
             <strong>Guitar Tab Review</strong>
-            <span>{residualOnsetQueue ? 'Residual Onset · HackAll' : 'Gold Review · HackAll'}</span>
+            <span>{residualOnsetQueue ? 'Residual Onset Review' : 'Gold Review'}</span>
           </div>
         </div>
         <div className="review-progress" aria-label="审核进度">

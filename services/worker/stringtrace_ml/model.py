@@ -27,6 +27,8 @@ class ModelConfig:
     dropout: float = 0.15
     pitch_conditioned_position: bool = False
     pitch_embedding_size: int = 24
+    pitch_onset_head: bool = False
+    pitch_onset_hidden_size: int = 128
 
     @classmethod
     def from_dict(cls, value: dict[str, object]) -> "ModelConfig":
@@ -45,6 +47,10 @@ class ModelConfig:
                 value.get("pitch_conditioned_position", False)
             ),
             pitch_embedding_size=int(value.get("pitch_embedding_size", 24)),
+            pitch_onset_head=bool(value.get("pitch_onset_head", False)),
+            pitch_onset_hidden_size=int(
+                value.get("pitch_onset_hidden_size", 128)
+            ),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -119,6 +125,27 @@ class StringFretNet(nn.Module):
             temporal_size,
             STRING_COUNT,
         )
+        if self.config.pitch_onset_head:
+            if self.config.pitch_onset_hidden_size <= 0:
+                raise ValueError("pitch onset hidden size must be positive")
+            self.pitch_onset_head: nn.Module | None = nn.Sequential(
+                nn.Conv1d(
+                    temporal_size,
+                    self.config.pitch_onset_hidden_size,
+                    kernel_size=3,
+                    padding=2,
+                    dilation=2,
+                ),
+                nn.SiLU(),
+                nn.Dropout(self.config.dropout),
+                nn.Conv1d(
+                    self.config.pitch_onset_hidden_size,
+                    PITCH_COUNT,
+                    kernel_size=1,
+                ),
+            )
+        else:
+            self.pitch_onset_head = None
         if self.config.pitch_conditioned_position:
             self.pitch_embedding: nn.Module | None = nn.Embedding(
                 PITCH_COUNT,
@@ -191,6 +218,10 @@ class StringFretNet(nn.Module):
             "fret_logits": fret_logits,
             "onset_logits": onset_logits,
         }
+        if self.pitch_onset_head is not None:
+            outputs["pitch_onset_logits"] = self.pitch_onset_head(
+                temporal_output.transpose(1, 2)
+            ).transpose(1, 2)
         if (
             self.position_head is not None
             and self.pitch_embedding is not None
@@ -247,6 +278,42 @@ class StringFretNet(nn.Module):
         return outputs
 
 
+def build_pitch_onset_targets(
+    fret_targets: Tensor,
+    onset_targets: Tensor,
+) -> Tensor:
+    if fret_targets.shape != onset_targets.shape:
+        raise ValueError("fret and onset targets must have equal shapes")
+    if fret_targets.ndim != 3 or fret_targets.shape[-1] != STRING_COUNT:
+        raise ValueError("string targets must have shape [batch, frames, 6]")
+    result = torch.zeros(
+        *fret_targets.shape[:2],
+        PITCH_COUNT,
+        device=onset_targets.device,
+        dtype=onset_targets.dtype,
+    )
+    for string_index, open_pitch in enumerate(OPEN_STRING_PITCHES):
+        active_onsets = (
+            (onset_targets[:, :, string_index] > 0)
+            & (fret_targets[:, :, string_index] > 0)
+        )
+        pitch_indexes = (
+            fret_targets[:, :, string_index]
+            - 1
+            + open_pitch
+            - PITCH_MIN
+        ).clamp(0, PITCH_COUNT - 1)
+        result.scatter_add_(
+            -1,
+            pitch_indexes.unsqueeze(-1),
+            (
+                onset_targets[:, :, string_index]
+                * active_onsets.to(onset_targets.dtype)
+            ).unsqueeze(-1),
+        )
+    return result.clamp_max(1)
+
+
 def transcription_loss(
     outputs: dict[str, Tensor],
     fret_targets: Tensor,
@@ -260,6 +327,8 @@ def transcription_loss(
     pitch_consistency_weight: float = 0.0,
     pitch_positive_weight: float = 5.0,
     position_loss_weight: float = 0.0,
+    pitch_onset_loss_weight: float = 0.0,
+    pitch_onset_positive_weight: float = 40.0,
     string_loss_weights: Tensor | None = None,
 ) -> tuple[Tensor, dict[str, Tensor]]:
     fret_logits = outputs["fret_logits"]
@@ -273,6 +342,10 @@ def transcription_loss(
         raise ValueError("pitch_positive_weight must be at least one")
     if position_loss_weight < 0:
         raise ValueError("position_loss_weight must be non-negative")
+    if pitch_onset_loss_weight < 0:
+        raise ValueError("pitch_onset_loss_weight must be non-negative")
+    if pitch_onset_positive_weight < 1:
+        raise ValueError("pitch_onset_positive_weight must be at least one")
     if string_loss_weights is None:
         string_weights = torch.ones(
             STRING_COUNT,
@@ -464,12 +537,46 @@ def transcription_loss(
         frame_mask.sum() * STRING_COUNT
     ).clamp_min(1)
 
+    pitch_onset_logits = outputs.get("pitch_onset_logits")
+    if pitch_onset_logits is None:
+        if pitch_onset_loss_weight > 0:
+            raise ValueError(
+                "pitch_onset_loss_weight requires a pitch onset head"
+            )
+        pitch_onset_loss = torch.zeros((), device=fret_logits.device)
+    else:
+        pitch_onset_targets = build_pitch_onset_targets(
+            fret_targets,
+            onset_targets,
+        )
+        pitch_onset_loss_values = (
+            functional.binary_cross_entropy_with_logits(
+                pitch_onset_logits,
+                pitch_onset_targets,
+                reduction="none",
+            )
+        )
+        pitch_onset_weights = 1 + pitch_onset_targets * (
+            pitch_onset_positive_weight - 1
+        )
+        pitch_onset_frame_mask = valid_frames.to(
+            pitch_onset_logits.dtype
+        ).unsqueeze(-1)
+        pitch_onset_loss = (
+            pitch_onset_loss_values
+            * pitch_onset_weights
+            * pitch_onset_frame_mask
+        ).sum() / (
+            pitch_onset_weights * pitch_onset_frame_mask
+        ).sum().clamp_min(1)
+
     total = (
         fret_loss
         + onset_loss
         + fret_distance_loss * fret_distance_weight
         + pitch_consistency_loss * pitch_consistency_weight
         + position_loss * position_loss_weight
+        + pitch_onset_loss * pitch_onset_loss_weight
     )
     return total, {
         "loss": total.detach(),
@@ -478,4 +585,5 @@ def transcription_loss(
         "fret_distance_loss": fret_distance_loss.detach(),
         "pitch_consistency_loss": pitch_consistency_loss.detach(),
         "position_loss": position_loss.detach(),
+        "pitch_onset_loss": pitch_onset_loss.detach(),
     }

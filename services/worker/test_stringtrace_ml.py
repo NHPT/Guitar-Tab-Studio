@@ -27,7 +27,7 @@ from stringtrace_ml.convert_technique_position_evaluation import (
 from stringtrace_ml.convert_technique_positions import (
     convert_technique_positions,
 )
-from stringtrace_ml.dataset import GuitarTabDataset
+from stringtrace_ml.dataset import GuitarTabDataset, augment_cqt_features
 from stringtrace_ml.download_guitarset import (
     DownloadSpec,
     assemble_download,
@@ -38,9 +38,11 @@ from stringtrace_ml.download_guitarset import (
 from stringtrace_ml.evaluate import model_identity
 from stringtrace_ml.evaluate_onset_position import (
     assign_detected_events,
+    direct_pitch_onset_candidates,
     merge_predictions,
     parse_arguments,
     unmatched_onset_candidates,
+    unmatched_pitch_candidates,
 )
 from stringtrace_ml.evaluate_technique import (
     expected_calibration_error,
@@ -74,6 +76,7 @@ from stringtrace_ml.model import (
     PITCH_MIN,
     ModelConfig,
     StringFretNet,
+    build_pitch_onset_targets,
     transcription_loss,
 )
 from stringtrace_ml.onset_position import (
@@ -87,6 +90,11 @@ from stringtrace_ml.onset_position import (
     extract_onset_patch,
     group_event_indexes,
     pitch_mask,
+)
+from stringtrace_ml.onset_position_bundle import (
+    BUNDLE_KIND,
+    build_research_bundle,
+    load_research_bundle,
 )
 from stringtrace_ml.prepare_reference import export_reference
 from stringtrace_ml.prepare_guitarset_stems import (
@@ -1280,6 +1288,10 @@ class StringTraceMlTest(unittest.TestCase):
                 dataset.groups[0].input_confidences,
                 (0.8, 0.6),
             )
+            self.assertEqual(
+                dataset.groups[0].input_durations,
+                (0.0, 0.0),
+            )
             self.assertEqual(dataset.groups[1].event_indexes, ())
 
             positive_only_dataset = OnsetPositionDataset(
@@ -1449,6 +1461,133 @@ class StringTraceMlTest(unittest.TestCase):
         self.assertEqual(tuple(output.shape), (3, 2))
         with self.assertRaisesRegex(ValueError, "temporal context"):
             head(torch.zeros((3, 384)))
+
+        extended = candidate_temporal_context(
+            [0.1, 0.5, 1.5],
+            [[64], [64, 67], [69]],
+            [[0.8], [0.6, 0.8], [0.5]],
+            [[0.4], [0.2, 0.6], [0.1]],
+            repeat_interval=0.75,
+            maximum_interval=2.0,
+            feature_count=12,
+        )
+        self.assertEqual(extended.shape, (3, 12))
+        np.testing.assert_allclose(
+            extended[1, 6:],
+            np.asarray(
+                [0.8, 0.6, 0.1, 3 / 48, 0.2, 0.1],
+                dtype=np.float32,
+            ),
+        )
+        extended_head = CandidateActivityHead(
+            OnsetPositionConfig(),
+            CandidateActivityConfig(
+                hidden_size=8,
+                dropout=0,
+                temporal_feature_count=12,
+            ),
+        )
+        self.assertEqual(
+            tuple(
+                extended_head(
+                    torch.zeros((3, 384)),
+                    torch.from_numpy(extended),
+                ).shape
+            ),
+            (3, 2),
+        )
+
+    def test_onset_position_research_bundle_is_bound_to_its_models(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            feature_config = FeatureConfig()
+            position_config = OnsetPositionConfig(
+                convolution_channels=(4, 6, 8),
+                hidden_size=16,
+                dropout=0,
+                use_candidate_confidence=True,
+            )
+            position_path = root / "position.pt"
+            torch.save(
+                {
+                    "format_version": 1,
+                    "model_state": OnsetPositionNet(
+                        feature_config,
+                        position_config,
+                    ).state_dict(),
+                    "model_config": position_config.to_dict(),
+                    "feature_config": feature_config.to_dict(),
+                    "metadata": {"name": "test-position"},
+                },
+                position_path,
+            )
+            position_hash = sha256_file(position_path)
+
+            def write_activity(
+                name: str,
+                config: CandidateActivityConfig,
+            ) -> Path:
+                path = root / name
+                torch.save(
+                    {
+                        "format_version": 1,
+                        "model_state": CandidateActivityHead(
+                            position_config,
+                            config,
+                        ).state_dict(),
+                        "activity_config": config.to_dict(),
+                        "position_config": position_config.to_dict(),
+                        "feature_config": feature_config.to_dict(),
+                        "metadata": {
+                            "base_checkpoint": {
+                                "name": position_path.name,
+                                "sha256": position_hash,
+                            }
+                        },
+                    },
+                    path,
+                )
+                return path
+
+            primary_path = write_activity(
+                "primary.pt",
+                CandidateActivityConfig(temporal_feature_count=6),
+            )
+            supplemental_path = write_activity(
+                "supplemental.pt",
+                CandidateActivityConfig(temporal_feature_count=12),
+            )
+            bundle_path = root / "research-bundle.pt"
+            result = build_research_bundle(
+                position_path,
+                primary_path,
+                supplemental_path,
+                bundle_path,
+                version="test-v1",
+            )
+            loaded = load_research_bundle(
+                bundle_path,
+                torch.device("cpu"),
+            )
+
+            self.assertEqual(result["kind"], BUNDLE_KIND)
+            self.assertEqual(loaded.metadata["release_channel"], "research")
+            self.assertEqual(
+                loaded.primary_activity_head.config.temporal_feature_count,
+                6,
+            )
+            self.assertEqual(
+                loaded.supplemental_activity_head.config.temporal_feature_count,
+                12,
+            )
+            self.assertEqual(
+                loaded.inference_config["supplemental_assignment"][
+                    "minimum_activity_probability"
+                ],
+                0.85,
+            )
 
     def test_candidate_activity_dataset_sampling_weights(
         self,
@@ -1674,6 +1813,21 @@ class StringTraceMlTest(unittest.TestCase):
 
         self.assertEqual(unmatched, [candidates[2]])
 
+    def test_pitch_fusion_keeps_missing_chord_tones(self) -> None:
+        candidates = [
+            {"onset": 1.02, "offset": 1.2, "pitch": 64},
+            {"onset": 1.02, "offset": 1.2, "pitch": 67},
+            {"onset": 1.2, "offset": 1.4, "pitch": 64},
+        ]
+
+        unmatched = unmatched_pitch_candidates(
+            [{"onset": 1.0, "offset": 1.2, "pitch": 64}],
+            candidates,
+            match_tolerance=0.05,
+        )
+
+        self.assertEqual(unmatched, candidates[1:])
+
     def test_onset_fusion_merge_deduplicates_tablature_events(self) -> None:
         primary = [LabeledEvent(0.1, 0.3, 2, 5, confidence=0.8)]
         supplemental = [
@@ -1707,6 +1861,44 @@ class StringTraceMlTest(unittest.TestCase):
                     "1.1",
                 ]
             )
+
+    def test_supplemental_activity_cli_requires_a_supplemental_frontend(
+        self,
+    ) -> None:
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            parse_arguments(
+                [
+                    "--manifest",
+                    "manifest.jsonl",
+                    "--checkpoint",
+                    "position.pt",
+                    "--supplemental-candidate-activity-checkpoint",
+                    "activity.pt",
+                ]
+            )
+
+        parsed = parse_arguments(
+            [
+                "--manifest",
+                "manifest.jsonl",
+                "--checkpoint",
+                "position.pt",
+                "--supplemental-pitch-onset-threshold",
+                "0.25",
+                "--supplemental-candidate-activity-checkpoint",
+                "activity.pt",
+                "--supplemental-minimum-activity-probability",
+                "0.7",
+            ]
+        )
+        self.assertEqual(
+            parsed.supplemental_candidate_activity_checkpoint,
+            Path("activity.pt"),
+        )
+        self.assertEqual(
+            parsed.supplemental_minimum_activity_probability,
+            0.7,
+        )
 
     def test_onset_position_cli_rejects_negative_adapter_scale(self) -> None:
         with patch("sys.stderr"), self.assertRaises(SystemExit):
@@ -2607,6 +2799,106 @@ class StringTraceMlTest(unittest.TestCase):
         )
         self.assertTrue(torch.isfinite(loss))
         self.assertGreater(values["loss"], 0)
+
+    def test_pitch_onset_head_aggregates_equivalent_string_positions(
+        self,
+    ) -> None:
+        model = StringFretNet(
+            ModelConfig(
+                pitch_onset_head=True,
+                pitch_onset_hidden_size=16,
+            )
+        )
+        outputs = model(torch.rand(1, 8, 216))
+        self.assertEqual(outputs["pitch_onset_logits"].shape, (1, 8, 49))
+
+        fret_targets = torch.zeros(1, 8, 6, dtype=torch.long)
+        onset_targets = torch.zeros(1, 8, 6)
+        fret_targets[0, 3, 0] = 1
+        fret_targets[0, 3, 1] = 6
+        onset_targets[0, 3, 0] = 1
+        onset_targets[0, 3, 1] = 1
+        targets = build_pitch_onset_targets(
+            fret_targets,
+            onset_targets,
+        )
+        self.assertEqual(float(targets[0, 3, 64 - PITCH_MIN]), 1)
+        self.assertEqual(int((targets > 0).sum()), 1)
+
+        loss, values = transcription_loss(
+            outputs,
+            fret_targets,
+            onset_targets,
+            torch.ones(1, 8, dtype=torch.bool),
+            pitch_onset_loss_weight=1,
+        )
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreater(float(values["pitch_onset_loss"]), 0)
+
+    def test_pitch_onset_head_only_freezes_every_other_parameter(
+        self,
+    ) -> None:
+        model = StringFretNet(ModelConfig(pitch_onset_head=True))
+
+        configure_trainable_parameters(
+            model,
+            pitch_onset_head_only=True,
+        )
+
+        trainable = {
+            name
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+        }
+        self.assertTrue(trainable)
+        self.assertTrue(
+            all(name.startswith("pitch_onset_head.") for name in trainable)
+        )
+
+    def test_pitch_onset_decoder_retains_local_pitch_peaks(self) -> None:
+        loaded = LoadedModel(
+            model=StringFretNet(ModelConfig(pitch_onset_head=True)),
+            feature_config=FeatureConfig(),
+            metadata={},
+        )
+        probabilities = np.zeros((10, 49), dtype=np.float32)
+        probabilities[2, 24] = 0.8
+        probabilities[3, 24] = 0.7
+        probabilities[7, 24] = 0.9
+        with patch(
+            "stringtrace_ml.evaluate_onset_position."
+            "predict_pitch_onset_probabilities",
+            return_value=probabilities,
+        ):
+            events = direct_pitch_onset_candidates(
+                np.zeros((10, 216), dtype=np.float32),
+                loaded,
+                torch.device("cpu"),
+                onset_threshold=0.5,
+                minimum_onset_gap=0.046,
+            )
+
+        self.assertEqual([event["pitch"] for event in events], [64, 64])
+        self.assertAlmostEqual(float(events[0]["confidence"]), 0.8)
+        self.assertAlmostEqual(float(events[1]["confidence"]), 0.9)
+
+    def test_cqt_feature_augmentation_preserves_shape_and_range(self) -> None:
+        np.random.seed(7)
+        features = np.full((12, 24), 0.5, dtype=np.float32)
+        augmented = augment_cqt_features(
+            features,
+            noise_std=0.03,
+            frequency_mask_bins=4,
+            contrast_range=0.2,
+            spectral_tilt=0.1,
+        )
+
+        self.assertEqual(augmented.shape, features.shape)
+        self.assertEqual(augmented.dtype, np.float32)
+        self.assertGreaterEqual(float(augmented.min()), 0)
+        self.assertLessEqual(float(augmented.max()), 1)
+        self.assertTrue(np.any(augmented == 0))
+        self.assertFalse(np.array_equal(augmented, features))
 
     def test_onset_head_only_freezes_every_other_model_parameter(self) -> None:
         model = StringFretNet(

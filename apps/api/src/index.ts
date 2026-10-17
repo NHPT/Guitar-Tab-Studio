@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import {
   closeSync,
   createReadStream,
@@ -15,15 +15,27 @@ import { relative, resolve } from 'node:path'
 import cors from 'cors'
 import express from 'express'
 import multer from 'multer'
+import { createDeploymentAlertSink } from './alerts.js'
+import {
+  importAuthorizedMediaKeyDatabase,
+  type SeparatedKeyProvider,
+} from './authorized-media-keys.js'
+import { builtinDemoMediaPaths } from './builtin-demo.js'
 import {
   CommunityRequestError,
   createCommunityStore,
 } from './community.js'
 import {
+  authorizedMediaProviderForContent,
+  requiresAuthorizedMediaDecode,
+  scoreImageContentValidationError,
+  scoreUploadPrefilterError,
   uploadContentValidationError,
   uploadPrefilterError,
 } from './media.js'
+import { PipelineInferenceProvider } from './inference.js'
 import { getCapabilities, platforms, sourceFromLink } from './pipeline.js'
+import { importScoreImages } from './score-import.js'
 import {
   approveReview,
   defaultReviewRoot,
@@ -33,15 +45,50 @@ import {
   ReviewRequestError,
   saveReviewDraft,
 } from './reviews.js'
-import { createJob, getDemoProject, getJob, getProject, listJobs } from './store.js'
+import {
+  analysisRequiredBytes,
+  hasAnalysisCapacity,
+  runtimeDataRoot,
+} from './runtime.js'
+import { StorageCleanupService } from './storage-cleanup.js'
+import {
+  cancelJob,
+  createJob,
+  getDemoProject,
+  getJob,
+  getProject,
+  listJobs,
+  listProjectRevisions,
+  ProjectRevisionConflictError,
+  removeProject,
+  restoreProjectRevision,
+  saveProjectRevision,
+  shutdownJobs,
+  storageCleanupProtection,
+} from './store.js'
 
 const port = Number(process.env.PORT ?? 8787)
-const dataRoot = resolve(process.cwd(), 'data')
+const dataRoot = runtimeDataRoot()
 const uploadRoot = resolve(dataRoot, 'uploads')
 const trainingArtifactRoot = resolve(dataRoot, 'community', 'artifacts')
 const trainingArtifactIncomingRoot = resolve(trainingArtifactRoot, '.incoming')
 mkdirSync(uploadRoot, { recursive: true })
 mkdirSync(trainingArtifactIncomingRoot, { recursive: true })
+
+const deploymentAlertUrl = process.env.GTS_DEPLOYMENT_ALERT_URL
+const deploymentAlertSecret = process.env.GTS_DEPLOYMENT_ALERT_SECRET
+if (Boolean(deploymentAlertUrl) !== Boolean(deploymentAlertSecret)) {
+  throw new Error(
+    'GTS_DEPLOYMENT_ALERT_URL and GTS_DEPLOYMENT_ALERT_SECRET must be configured together',
+  )
+}
+const deploymentAlertSink =
+  deploymentAlertUrl && deploymentAlertSecret
+    ? createDeploymentAlertSink({
+        url: deploymentAlertUrl,
+        secret: deploymentAlertSecret,
+      })
+    : undefined
 
 function sha256Buffer(value: Buffer): string {
   return createHash('sha256').update(value).digest('hex')
@@ -130,6 +177,11 @@ const community = createCommunityStore(resolve(dataRoot, 'community'), {
   ),
   runnerLeaseSeconds: Number(process.env.GTS_TRAINING_LEASE_SECONDS ?? 300),
   builtinDatasetManifestSha256: builtinDatasetManifestSha256(),
+  onOperationalAlert: deploymentAlertSink,
+})
+const storageCleanup = new StorageCleanupService({
+  dataRoot,
+  protection: storageCleanupProtection,
 })
 
 const upload = multer({
@@ -147,6 +199,33 @@ const upload = multer({
   },
 })
 
+const scoreUpload = multer({
+  dest: uploadRoot,
+  limits: {
+    files: 24,
+    fileSize: 24 * 1024 * 1024,
+  },
+  fileFilter: (_request, file, callback) => {
+    const validationError = scoreUploadPrefilterError(
+      file.originalname,
+      file.mimetype,
+    )
+    if (!validationError) {
+      callback(null, true)
+      return
+    }
+    callback(new Error(validationError))
+  },
+})
+
+const mediaKeyUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: 1,
+    fileSize: 128 * 1024 * 1024,
+  },
+})
+
 const trainingArtifactUpload = multer({
   dest: trainingArtifactIncomingRoot,
   limits: {
@@ -157,8 +236,23 @@ const trainingArtifactUpload = multer({
 
 const app = express()
 app.disable('x-powered-by')
-app.use(cors({ origin: ['http://localhost:5173', 'http://127.0.0.1:5173'] }))
-app.use(express.json({ limit: '1mb' }))
+const allowedOrigins = new Set([
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  ...(process.env.GTS_DESKTOP_LOCAL === '1' ? ['null'] : []),
+])
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.has(origin)) {
+        callback(null, true)
+        return
+      }
+      callback(new Error('Origin is not allowed'))
+    },
+  }),
+)
+app.use(express.json({ limit: '8mb' }))
 
 function reviewQueueConfig(value: unknown): {
   root: string
@@ -181,6 +275,28 @@ function reviewQueueConfig(value: unknown): {
 
 function communityAccount(request: express.Request) {
   return community.authenticate(request.headers.authorization)
+}
+
+function runtimeAdminAuthorized(request: express.Request): boolean {
+  if (process.env.GTS_DESKTOP_LOCAL === '1') return true
+  const expected = process.env.GTS_RUNTIME_ADMIN_TOKEN
+  const provided = request.headers.authorization?.replace(/^Bearer\s+/iu, '')
+  if (!expected || !provided) return false
+  const expectedBytes = Buffer.from(expected)
+  const providedBytes = Buffer.from(provided)
+  return (
+    expectedBytes.length === providedBytes.length &&
+    timingSafeEqual(expectedBytes, providedBytes)
+  )
+}
+
+function requireRuntimeAdmin(
+  request: express.Request,
+  response: express.Response,
+): boolean {
+  if (runtimeAdminAuthorized(request)) return true
+  response.status(403).json({ error: '需要运行时管理员权限' })
+  return false
 }
 
 function trainingRunner(request: express.Request) {
@@ -209,6 +325,8 @@ function inferenceExecution(jobId: string) {
     },
   }
 }
+
+const inferenceProvider = new PipelineInferenceProvider(inferenceExecution)
 
 function sendCommunityArtifact(
   objectKey: string,
@@ -250,6 +368,25 @@ app.use(
   express.static(resolve(dataRoot, 'jobs'), { dotfiles: 'deny', index: false }),
 )
 
+app.get('/media/builtin/:filename', (request, response) => {
+  const path = builtinDemoMediaPaths.get(request.params.filename)
+  if (!path) {
+    response.status(404).json({ error: '内置音频不存在' })
+    return
+  }
+  const contentType = request.params.filename.endsWith('.flac')
+    ? 'audio/flac'
+    : request.params.filename.endsWith('.m4a')
+      ? 'audio/mp4'
+      : request.params.filename.endsWith('.wav')
+        ? 'audio/wav'
+        : 'audio/mpeg'
+  response
+    .type(contentType)
+    .set('Cache-Control', 'public, max-age=86400')
+    .sendFile(path)
+})
+
 app.get('/media/training/reviews/:filename', (request, response, next) => {
   serveReviewAudio('reference', request.params.filename, response, next)
 })
@@ -278,6 +415,57 @@ app.get('/api/platforms', (_request, response) => {
   response.json({ platforms })
 })
 
+app.get('/api/runtime/storage-cleanup', (request, response) => {
+  if (!requireRuntimeAdmin(request, response)) return
+  response.json(storageCleanup.status())
+})
+
+app.put('/api/runtime/storage-cleanup', (request, response) => {
+  if (!requireRuntimeAdmin(request, response)) return
+  response.json(storageCleanup.updateConfig(request.body))
+})
+
+app.post('/api/runtime/storage-cleanup/run', (request, response) => {
+  if (!requireRuntimeAdmin(request, response)) return
+  storageCleanup.run('manual', { force: true })
+  response.json(storageCleanup.status())
+})
+
+app.post(
+  '/api/runtime/authorized-media-keys/:provider',
+  mediaKeyUpload.single('database'),
+  async (request, response) => {
+    if (!requireRuntimeAdmin(request, response)) return
+    if (process.env.GTS_DESKTOP_LOCAL !== '1') {
+      response.status(403).json({
+        error: '密钥库导入仅允许在桌面本地运行时使用',
+      })
+      return
+    }
+    const provider = String(request.params.provider)
+    if (provider !== 'kuwo' && provider !== 'kugou') {
+      response.status(400).json({ error: '不支持的密钥库类型' })
+      return
+    }
+    if (!request.file) {
+      response.status(400).json({ error: '请选择密钥库文件' })
+      return
+    }
+    try {
+      const count = await importAuthorizedMediaKeyDatabase(
+        provider as SeparatedKeyProvider,
+        request.file.buffer,
+      )
+      response.status(201).json({ provider, count })
+    } catch (error) {
+      response.status(400).json({
+        error:
+          error instanceof Error ? error.message : '密钥库解析失败',
+      })
+    }
+  },
+)
+
 app.get('/api/projects/demo', (_request, response) => {
   response.json(getDemoProject())
 })
@@ -291,12 +479,73 @@ app.get('/api/projects/:id', (request, response) => {
   response.json(project)
 })
 
+app.delete('/api/projects/:id', (request, response) => {
+  response.json({ removed: removeProject(request.params.id) })
+})
+
+app.get('/api/projects/:id/revisions', (request, response) => {
+  response.json({ revisions: listProjectRevisions(request.params.id) })
+})
+
+app.post('/api/projects/:id/revisions', (request, response) => {
+  try {
+    if (request.body?.project?.id !== request.params.id) {
+      response.status(400).json({ error: '项目标识不一致' })
+      return
+    }
+    response.status(201).json(
+      saveProjectRevision(
+        request.body.project,
+        request.body.label,
+        request.body.kind,
+        request.body.expectedParentRevisionId,
+      ),
+    )
+  } catch (error) {
+    response.status(
+      error instanceof ProjectRevisionConflictError ? 409 : 400,
+    ).json({
+      error: error instanceof Error ? error.message : '保存修订失败',
+    })
+  }
+})
+
+app.post(
+  '/api/projects/:id/revisions/:revisionId/restore',
+  (request, response) => {
+    try {
+      const revision = restoreProjectRevision(
+        request.params.id,
+        request.params.revisionId,
+      )
+      if (!revision) {
+        response.status(404).json({ error: '项目修订不存在' })
+        return
+      }
+      response.status(201).json(revision)
+    } catch (error) {
+      response.status(400).json({
+        error: error instanceof Error ? error.message : '恢复修订失败',
+      })
+    }
+  },
+)
+
 app.get('/api/jobs', (_request, response) => {
   response.json({ jobs: listJobs() })
 })
 
 app.get('/api/jobs/:id', (request, response) => {
   const job = getJob(request.params.id)
+  if (!job) {
+    response.status(404).json({ error: '任务不存在' })
+    return
+  }
+  response.json(job)
+})
+
+app.post('/api/jobs/:id/cancel', (request, response) => {
+  const job = cancelJob(request.params.id)
   if (!job) {
     response.status(404).json({ error: '任务不存在' })
     return
@@ -781,9 +1030,38 @@ app.post('/api/import/link', (request, response) => {
     return
   }
 
+  if (!hasAnalysisCapacity(0)) {
+    storageCleanup.run('capacity', {
+      requiredBytes: analysisRequiredBytes(0),
+    })
+  }
+  if (!hasAnalysisCapacity(0)) {
+    response.status(507).json({
+      error: '可用磁盘空间不足，自动清理后仍无法安全开始分析',
+    })
+    return
+  }
+
   try {
     const source = sourceFromLink(url)
-    const job = createJob(source, undefined, inferenceExecution)
+    const authorizedProcessing =
+      request.body?.authorizedProcessingConsent === true &&
+      request.body?.authorizationPolicyVersion === 2
+    const protectedProvider =
+      source.kind === 'qqmusic' || source.kind === 'netease'
+        ? source.kind
+        : null
+    if (authorizedProcessing && protectedProvider) {
+      source.authorizedMedia = {
+        provider: protectedProvider,
+        purpose: 'analysis-and-score-generation',
+        decodedOutput: 'ephemeral',
+        policyVersion: 2,
+      }
+    }
+    const job = createJob(source, undefined, inferenceProvider, {
+      onSettled: () => storageCleanup.run('job-settled'),
+    })
     response.status(202).json(job)
   } catch (error) {
     response.status(400).json({
@@ -807,9 +1085,42 @@ app.post('/api/import/upload', upload.single('media'), (request, response) => {
     request.file.mimetype,
     header.subarray(0, bytesRead),
   )
-  if (validationError) {
+  const requiresAuthorizedDecode = requiresAuthorizedMediaDecode(
+    request.file.originalname,
+    header.subarray(0, bytesRead),
+  )
+  const authorizedProcessing =
+    request.body?.authorizedProcessingConsent === 'true' &&
+    request.body?.authorizationPolicyVersion === '2'
+  const protectedProvider =
+    authorizedMediaProviderForContent(
+      request.file.originalname,
+      header.subarray(0, bytesRead),
+    ) ?? 'unknown'
+  if (requiresAuthorizedDecode && !authorizedProcessing) {
+    unlinkSync(request.file.path)
+    response.status(409).json({
+      error: '该文件需要确认版权与处理声明后才能临时解码',
+      code: 'authorized_media_consent_required',
+      provider: protectedProvider,
+    })
+    return
+  }
+  if (validationError && !requiresAuthorizedDecode) {
     unlinkSync(request.file.path)
     response.status(400).json({ error: validationError })
+    return
+  }
+  if (!hasAnalysisCapacity(request.file.size)) {
+    storageCleanup.run('capacity', {
+      requiredBytes: analysisRequiredBytes(request.file.size),
+    })
+  }
+  if (!hasAnalysisCapacity(request.file.size)) {
+    unlinkSync(request.file.path)
+    response.status(507).json({
+      error: '可用磁盘空间不足，自动清理后仍无法安全完成分轨与转录',
+    })
     return
   }
 
@@ -818,12 +1129,75 @@ app.post('/api/import/upload', upload.single('media'), (request, response) => {
       kind: 'upload',
       label: '本地上传',
       filename: request.file.originalname,
+      authorizedMedia: requiresAuthorizedDecode
+        ? {
+            provider: protectedProvider,
+            purpose: 'analysis-and-score-generation',
+            decodedOutput: 'ephemeral',
+            policyVersion: 2,
+          }
+        : undefined,
     },
     request.file.path,
-    inferenceExecution,
+    inferenceProvider,
+    {
+      removeInputOnSettled: true,
+      onSettled: () => storageCleanup.run('job-settled'),
+    },
   )
   response.status(202).json(job)
 })
+
+app.post(
+  '/api/import/score',
+  scoreUpload.array('score', 24),
+  async (request, response) => {
+    const files = Array.isArray(request.files)
+      ? request.files as Express.Multer.File[]
+      : []
+    if (files.length === 0) {
+      response.status(400).json({ error: '请选择曲谱图片或 PDF' })
+      return
+    }
+    try {
+      for (const file of files) {
+        const header = Buffer.alloc(16)
+        const descriptor = openSync(file.path, 'r')
+        const bytesRead = readSync(descriptor, header, 0, header.length, 0)
+        closeSync(descriptor)
+        const validationError = scoreImageContentValidationError(
+          file.originalname,
+          file.mimetype,
+          header.subarray(0, bytesRead),
+        )
+        if (validationError) throw new Error(validationError)
+      }
+      const originalName =
+        typeof request.body?.originalName === 'string' &&
+        request.body.originalName.trim()
+          ? request.body.originalName.trim().slice(0, 255)
+          : files[0].originalname
+      const project = await importScoreImages(
+        files.map((file) => file.path),
+        originalName,
+      )
+      const revision = saveProjectRevision(project, '图片曲谱识别', 'import')
+      response.status(201).json(revision.project)
+    } catch (error) {
+      response.status(400).json({
+        error: error instanceof Error ? error.message : '曲谱识别失败',
+      })
+    } finally {
+      for (const file of files) {
+        try {
+          unlinkSync(file.path)
+        } catch {
+          // The periodic cleanup will remove an upload that is still locked.
+        }
+      }
+    }
+  },
+)
 
 app.use(
   (
@@ -840,6 +1214,27 @@ app.use(
   },
 )
 
-app.listen(port, '127.0.0.1', () => {
+const server = app.listen(port, '127.0.0.1', () => {
   console.log(`Guitar Tab Studio API listening on http://127.0.0.1:${port}`)
 })
+const startupCleanupTimer = setTimeout(
+  () => storageCleanup.run('startup'),
+  1000,
+)
+startupCleanupTimer.unref()
+const cleanupInterval = setInterval(
+  () => storageCleanup.run('interval'),
+  30 * 60 * 1000,
+)
+cleanupInterval.unref()
+
+function shutdown(): void {
+  clearTimeout(startupCleanupTimer)
+  clearInterval(cleanupInterval)
+  shutdownJobs()
+  server.close(() => process.exit(0))
+  setTimeout(() => process.exit(1), 5000).unref()
+}
+
+process.once('SIGTERM', shutdown)
+process.once('SIGINT', shutdown)

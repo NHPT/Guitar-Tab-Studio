@@ -25,6 +25,7 @@ from .inference import (
     LoadedModel,
     decode_events,
     load_checkpoint as load_frame_checkpoint,
+    predict_pitch_onset_probabilities,
     predict_probabilities,
 )
 from .metrics import evaluate_events
@@ -272,8 +273,19 @@ def assign_detected_events(
                 ]
                 for group in grouped_events
             ],
+            [
+                [
+                    max(
+                        0.0,
+                        float(event["offset"]) - float(event["onset"]),
+                    )
+                    for event in group
+                ]
+                for group in grouped_events
+            ],
             repeat_interval=activity_head.config.repeat_interval,
             maximum_interval=activity_head.config.temporal_max_interval,
+            feature_count=activity_head.config.temporal_feature_count,
         )
         if (
             activity_head is not None
@@ -466,6 +478,75 @@ def direct_onset_candidates(
     ]
 
 
+def direct_pitch_onset_candidates(
+    features: np.ndarray,
+    loaded: LoadedModel,
+    device: torch.device,
+    *,
+    onset_threshold: float,
+    minimum_onset_gap: float,
+    minimum_duration: float = 0.12,
+) -> list[dict[str, float | int]]:
+    probabilities = predict_pitch_onset_probabilities(
+        loaded,
+        features,
+        device=device,
+    )
+    minimum_gap_frames = max(
+        1,
+        round(minimum_onset_gap * loaded.feature_config.frames_per_second),
+    )
+    seconds_per_frame = 1 / loaded.feature_config.frames_per_second
+    events: list[dict[str, float | int]] = []
+    for pitch_index in range(PITCH_COUNT):
+        retained_frames: list[int] = []
+        for frame in range(probabilities.shape[0]):
+            confidence = float(probabilities[frame, pitch_index])
+            previous = (
+                float(probabilities[frame - 1, pitch_index])
+                if frame > 0
+                else 0.0
+            )
+            following = (
+                float(probabilities[frame + 1, pitch_index])
+                if frame + 1 < probabilities.shape[0]
+                else 0.0
+            )
+            if (
+                confidence < onset_threshold
+                or confidence < previous
+                or confidence < following
+            ):
+                continue
+            if (
+                retained_frames
+                and frame - retained_frames[-1] < minimum_gap_frames
+            ):
+                if confidence > float(
+                    probabilities[retained_frames[-1], pitch_index]
+                ):
+                    retained_frames[-1] = frame
+                continue
+            retained_frames.append(frame)
+        for frame in retained_frames:
+            onset = frame * seconds_per_frame
+            events.append(
+                {
+                    "onset": round(onset, 4),
+                    "offset": round(onset + minimum_duration, 4),
+                    "pitch": PITCH_MIN + pitch_index,
+                    "confidence": round(
+                        float(probabilities[frame, pitch_index]),
+                        4,
+                    ),
+                }
+            )
+    return sorted(
+        events,
+        key=lambda event: (float(event["onset"]), int(event["pitch"])),
+    )
+
+
 def unmatched_onset_candidates(
     primary: list[dict[str, float | int]],
     candidates: list[dict[str, float | int]],
@@ -488,6 +569,31 @@ def unmatched_onset_candidates(
         ):
             continue
         unmatched.extend(candidates[index] for index in indexes)
+    return sorted(
+        unmatched,
+        key=lambda event: (float(event["onset"]), int(event["pitch"])),
+    )
+
+
+def unmatched_pitch_candidates(
+    primary: list[dict[str, float | int]],
+    candidates: list[dict[str, float | int]],
+    *,
+    match_tolerance: float,
+) -> list[dict[str, float | int]]:
+    unmatched = [
+        candidate
+        for candidate in candidates
+        if not any(
+            int(primary_event["pitch"]) == int(candidate["pitch"])
+            and abs(
+                float(primary_event["onset"])
+                - float(candidate["onset"])
+            )
+            <= match_tolerance
+            for primary_event in primary
+        )
+    ]
     return sorted(
         unmatched,
         key=lambda event: (float(event["onset"]), int(event["pitch"])),
@@ -521,6 +627,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--adapter-scale", type=float)
     parser.add_argument("--candidate-activity-checkpoint", type=Path)
+    parser.add_argument(
+        "--supplemental-candidate-activity-checkpoint",
+        type=Path,
+    )
     parser.add_argument(
         "--minimum-activity-probability",
         type=float,
@@ -559,12 +669,25 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
     )
     parser.add_argument(
+        "--supplemental-minimum-activity-probability",
+        type=float,
+    )
+    parser.add_argument(
+        "--supplemental-minimum-repeat-probability",
+        type=float,
+    )
+    parser.add_argument(
         "--onset-fusion-checkpoint",
         type=Path,
         help=(
             "Experimental frame model used only to propose onset groups "
             "missing from the pitch frontend."
         ),
+    )
+    parser.add_argument(
+        "--onset-fusion-kind",
+        choices=("string", "pitch"),
+        default="string",
     )
     parser.add_argument(
         "--onset-fusion-onset-threshold",
@@ -677,6 +800,27 @@ def parse_arguments(arguments: list[str] | None = None) -> Namespace:
             "--supplemental-repeat-minimum-direct-probability "
             "must be in 0..1"
         )
+    optional_probabilities = (
+        (
+            "--supplemental-minimum-activity-probability",
+            parsed.supplemental_minimum_activity_probability,
+        ),
+        (
+            "--supplemental-minimum-repeat-probability",
+            parsed.supplemental_minimum_repeat_probability,
+        ),
+    )
+    for name, value in optional_probabilities:
+        if value is not None and not 0 <= value <= 1:
+            parser.error(f"{name} must be in 0..1")
+    if (
+        parsed.supplemental_candidate_activity_checkpoint is not None
+        and parsed.supplemental_pitch_onset_threshold is None
+    ):
+        parser.error(
+            "--supplemental-candidate-activity-checkpoint requires "
+            "--supplemental-pitch-onset-threshold"
+        )
     positive_arguments = (
         (
             "--onset-fusion-minimum-onset-gap",
@@ -728,6 +872,18 @@ def main() -> None:
             model_config,
             device,
         )
+    supplemental_activity_head = activity_head
+    supplemental_activity_metadata = activity_metadata
+    if arguments.supplemental_candidate_activity_checkpoint is not None:
+        (
+            supplemental_activity_head,
+            supplemental_activity_metadata,
+        ) = load_candidate_activity_head(
+            arguments.supplemental_candidate_activity_checkpoint,
+            arguments.checkpoint,
+            model_config,
+            device,
+        )
     cqt_dataset = GuitarTabDataset(
         arguments.manifest,
         split=arguments.split,
@@ -753,6 +909,14 @@ def main() -> None:
             arguments.onset_fusion_checkpoint,
             device,
         )
+        if (
+            arguments.onset_fusion_kind == "pitch"
+            and not frame_model.model.config.pitch_onset_head
+        ):
+            raise ValueError(
+                "Pitch onset fusion requires a checkpoint with a "
+                "pitch onset head"
+            )
         if frame_model.feature_config == feature_config:
             frame_cqt_dataset = cqt_dataset
         else:
@@ -848,12 +1012,25 @@ def main() -> None:
                 minimum_output_confidence=(
                     arguments.minimum_output_confidence
                 ),
-                activity_head=activity_head,
+                activity_head=supplemental_activity_head,
                 minimum_activity_probability=(
-                    arguments.minimum_activity_probability
+                    arguments.supplemental_minimum_activity_probability
+                    if (
+                        arguments.supplemental_minimum_activity_probability
+                        is not None
+                    )
+                    else arguments.minimum_activity_probability
                 ),
                 minimum_repeat_probability=(
-                    arguments.minimum_repeat_probability
+                    (
+                        arguments.supplemental_minimum_repeat_probability
+                        if (
+                            arguments
+                            .supplemental_minimum_repeat_probability
+                            is not None
+                        )
+                        else arguments.minimum_repeat_probability
+                    )
                     if (
                         arguments
                         .supplemental_repeat_minimum_direct_probability
@@ -883,26 +1060,58 @@ def main() -> None:
             frame_features = frame_cqt_dataset.load_track_features(
                 arguments.start + index - 1
             )
-            direct_candidates = direct_onset_candidates(
-                frame_features,
-                frame_model,
-                device,
-                onset_threshold=arguments.onset_fusion_onset_threshold,
-                activity_threshold=arguments.onset_fusion_activity_threshold,
-                minimum_onset_gap=(
-                    arguments.onset_fusion_minimum_onset_gap
-                ),
-                activity_context=arguments.onset_fusion_activity_context,
-                activity_delay=arguments.onset_fusion_activity_delay,
-                minimum_event_confidence=(
-                    arguments.onset_fusion_minimum_event_confidence
-                ),
+            direct_candidates = (
+                direct_pitch_onset_candidates(
+                    frame_features,
+                    frame_model,
+                    device,
+                    onset_threshold=(
+                        arguments.onset_fusion_onset_threshold
+                    ),
+                    minimum_onset_gap=(
+                        arguments.onset_fusion_minimum_onset_gap
+                    ),
+                )
+                if arguments.onset_fusion_kind == "pitch"
+                else direct_onset_candidates(
+                    frame_features,
+                    frame_model,
+                    device,
+                    onset_threshold=(
+                        arguments.onset_fusion_onset_threshold
+                    ),
+                    activity_threshold=(
+                        arguments.onset_fusion_activity_threshold
+                    ),
+                    minimum_onset_gap=(
+                        arguments.onset_fusion_minimum_onset_gap
+                    ),
+                    activity_context=(
+                        arguments.onset_fusion_activity_context
+                    ),
+                    activity_delay=arguments.onset_fusion_activity_delay,
+                    minimum_event_confidence=(
+                        arguments.onset_fusion_minimum_event_confidence
+                    ),
+                )
             )
-            unmatched_candidates = unmatched_onset_candidates(
-                pitch_frontend_events,
-                direct_candidates,
-                group_tolerance=model_config.group_tolerance,
-                match_tolerance=arguments.onset_fusion_match_tolerance,
+            unmatched_candidates = (
+                unmatched_pitch_candidates(
+                    pitch_frontend_events,
+                    direct_candidates,
+                    match_tolerance=(
+                        arguments.onset_fusion_match_tolerance
+                    ),
+                )
+                if arguments.onset_fusion_kind == "pitch"
+                else unmatched_onset_candidates(
+                    pitch_frontend_events,
+                    direct_candidates,
+                    group_tolerance=model_config.group_tolerance,
+                    match_tolerance=(
+                        arguments.onset_fusion_match_tolerance
+                    ),
+                )
             )
             fusion_predictions = assign_detected_events(
                 unmatched_candidates,
@@ -1051,6 +1260,48 @@ def main() -> None:
                         arguments
                         .supplemental_repeat_minimum_direct_probability
                     ),
+                    "candidate_activity": (
+                        {
+                            **supplemental_activity_metadata,
+                            "checkpoint": {
+                                "name": (
+                                    arguments
+                                    .supplemental_candidate_activity_checkpoint
+                                    .name
+                                ),
+                                "sha256": sha256_file(
+                                    arguments
+                                    .supplemental_candidate_activity_checkpoint
+                                ),
+                            },
+                            "minimum_activity_probability": (
+                                arguments
+                                .supplemental_minimum_activity_probability
+                                if (
+                                    arguments
+                                    .supplemental_minimum_activity_probability
+                                    is not None
+                                )
+                                else arguments.minimum_activity_probability
+                            ),
+                            "minimum_repeat_probability": (
+                                arguments
+                                .supplemental_minimum_repeat_probability
+                                if (
+                                    arguments
+                                    .supplemental_minimum_repeat_probability
+                                    is not None
+                                )
+                                else arguments.minimum_repeat_probability
+                            ),
+                        }
+                        if (
+                            arguments
+                            .supplemental_candidate_activity_checkpoint
+                            is not None
+                        )
+                        else None
+                    ),
                 }
                 if arguments.supplemental_pitch_onset_threshold is not None
                 else None
@@ -1058,6 +1309,7 @@ def main() -> None:
             "onset_fusion": (
                 {
                     "status": "experimental",
+                    "kind": arguments.onset_fusion_kind,
                     "candidate_model": {
                         **frame_model.metadata,
                         "checkpoint": {

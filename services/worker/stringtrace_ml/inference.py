@@ -124,6 +124,43 @@ def predict_probabilities_with_position(
     )
 
 
+def predict_pitch_onset_probabilities(
+    loaded: LoadedModel,
+    features: np.ndarray,
+    *,
+    device: torch.device,
+    chunk_frames: int = 512,
+    overlap_frames: int = 64,
+) -> np.ndarray:
+    if not loaded.model.config.pitch_onset_head:
+        raise ValueError("Checkpoint does not contain a pitch onset head")
+    frame_count = features.shape[0]
+    probability_sum = np.zeros(
+        (frame_count, PITCH_COUNT),
+        dtype=np.float32,
+    )
+    counts = np.zeros((frame_count, 1), dtype=np.float32)
+    with torch.no_grad():
+        for start in _chunk_starts(
+            frame_count,
+            chunk_frames,
+            overlap_frames,
+        ):
+            end = min(frame_count, start + chunk_frames)
+            batch = torch.from_numpy(
+                features[start:end]
+            ).unsqueeze(0).to(device)
+            outputs = loaded.model(batch)
+            probability_sum[start:end] += (
+                torch.sigmoid(outputs["pitch_onset_logits"])[0]
+                .detach()
+                .cpu()
+                .numpy()
+            )
+            counts[start:end] += 1
+    return probability_sum / counts
+
+
 def decode_events(
     fret_probabilities: np.ndarray,
     onset_probabilities: np.ndarray,

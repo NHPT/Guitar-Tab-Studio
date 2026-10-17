@@ -4,12 +4,21 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.util
+import io
 import json
 import math
 import os
+import platform
+import re
 import shutil
 import subprocess
 import sys
+import time
+import urllib.request
+import zipfile
+from collections import deque
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
@@ -34,6 +43,90 @@ TECHNIQUE_LABELS = (
     "pinch-harmonic",
     "vibrato",
 )
+MIN_ANALYSIS_FREE_BYTES = 1024 * 1024 * 1024
+MIN_SEPARATION_FREE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_EXTERNAL_ERROR_BYTES = 16 * 1024
+NOISE2FRET_ARCHIVE_URL = (
+    "https://zenodo.org/api/records/23037260/files/"
+    "CheckpointsGOAT.zip/content"
+)
+NOISE2FRET_ARCHIVE_SHA256 = (
+    "82e4fe8f0a4e99816a875980c391d5e552841da80d6cb09d61939e8efbeb52d6"
+)
+NOISE2FRET_ARCHIVE_BYTES = 111_317_004
+NOISE2FRET_MODEL_SHA256 = (
+    "1f454f75e9e6f44d80286e2c13188264b10d09c08fa8bdd791b1c809217bab95"
+)
+MR_MT3_MODEL_URL = (
+    "https://huggingface.co/gudgud1014/MR-MT3/resolve/main/mt3.pth"
+)
+MR_MT3_MODEL_SHA256 = (
+    "b8a3807ed265059abd25ad7f68142c06c35e8f6144dcaa45bd55946a3745398f"
+)
+MR_MT3_MODEL_BYTES = 183_672_643
+YOURMT3_MODEL_URL = (
+    "https://huggingface.co/spaces/mimbres/YourMT3/resolve/main/"
+    "amt/logs/2024/"
+    "mc13_256_g4_all_v7_mt3f_sqr_rms_moe_wf4_n8k2_silu_rope_rp_b36_nops/"
+    "checkpoints/last.ckpt"
+)
+YOURMT3_MODEL_SHA256 = (
+    "ae38e415c79efd5592dcb9b658cdb99ddb11d4c4e1eaa364cab04a052473fc25"
+)
+YOURMT3_MODEL_BYTES = 561_544_628
+_MODEL_PROGRESS_RANGE = (0.0, 100.0, "正在下载模型")
+
+
+def emit_model_event(event_type: str, **payload: object) -> None:
+    print(
+        json.dumps(
+            {"type": event_type, **payload},
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+
+
+def emit_model_progress(progress: float, stage_label: str) -> None:
+    emit_model_event(
+        "gts-model-progress",
+        progress=round(max(0.0, min(100.0, progress)), 2),
+        stageLabel=stage_label,
+    )
+
+
+def configure_model_progress(
+    start: float,
+    end: float,
+    stage_label: str,
+) -> None:
+    global _MODEL_PROGRESS_RANGE
+    _MODEL_PROGRESS_RANGE = (start, end, stage_label)
+
+
+def model_download_tqdm():
+    from tqdm.auto import tqdm
+
+    class GTSModelDownloadTqdm(tqdm):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            kwargs["file"] = io.StringIO()
+            kwargs["mininterval"] = 0.2
+            super().__init__(*args, **kwargs)
+            self._last_emitted = -1
+
+        def update(self, amount: float = 1) -> bool | None:
+            changed = super().update(amount)
+            if self.total:
+                start, end, label = _MODEL_PROGRESS_RANGE
+                percent = max(0.0, min(1.0, self.n / self.total))
+                mapped = round(start + (end - start) * percent, 2)
+                whole = int(mapped)
+                if whole != self._last_emitted:
+                    self._last_emitted = whole
+                    emit_model_progress(mapped, label)
+            return changed
+
+    return GTSModelDownloadTqdm
 
 
 @dataclass
@@ -73,9 +166,645 @@ class AudioFeature:
 
 
 def run(command: list[str]) -> None:
-    completed = subprocess.run(command, check=False)
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
     if completed.returncode != 0:
-        raise RuntimeError(f"Command failed ({completed.returncode}): {' '.join(command)}")
+        if completed.returncode in {28, 228}:
+            raise RuntimeError("可用磁盘空间不足，外部媒体处理命令未能完成")
+        output = f"{getattr(completed, 'stderr', '')}\n{getattr(completed, 'stdout', '')}"
+        detail = next(
+            (
+                line.removeprefix("ERROR: ").strip()
+                for line in reversed(output.splitlines())
+                if line.strip().startswith("ERROR:")
+            ),
+            "",
+        )
+        executable = Path(command[0]).name if command else "external command"
+        raise RuntimeError(
+            f"{executable} failed ({completed.returncode})"
+            + (f": {detail}" if detail else "")
+        )
+
+
+def emit_progress(progress: float, status: str, stage_label: str) -> None:
+    print(
+        json.dumps(
+            {
+                "type": "gts-progress",
+                "progress": round(max(0.0, min(99.0, progress)), 2),
+                "status": status,
+                "stageLabel": stage_label,
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+
+
+def emit_muscriptor_progress(completed: int, total: int) -> None:
+    if total <= 0:
+        return
+    bounded_completed = max(0, min(total, completed))
+    progress = 65 + 15 * bounded_completed / total
+    emit_progress(
+        progress,
+        "transcribing",
+        f"正在识别吉他音符（{bounded_completed}/{total} 个片段）",
+    )
+
+
+def release_torch_accelerator_cache() -> None:
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        elif (
+            hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_available()
+        ):
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
+    except (ImportError, RuntimeError):
+        pass
+
+
+def hardware_probe() -> dict[str, object]:
+    def available(module: str) -> bool:
+        try:
+            parts = module.split(".")
+            root_spec = importlib.util.find_spec(parts[0])
+            if root_spec is None:
+                return False
+            if len(parts) == 1:
+                return True
+            locations = root_spec.submodule_search_locations
+            if locations is None:
+                return False
+            relative = Path(*parts[1:])
+            return any(
+                (Path(location) / relative).is_dir()
+                or (Path(location) / relative).with_suffix(".py").is_file()
+                for location in locations
+            )
+        except (ImportError, ModuleNotFoundError):
+            return False
+
+    accelerator = "cpu"
+    accelerator_name = "CPU"
+    accelerator_memory_bytes = None
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        accelerator = "mps"
+        accelerator_name = "Apple Metal"
+    else:
+        nvidia_smi = shutil.which("nvidia-smi")
+        if nvidia_smi:
+            result = subprocess.run(
+                [
+                    nvidia_smi,
+                    "--query-gpu=name,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            first_gpu = (
+                result.stdout.splitlines()[0]
+                if result.returncode == 0 and result.stdout
+                else ""
+            )
+            match = re.match(r"^(.+),\s*(\d+(?:\.\d+)?)$", first_gpu)
+            if match:
+                name, memory_mib = match.groups()
+                accelerator = "cuda"
+                accelerator_name = name.strip()
+                accelerator_memory_bytes = round(float(memory_mib) * 1024**2)
+    providers = {
+        "basic-pitch": True,
+        "muscriptor": available("muscriptor"),
+        "mr-mt3": available("mt3_infer.models.mr_mt3.t5"),
+        "guitar-specialist": available(
+            "stringtrace_ml.onset_position_bundle"
+        ),
+        "multitrack-research": available(
+            "mt3_infer.adapters.yourmt3"
+        ),
+    }
+    return {
+        "accelerator": accelerator,
+        "acceleratorName": accelerator_name,
+        **(
+            {"acceleratorMemoryBytes": accelerator_memory_bytes}
+            if accelerator_memory_bytes is not None
+            else {}
+        ),
+        "providers": providers,
+    }
+
+
+def prepare_transcription_provider(
+    provider: str,
+    model_reference: str | None,
+    model_variant: str | None = None,
+) -> None:
+    if provider == "basic-pitch":
+        print(
+            json.dumps(
+                {
+                    "type": "gts-model-ready",
+                    "provider": provider,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        return
+    if provider == "multitrack-research":
+        prepare_yourmt3_model()
+        prepare_noise2fret_model()
+        emit_model_event(
+            "gts-model-ready",
+            provider=provider,
+            model="yourmt3",
+            progress=100,
+            stageLabel="多轨研究模型已准备完成",
+        )
+        return
+    if provider == "guitar-specialist":
+        emit_model_event(
+            "gts-model-ready",
+            provider=provider,
+            model="stringtrace",
+            progress=100,
+            stageLabel="吉他专用模型已准备完成",
+        )
+        return
+    if provider != "muscriptor":
+        raise ValueError(f"Unknown transcription provider: {provider}")
+
+    model = model_reference or "medium"
+    if model not in {"small", "medium", "large"}:
+        path = Path(model)
+        if not path.is_file():
+            raise RuntimeError("所选 MuScriptor 权重文件不存在")
+        model_label = "local"
+    else:
+        try:
+            from huggingface_hub import get_token, hf_hub_download
+            from huggingface_hub._login import _save_oauth_token
+            from huggingface_hub.errors import (
+                DeviceCodeError,
+                GatedRepoError,
+                HfHubHTTPError,
+                RepositoryNotFoundError,
+            )
+            from huggingface_hub.utils._oauth_device import (
+                poll_device_token,
+                request_device_code,
+            )
+
+            repository = f"MuScriptor/muscriptor-{model}"
+
+            authorization_completed = False
+
+            def authorize() -> None:
+                nonlocal authorization_completed
+                device_info = request_device_code()
+                def emit_auth_required() -> None:
+                    emit_model_event(
+                        "gts-auth-required",
+                        progress=3,
+                        stageLabel="等待 Hugging Face 登录完成",
+                        authorizationUrl=device_info[
+                            "verification_uri_complete"
+                        ],
+                        userCode=device_info["user_code"],
+                    )
+
+                emit_auth_required()
+                try:
+                    response = poll_device_token(
+                        device_info,
+                        on_pending=emit_auth_required,
+                    )
+                except DeviceCodeError as error:
+                    error_code = getattr(error, "error_code", "")
+                    error_value = getattr(error_code, "value", str(error_code))
+                    if error_value == "access_denied":
+                        raise RuntimeError(
+                            "Hugging Face 登录已取消，请重新尝试"
+                        ) from error
+                    raise RuntimeError(
+                        "Hugging Face 登录等待超时，请重新尝试"
+                    ) from error
+                _save_oauth_token(response)
+                authorization_completed = True
+                emit_model_progress(
+                    5,
+                    "Hugging Face 登录成功，正在检查模型授权",
+                )
+
+            emit_model_progress(2, "正在检查 Hugging Face 登录状态")
+            if get_token() is None:
+                authorize()
+
+            def download(filename: str, start: float, end: float) -> None:
+                configure_model_progress(
+                    start,
+                    end,
+                    f"正在下载 MuScriptor {model} 权重",
+                )
+                license_url = f"https://huggingface.co/{repository}"
+                deadline = time.monotonic() + 15 * 60
+                license_prompted = False
+                while True:
+                    try:
+                        hf_hub_download(
+                            repo_id=repository,
+                            filename=filename,
+                            token=True,
+                            tqdm_class=model_download_tqdm(),
+                        )
+                        return
+                    except (GatedRepoError, RepositoryNotFoundError) as error:
+                        if not license_prompted:
+                            emit_model_event(
+                                "gts-license-required",
+                                progress=start,
+                                stageLabel=(
+                                    "请在浏览器确认 MuScriptor 官方权重许可，"
+                                    "完成后将自动继续"
+                                ),
+                                authorizationUrl=license_url,
+                            )
+                            license_prompted = True
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError(
+                                "MuScriptor 官方权重许可确认超时，请重试"
+                            ) from error
+                        time.sleep(5)
+                    except HfHubHTTPError as error:
+                        status = getattr(error.response, "status_code", None)
+                        if status == 401:
+                            if authorization_completed:
+                                raise RuntimeError(
+                                    "Hugging Face 登录失效，请重试"
+                                ) from error
+                            authorize()
+                            continue
+                        if status != 403:
+                            raise
+                        if not license_prompted:
+                            emit_model_event(
+                                "gts-license-required",
+                                progress=start,
+                                stageLabel=(
+                                    "请在浏览器确认 MuScriptor 官方权重许可，"
+                                    "完成后将自动继续"
+                                ),
+                                authorizationUrl=license_url,
+                            )
+                            license_prompted = True
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError(
+                                "Hugging Face 授权确认超时，请重试"
+                            ) from error
+                        time.sleep(5)
+
+            emit_model_progress(6, f"正在检查 MuScriptor {model} 权重")
+            download("model.safetensors", 6, 68)
+            emit_model_progress(69, "正在验证 MuScriptor 模型配置")
+            download("config.json", 69, 72)
+        except HfHubHTTPError as error:
+            raise RuntimeError(
+                "MuScriptor 权重下载失败，请检查网络后重试"
+            ) from error
+        model_label = model
+    prepare_noise2fret_model()
+    selected_variant = (
+        model_variant
+        if model_variant in {"small", "medium", "large"}
+        else model if model in {"small", "medium", "large"} else "medium"
+    )
+    if (
+        selected_variant != "small"
+        and hardware_probe()["accelerator"] == "cuda"
+    ):
+        prepare_mr_mt3_model()
+    emit_model_event(
+        "gts-model-ready",
+        provider=provider,
+        model=model_label,
+        progress=100,
+        stageLabel="高精度模型已准备完成",
+    )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _download_with_resume(
+    url: str,
+    destination: Path,
+    expected_size: int,
+    label: str,
+    progress_start: float,
+    progress_end: float,
+) -> None:
+    existing_size = destination.stat().st_size if destination.exists() else 0
+    if existing_size > expected_size:
+        destination.unlink()
+        existing_size = 0
+    request = urllib.request.Request(url)
+    if existing_size:
+        request.add_header("Range", f"bytes={existing_size}-")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            append = existing_size > 0 and response.status == 206
+            total = existing_size if append else 0
+            with destination.open("ab" if append else "wb") as output:
+                while chunk := response.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > expected_size:
+                        raise RuntimeError(f"{label} 下载大小超过预期")
+                    output.write(chunk)
+                    fraction = total / expected_size
+                    emit_model_progress(
+                        progress_start
+                        + (progress_end - progress_start) * fraction,
+                        f"正在下载 {label}",
+                    )
+    except Exception as error:
+        raise RuntimeError(f"{label}下载失败，请检查网络后重试") from error
+    if destination.stat().st_size != expected_size:
+        raise RuntimeError(f"{label}下载不完整，请重试")
+
+
+def prepare_noise2fret_model() -> Path:
+    configured_root = os.environ.get("GTS_MODEL_PROVIDER_ROOT")
+    if not configured_root:
+        raise RuntimeError("高精度模型存储目录未配置")
+    root = Path(configured_root).resolve() / "noise2fret" / "1.0.0"
+    destination = root / "model.pth"
+    manifest = root / "manifest.json"
+    if (
+        destination.is_file()
+        and _sha256(destination) == NOISE2FRET_MODEL_SHA256
+    ):
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "provider": "noise2fret",
+                    "version": "1.0.0",
+                    "sizeBytes": destination.stat().st_size,
+                    "sha256": NOISE2FRET_MODEL_SHA256,
+                    "license": "CC-BY-4.0",
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return destination
+    root.mkdir(parents=True, exist_ok=True)
+    archive = root / "CheckpointsGOAT.zip.part"
+    emit_model_progress(73, "正在下载 Noise2Fret 弦品模型")
+    _download_with_resume(
+        NOISE2FRET_ARCHIVE_URL,
+        archive,
+        NOISE2FRET_ARCHIVE_BYTES,
+        "Noise2Fret 权重",
+        73,
+        86,
+    )
+    emit_model_progress(87, "正在验证 Noise2Fret 弦品模型")
+    if _sha256(archive) != NOISE2FRET_ARCHIVE_SHA256:
+        archive.unlink(missing_ok=True)
+        raise RuntimeError("Noise2Fret 权重校验失败")
+    member = (
+        "GOAT_N2F_Laux/my_checkpoints/best_checkpoint.pth"
+    )
+    temporary = destination.with_suffix(".pth.part")
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            with bundle.open(member) as source, temporary.open("wb") as output:
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+        if _sha256(temporary) != NOISE2FRET_MODEL_SHA256:
+            raise RuntimeError("Noise2Fret 模型文件校验失败")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "provider": "noise2fret",
+                    "version": "1.0.0",
+                    "sizeBytes": destination.stat().st_size,
+                    "sha256": NOISE2FRET_MODEL_SHA256,
+                    "license": "CC-BY-4.0",
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(manifest, 0o600)
+        archive.unlink(missing_ok=True)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+def prepare_mr_mt3_model() -> Path:
+    configured_root = os.environ.get("GTS_MODEL_PROVIDER_ROOT")
+    if not configured_root:
+        raise RuntimeError("高精度模型存储目录未配置")
+    root = Path(configured_root).resolve() / "mr-mt3" / "1.0.0"
+    destination = root / "model.pth"
+    manifest = root / "manifest.json"
+    if destination.is_file() and _sha256(destination) == MR_MT3_MODEL_SHA256:
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "provider": "mr-mt3",
+                    "version": "1.0.0",
+                    "sizeBytes": destination.stat().st_size,
+                    "sha256": MR_MT3_MODEL_SHA256,
+                    "license": "MIT",
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return destination
+    root.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".pth.part")
+    emit_model_progress(89, "正在下载 MR-MT3 复核模型")
+    _download_with_resume(
+        MR_MT3_MODEL_URL,
+        temporary,
+        MR_MT3_MODEL_BYTES,
+        "MR-MT3 权重",
+        89,
+        97,
+    )
+    emit_model_progress(98, "正在验证 MR-MT3 复核模型")
+    if _sha256(temporary) != MR_MT3_MODEL_SHA256:
+        temporary.unlink(missing_ok=True)
+        raise RuntimeError("MR-MT3 权重校验失败")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, destination)
+    manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "provider": "mr-mt3",
+                "version": "1.0.0",
+                "sizeBytes": destination.stat().st_size,
+                "sha256": MR_MT3_MODEL_SHA256,
+                "license": "MIT",
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(manifest, 0o600)
+    return destination
+
+
+def prepare_yourmt3_model() -> Path:
+    configured_root = os.environ.get("GTS_MODEL_PROVIDER_ROOT")
+    if not configured_root:
+        raise RuntimeError("研究模型存储目录未配置")
+    root = Path(configured_root).resolve() / "yourmt3" / "1.0.0"
+    destination = root / "last.ckpt"
+    manifest = root / "manifest.json"
+    if destination.is_file() and _sha256(destination) == YOURMT3_MODEL_SHA256:
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "provider": "yourmt3",
+                    "version": "1.0.0",
+                    "sizeBytes": destination.stat().st_size,
+                    "sha256": YOURMT3_MODEL_SHA256,
+                    "license": "research-only",
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return destination
+    root.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".ckpt.part")
+    emit_model_progress(6, "正在下载 YourMT3+ 多轨研究模型")
+    _download_with_resume(
+        YOURMT3_MODEL_URL,
+        temporary,
+        YOURMT3_MODEL_BYTES,
+        "YourMT3+ 权重",
+        6,
+        70,
+    )
+    emit_model_progress(71, "正在验证 YourMT3+ 多轨研究模型")
+    if _sha256(temporary) != YOURMT3_MODEL_SHA256:
+        temporary.unlink(missing_ok=True)
+        raise RuntimeError("YourMT3+ 权重校验失败")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, destination)
+    manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "provider": "yourmt3",
+                "version": "1.0.0",
+                "sizeBytes": destination.stat().st_size,
+                "sha256": YOURMT3_MODEL_SHA256,
+                "license": "research-only",
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(manifest, 0o600)
+    return destination
+
+
+def run_with_percent_progress(
+    command: list[str],
+    *,
+    start: float,
+    end: float,
+    status: str,
+    stage_label: str,
+) -> None:
+    process = subprocess.Popen(
+        command,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=0,
+    )
+    assert process.stderr is not None
+    buffer = ""
+    error_tail: deque[str] = deque(maxlen=MAX_EXTERNAL_ERROR_BYTES)
+    last_percent = -1
+    while True:
+        character = process.stderr.read(1)
+        if character == "":
+            break
+        sys.stderr.write(character)
+        error_tail.append(character)
+        buffer += character
+        if character not in "\r\n":
+            continue
+        match = re.search(r"(\d{1,3})%\|", buffer)
+        buffer = ""
+        if not match:
+            continue
+        percent = min(100, int(match.group(1)))
+        if percent < last_percent + 2 and percent != 100:
+            continue
+        last_percent = percent
+        emit_progress(
+            start + (end - start) * percent / 100,
+            status,
+            f"{stage_label} {percent}%",
+        )
+    return_code = process.wait()
+    if return_code != 0:
+        if return_code in {28, 228} or re.search(
+            r"no space left on device|errno\s*28",
+            "".join(error_tail),
+            re.IGNORECASE,
+        ):
+            raise RuntimeError("可用磁盘空间不足，外部媒体处理命令未能完成")
+        if "demucs.separate" in command:
+            raise RuntimeError("音轨分离进程异常退出")
+        raise RuntimeError(
+            f"Command failed ({return_code}): {' '.join(command)}"
+        )
 
 
 def require_command(command: str) -> str:
@@ -95,15 +824,41 @@ def ffmpeg_command() -> str:
 def acquire_url(url: str, destination: Path) -> tuple[Path, dict[str, object]]:
     ffmpeg = ffmpeg_command()
     output = destination / "source.%(ext)s"
+    javascript_runtime = (
+        ["--js-runtimes", "node"]
+        if shutil.which("node")
+        else []
+    )
+    session_options: list[str] = []
+    cookies_file = os.environ.get("GTS_MEDIA_COOKIES_FILE")
+    if cookies_file:
+        cookies_path = Path(cookies_file)
+        if not cookies_path.is_file():
+            raise RuntimeError("Configured media cookies file is unavailable")
+        session_options.extend(["--cookies", str(cookies_path)])
+    proxy = os.environ.get("GTS_MEDIA_PROXY")
+    if proxy:
+        session_options.extend(["--proxy", proxy])
+    user_agent = os.environ.get("GTS_MEDIA_USER_AGENT")
+    if user_agent:
+        session_options.extend(["--user-agent", user_agent])
     run(
         [
             sys.executable,
             "-m",
             "yt_dlp",
+            "--no-config",
             "--no-playlist",
+            "--no-cache-dir",
+            "--extractor-retries",
+            "3",
+            "--fragment-retries",
+            "3",
+            *javascript_runtime,
+            *session_options,
             "--write-info-json",
             "--format",
-            "bestaudio/best",
+            "bestaudio[acodec!=none]/best[acodec!=none]/bestaudio/best",
             "--ffmpeg-location",
             ffmpeg,
             "--output",
@@ -120,52 +875,350 @@ def acquire_url(url: str, destination: Path) -> tuple[Path, dict[str, object]]:
         raise RuntimeError("The media adapter did not produce an audio file")
     info_path = destination / "source.info.json"
     metadata: dict[str, object] = {"title": matches[0].stem, "artist": "在线媒体"}
+    embedded_lyrics: list[dict[str, object]] = []
     if info_path.exists():
         info = json.loads(info_path.read_text(encoding="utf-8"))
+        creators = info.get("creators")
+        creator = (
+            creators[0]
+            if isinstance(creators, list) and creators
+            else info.get("creator")
+        )
         metadata = {
             "title": info.get("title") or matches[0].stem,
-            "artist": info.get("uploader") or info.get("artist") or "在线媒体",
+            "artist": (
+                info.get("uploader")
+                or info.get("artist")
+                or info.get("album_artist")
+                or creator
+                or "在线媒体"
+            ),
             "duration": info.get("duration"),
             "webpage_url": info.get("webpage_url") or url,
         }
+        description = info.get("description")
+        if isinstance(description, str):
+            embedded_lyrics = parse_timed_lyric_text(description)
+    timed_lyrics = fetch_timed_lyric_lines(url) or embedded_lyrics
+    if timed_lyrics:
+        metadata["timed_lyrics"] = timed_lyrics
     return matches[0], metadata
+
+
+def parse_timed_lyric_text(raw: str) -> list[dict[str, object]]:
+    lines: list[dict[str, object]] = []
+    for line in raw.splitlines():
+        timestamp = re.match(r"\[(\d+):(\d+(?:\.\d+)?)\](.*)", line)
+        if not timestamp:
+            continue
+        text = timestamp.group(3).strip()
+        if (
+            not text
+            or re.match(r"^(作词|作曲|编曲|制作|混音|母带)\s*[:：]", text)
+        ):
+            continue
+        lines.append(
+            {
+                "at": int(timestamp.group(1)) * 60 + float(timestamp.group(2)),
+                "text": text,
+            }
+        )
+    return lines
+
+
+def fetch_timed_lyric_lines(url: str) -> list[dict[str, object]]:
+    """Fetch public timestamped lyrics when the source exposes them."""
+    from urllib.parse import urlencode
+    from urllib.request import Request, urlopen
+
+    if "music.163.com" not in url:
+        return []
+    matched = re.search(r"(?:id=|song/)(\d+)", url)
+    if not matched:
+        return []
+    endpoint = "https://music.163.com/api/song/lyric?" + urlencode(
+        {
+            "id": matched.group(1),
+            "lv": 1,
+            "kv": 1,
+            "tv": -1,
+        }
+    )
+    try:
+        request = Request(
+            endpoint,
+            headers={
+                "Referer": "https://music.163.com/",
+                "User-Agent": "Mozilla/5.0",
+            },
+        )
+        with urlopen(request, timeout=8) as response:
+            payload = json.load(response)
+        raw = payload.get("lrc", {}).get("lyric", "")
+    except Exception:
+        return []
+    return parse_timed_lyric_text(str(raw))
 
 
 def normalize_audio(source: Path, destination: Path) -> Path:
     ffmpeg = ffmpeg_command()
     normalized = destination / "normalized.wav"
-    run(
-        [
-            ffmpeg,
-            "-y",
-            "-i",
-            str(source),
-            "-vn",
-            "-ac",
-            "2",
-            "-ar",
-            "44100",
-            "-c:a",
-            "pcm_s16le",
-            str(normalized),
-        ]
-    )
+    normalized.unlink(missing_ok=True)
+    available_bytes = shutil.disk_usage(destination).free
+    required_bytes = max(MIN_ANALYSIS_FREE_BYTES, source.stat().st_size * 4)
+    if available_bytes < required_bytes:
+        raise RuntimeError(
+            "可用磁盘空间不足，无法安全完成音频标准化与分轨"
+        )
+    try:
+        run(
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(source),
+                "-vn",
+                "-ac",
+                "2",
+                "-ar",
+                "44100",
+                "-c:a",
+                "pcm_s16le",
+                str(normalized),
+            ]
+        )
+    except Exception:
+        normalized.unlink(missing_ok=True)
+        raise
     return normalized
+
+
+def decoded_audio_duration(path: Path) -> float:
+    import soundfile as sf
+
+    info = sf.info(path)
+    return float(info.frames / info.samplerate)
+
+
+def extract_vocal_melody(path: Path) -> list[dict[str, object]]:
+    """Extract a conservative monophonic melody track from the vocal stem."""
+    import librosa
+    import numpy as np
+    from scipy.ndimage import median_filter
+
+    audio, sample_rate = librosa.load(path, sr=16000, mono=True)
+    if audio.size == 0:
+        return []
+    hop_length = 256
+    f0, voiced, probability = librosa.pyin(
+        audio,
+        fmin=librosa.note_to_hz("C2"),
+        fmax=librosa.note_to_hz("C6"),
+        sr=sample_rate,
+        frame_length=2048,
+        hop_length=hop_length,
+    )
+    probability = np.nan_to_num(probability, nan=0.0)
+    midi = np.nan_to_num(librosa.hz_to_midi(f0), nan=-1.0)
+    midi = median_filter(midi, size=5, mode="nearest")
+    pitches = np.rint(midi).astype(np.int16)
+    active = voiced & (probability >= 0.35) & (pitches >= 36) & (pitches <= 84)
+    frame_times = librosa.frames_to_time(
+        np.arange(len(pitches)),
+        sr=sample_rate,
+        hop_length=hop_length,
+    )
+    notes: list[dict[str, object]] = []
+    start = 0
+    while start < len(pitches):
+        if not active[start]:
+            start += 1
+            continue
+        pitch = int(pitches[start])
+        end = start + 1
+        while (
+            end < len(pitches)
+            and active[end]
+            and int(pitches[end]) == pitch
+        ):
+            end += 1
+        duration = (end - start) * hop_length / sample_rate
+        if duration >= 0.064:
+            segment = pitches[start:end][active[start:end]]
+            resolved_pitch = int(np.median(segment)) if segment.size else pitch
+            note = {
+                "start": round(float(frame_times[start]), 4),
+                "end": round(float(frame_times[min(end, len(frame_times) - 1)]), 4),
+                "pitch": resolved_pitch,
+                "confidence": round(float(np.mean(probability[start:end])), 4),
+            }
+            previous = notes[-1] if notes else None
+            if (
+                previous
+                and previous["pitch"] == note["pitch"]
+                and float(note["start"]) - float(previous["end"]) <= 0.1
+            ):
+                previous["end"] = note["end"]
+                previous["confidence"] = round(
+                    (
+                        float(previous["confidence"])
+                        + float(note["confidence"])
+                    )
+                    / 2,
+                    4,
+                )
+            else:
+                notes.append(note)
+        start = end
+    previous: dict[str, object] | None = None
+    for note in notes:
+        if previous and float(note["start"]) - float(previous["end"]) <= 0.9:
+            candidates = [
+                int(note["pitch"]) + octave
+                for octave in (-12, 0, 12)
+                if 36 <= int(note["pitch"]) + octave <= 84
+            ]
+            note["pitch"] = min(
+                candidates,
+                key=lambda candidate: abs(candidate - int(previous["pitch"])),
+            )
+        previous = note
+    return notes
+
+
+def align_lyrics_to_melody(
+    lyric_lines: list[dict[str, object]],
+    melody: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Place lyric words on nearby vocal-note attacks."""
+    tokens: list[dict[str, object]] = []
+    for index, line in enumerate(lyric_lines):
+        start = float(line["at"])
+        end = (
+            float(lyric_lines[index + 1]["at"])
+            if index + 1 < len(lyric_lines)
+            else start + 6
+        )
+        text = str(line["text"]).strip()
+        if re.search(r"[\u3400-\u9fff]", text):
+            words = [
+                character
+                for character in text
+                if not character.isspace() and character not in "，。！？、；："
+            ]
+        else:
+            words = re.findall(r"[A-Za-z0-9]+(?:['’][A-Za-z]+)?", text)
+        if not words:
+            continue
+        attacks = [
+            float(note["start"])
+            for note in melody
+            if start <= float(note["start"]) < end
+        ]
+        for word_index, word in enumerate(words):
+            target = start + (end - start) * (
+                (word_index + 0.35) / max(1, len(words))
+            )
+            if len(attacks) >= len(words):
+                attack_index = min(
+                    len(attacks) - 1,
+                    round(
+                        word_index
+                        * (len(attacks) - 1)
+                        / max(1, len(words) - 1)
+                    ),
+                )
+                at = attacks[attack_index]
+            else:
+                at = target
+            tokens.append({"at": round(at, 4), "text": word})
+    return tokens
+
+
+def complete_vocal_melody_for_lyrics(
+    melody: list[dict[str, object]],
+    lyrics: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Ensure every timed lyric has a readable numbered-note anchor."""
+    if not melody or not lyrics:
+        return melody
+    completed = [dict(note) for note in melody]
+    original = [dict(note) for note in melody]
+    for lyric_index, lyric in enumerate(lyrics):
+        at = float(lyric["at"])
+        if any(abs(float(note["start"]) - at) <= 0.025 for note in completed):
+            continue
+        nearest = min(
+            original,
+            key=lambda note: min(
+                abs(float(note["start"]) - at),
+                abs(float(note["end"]) - at),
+            ),
+        )
+        distance = min(
+            abs(float(nearest["start"]) - at),
+            abs(float(nearest["end"]) - at),
+        )
+        next_at = (
+            float(lyrics[lyric_index + 1]["at"])
+            if lyric_index + 1 < len(lyrics)
+            else at + 0.5
+        )
+        completed.append(
+            {
+                "start": round(at, 4),
+                "end": round(
+                    at + max(0.08, min(0.5, next_at - at)),
+                    4,
+                ),
+                "pitch": int(nearest["pitch"]),
+                "confidence": round(
+                    max(
+                        0.15 if distance > 0.85 else 0.2,
+                        float(nearest["confidence"])
+                        * (0.5 if distance > 0.85 else 0.72),
+                    ),
+                    4,
+                ),
+            }
+        )
+    completed.sort(key=lambda note: (float(note["start"]), int(note["pitch"])))
+    return completed
 
 
 def separate_audio(source: Path, destination: Path) -> dict[str, Path]:
     stems_root = destination / "stems"
-    run(
-        [
-            sys.executable,
-            "-m",
-            "demucs.separate",
-            "-n",
-            "htdemucs_6s",
-            "--out",
-            str(stems_root),
-            str(source),
-        ]
+    available_bytes = shutil.disk_usage(destination).free
+    required_bytes = max(
+        MIN_SEPARATION_FREE_BYTES,
+        source.stat().st_size * 10,
+    )
+    if available_bytes < required_bytes:
+        raise RuntimeError(
+            "可用磁盘空间不足，无法安全完成六轨音频分离"
+        )
+    command = [
+        sys.executable,
+        "-m",
+        "demucs.separate",
+        "-n",
+        "htdemucs_6s",
+        "--out",
+        str(stems_root),
+    ]
+    model_repository = os.environ.get("DEMUCS_MODEL_REPOSITORY")
+    if model_repository:
+        repository = Path(model_repository)
+        if not repository.is_dir():
+            raise RuntimeError("Configured Demucs model repository is unavailable")
+        command.extend(["--repo", str(repository)])
+    command.append(str(source))
+    run_with_percent_progress(
+        command,
+        start=22,
+        end=50,
+        status="separating",
+        stage_label="正在分离人声与乐器",
     )
     result_root = stems_root / "htdemucs_6s" / source.stem
     expected = ("vocals", "guitar", "bass", "drums", "piano", "other")
@@ -174,6 +1227,491 @@ def separate_audio(source: Path, destination: Path) -> dict[str, Path]:
     if missing:
         raise RuntimeError(f"Demucs output is incomplete: {', '.join(missing)}")
     return stems
+
+
+def suppress_guitar_stem_leakage(
+    guitar: Path,
+    references: dict[str, Path],
+    destination: Path,
+) -> tuple[Path, dict[str, float]]:
+    """Remove only components coherent with independently separated stems."""
+    import librosa
+    import numpy as np
+    import soundfile as sf
+    from scipy.ndimage import uniform_filter
+
+    audio, sample_rate = librosa.load(guitar, sr=22050, mono=False)
+    if audio.ndim == 1:
+        audio = np.stack([audio, audio])
+    if audio.size == 0:
+        return guitar, {
+            "removed_energy_ratio": 0.0,
+            "retained_rms_ratio": 1.0,
+        }
+
+    original_rms = float(np.sqrt(np.mean(np.square(audio))))
+    cleaned_channels: list[np.ndarray] = []
+    for channel_index in range(audio.shape[0]):
+        source_channel = audio[channel_index]
+        source_spectrum = librosa.stft(
+            source_channel,
+            n_fft=2048,
+            hop_length=512,
+        )
+        residual = source_spectrum.copy()
+        reference_peak = np.zeros_like(np.abs(source_spectrum))
+        for reference in references.values():
+            reference_audio, _ = librosa.load(
+                reference,
+                sr=sample_rate,
+                mono=False,
+            )
+            if reference_audio.ndim == 1:
+                reference_channel = reference_audio
+            else:
+                reference_channel = reference_audio[
+                    min(channel_index, reference_audio.shape[0] - 1)
+                ]
+            aligned = np.zeros_like(source_channel)
+            sample_count = min(len(aligned), len(reference_channel))
+            aligned[:sample_count] = reference_channel[:sample_count]
+            if float(np.sqrt(np.mean(np.square(aligned)))) < original_rms * 0.01:
+                continue
+            reference_spectrum = librosa.stft(
+                aligned,
+                n_fft=2048,
+                hop_length=512,
+            )
+            frame_count = min(
+                residual.shape[1],
+                reference_spectrum.shape[1],
+            )
+            current = residual[:, :frame_count]
+            reference_slice = reference_spectrum[:, :frame_count]
+            reference_peak[:, :frame_count] = np.maximum(
+                reference_peak[:, :frame_count],
+                np.abs(reference_slice),
+            )
+            cross_power = np.sum(
+                current * np.conjugate(reference_slice),
+                axis=1,
+            )
+            current_power = np.sum(np.square(np.abs(current)), axis=1)
+            reference_power = np.sum(
+                np.square(np.abs(reference_slice)),
+                axis=1,
+            )
+            coherence = np.square(np.abs(cross_power)) / np.maximum(
+                current_power * reference_power,
+                1e-12,
+            )
+            suppression = np.clip((coherence - 0.35) / 0.45, 0.0, 1.0)
+            transfer = cross_power / np.maximum(reference_power, 1e-12)
+            transfer_magnitude = np.abs(transfer)
+            transfer *= np.minimum(
+                1.0,
+                0.8 / np.maximum(transfer_magnitude, 1e-8),
+            )
+            residual[:, :frame_count] = (
+                current
+                - transfer[:, None]
+                * suppression[:, None]
+                * reference_slice
+            )
+        dominance = np.abs(source_spectrum) / np.maximum(
+            reference_peak,
+            1e-8,
+        )
+        competition_mask = 0.18 + 0.82 * np.clip(
+            (dominance - 0.5) / 1.5,
+            0.0,
+            1.0,
+        )
+        competition_mask = uniform_filter(
+            competition_mask,
+            size=(3, 5),
+            mode="nearest",
+        )
+        residual *= competition_mask
+        cleaned_channels.append(
+            librosa.istft(
+                residual,
+                hop_length=512,
+                length=len(source_channel),
+            )
+        )
+
+    cleaned = np.stack(cleaned_channels)
+    cleaned_rms = float(np.sqrt(np.mean(np.square(cleaned))))
+    retained_rms_ratio = cleaned_rms / max(original_rms, 1e-8)
+    # Keep the processor conservative when references are musically correlated.
+    if retained_rms_ratio < 0.72:
+        original_share = (0.72 - retained_rms_ratio) / max(
+            1e-8,
+            1.0 - retained_rms_ratio,
+        )
+        cleaned = cleaned * (1.0 - original_share) + audio * original_share
+        cleaned_rms = float(np.sqrt(np.mean(np.square(cleaned))))
+        retained_rms_ratio = cleaned_rms / max(original_rms, 1e-8)
+
+    removed = audio - cleaned
+    removed_energy_ratio = float(
+        np.sum(np.square(removed)) /
+        max(float(np.sum(np.square(audio))), 1e-12)
+    )
+    cleaned_root = destination / "cleaned-stems"
+    cleaned_root.mkdir(parents=True, exist_ok=True)
+    path = cleaned_root / "guitar.wav"
+    sf.write(
+        path,
+        np.clip(cleaned.T, -1, 1),
+        sample_rate,
+        subtype="PCM_16",
+    )
+    return path, {
+        "removed_energy_ratio": round(removed_energy_ratio, 6),
+        "retained_rms_ratio": round(retained_rms_ratio, 6),
+    }
+
+
+def separate_guitar_parts(
+    guitar: Path,
+    destination: Path,
+) -> list[dict[str, object]]:
+    """Split spatially distinct guitars without inventing duplicate tracks."""
+    import librosa
+    import numpy as np
+    import soundfile as sf
+
+    audio, sample_rate = librosa.load(guitar, sr=22050, mono=False)
+    if audio.ndim != 2 or audio.shape[0] < 2 or audio.shape[1] < sample_rate * 4:
+        return []
+    left = librosa.stft(audio[0], n_fft=2048, hop_length=512)
+    right = librosa.stft(audio[1], n_fft=2048, hop_length=512)
+    left_magnitude = np.abs(left)
+    right_magnitude = np.abs(right)
+    energy = left_magnitude + right_magnitude
+    active = energy >= np.percentile(energy, 72)
+    if not np.any(active):
+        return []
+    balance = (right_magnitude - left_magnitude) / np.maximum(energy, 1e-8)
+    values = balance[active]
+    weights = energy[active]
+    order = np.argsort(values)
+    sorted_values = values[order]
+    cumulative = np.cumsum(weights[order])
+    cumulative /= max(float(cumulative[-1]), 1e-8)
+    centers = np.array(
+        [
+            sorted_values[np.searchsorted(cumulative, 0.28)],
+            sorted_values[np.searchsorted(cumulative, 0.72)],
+        ],
+        dtype=np.float32,
+    )
+    for _iteration in range(8):
+        distances = np.abs(values[:, None] - centers[None, :])
+        labels = np.argmin(distances, axis=1)
+        updated = []
+        for index in range(2):
+            selected = labels == index
+            if not np.any(selected):
+                return []
+            updated.append(
+                float(np.average(values[selected], weights=weights[selected]))
+            )
+        centers = np.asarray(updated, dtype=np.float32)
+    if centers[0] > centers[1]:
+        centers = centers[::-1]
+    center_distance = float(centers[1] - centers[0])
+    distances = np.abs(values[:, None] - centers[None, :])
+    labels = np.argmin(distances, axis=1)
+    shares = np.array(
+        [
+            float(np.sum(weights[labels == index]) / np.sum(weights))
+            for index in range(2)
+        ]
+    )
+    # A narrow stereo field is one aggregate guitar, not evidence of two parts.
+    if center_distance < 0.16 or float(np.min(shares)) < 0.14:
+        return []
+
+    part_root = destination / "guitar-parts"
+    part_root.mkdir(parents=True, exist_ok=True)
+    try:
+        import warnings
+
+        from sklearn.decomposition import FastICA
+        from sklearn.exceptions import ConvergenceWarning
+
+        observations = audio.T.astype(np.float64)
+        stride = max(1, len(observations) // 300_000)
+        separator = FastICA(
+            n_components=2,
+            whiten="unit-variance",
+            max_iter=1000,
+            tol=1e-5,
+            random_state=0,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ConvergenceWarning)
+            separator.fit(observations[::stride])
+        sources = separator.transform(observations)
+        contributions = [
+            np.outer(sources[:, index], separator.mixing_[:, index])
+            + separator.mean_ / 2
+            for index in range(2)
+        ]
+
+        def spatial_balance(part: np.ndarray) -> float:
+            left_level = float(np.sqrt(np.mean(np.square(part[:, 0]))))
+            right_level = float(np.sqrt(np.mean(np.square(part[:, 1]))))
+            return (right_level - left_level) / max(
+                right_level + left_level,
+                1e-8,
+            )
+
+        contributions.sort(key=spatial_balance)
+        component_levels = [
+            float(np.sqrt(np.mean(np.square(part))))
+            for part in contributions
+        ]
+        component_correlation = float(
+            np.corrcoef(
+                np.mean(contributions[0], axis=1),
+                np.mean(contributions[1], axis=1),
+            )[0, 1]
+        )
+        component_balance_distance = (
+            spatial_balance(contributions[1])
+            - spatial_balance(contributions[0])
+        )
+        if (
+            math.isfinite(component_correlation)
+            and abs(component_correlation) <= 0.2
+            and component_balance_distance >= 0.16
+            and min(component_levels) >= max(component_levels) * 0.08
+        ):
+            parts: list[dict[str, object]] = []
+            for index, part in enumerate(contributions):
+                path = part_root / f"guitar_{index + 1}.wav"
+                sf.write(
+                    path,
+                    np.clip(part, -1, 1),
+                    sample_rate,
+                    subtype="PCM_16",
+                )
+                parts.append(
+                    {
+                        "id": f"guitar-{index + 1}",
+                        "name": f"吉他 {index + 1}",
+                        "role": "guitar",
+                        "path": path,
+                        "separation_confidence": round(
+                            min(0.97, 0.68 + component_balance_distance * 0.2),
+                            4,
+                        ),
+                        "separation_method": "fastica-stereo-unmix-v1",
+                    }
+                )
+            return parts
+    except Exception:
+        pass
+
+    scale = max(0.06, center_distance * 0.42)
+    log_scores = np.stack(
+        [
+            -8.0 * np.square((balance - centers[index]) / scale)
+            for index in range(2)
+        ]
+    )
+    # Sharpen the partition without breaking reconstruction. The previous
+    # broad masks left an audible copy of each spatial part in the other.
+    scores = np.exp(log_scores - np.max(log_scores, axis=0, keepdims=True))
+    masks = scores / np.sum(scores, axis=0, keepdims=True)
+    parts: list[dict[str, object]] = []
+    reconstructed: list[np.ndarray] = []
+    for index in range(2):
+        channels = [
+            librosa.istft(
+                channel * masks[index],
+                hop_length=512,
+                length=audio.shape[1],
+            )
+            for channel in (left, right)
+        ]
+        part = np.stack(channels, axis=1)
+        reconstructed.append(np.mean(part, axis=1))
+        path = part_root / f"guitar_{index + 1}.wav"
+        sf.write(path, np.clip(part, -1, 1), sample_rate, subtype="PCM_16")
+        parts.append(
+            {
+                "id": f"guitar-{index + 1}",
+                "name": f"吉他 {index + 1}",
+                "role": "guitar",
+                "path": path,
+                "separation_confidence": round(
+                    min(0.95, 0.55 + center_distance * 0.8), 4
+                ),
+                "separation_method": "coherent-leakage-suppression+stereo-spatial-mask-v3",
+            }
+        )
+    correlation = float(np.corrcoef(reconstructed)[0, 1])
+    if not math.isfinite(correlation) or abs(correlation) > 0.985:
+        for part in parts:
+            Path(part["path"]).unlink(missing_ok=True)
+        return []
+    return parts
+
+
+def suppress_vocal_leakage_in_guitar_part(
+    guitar_part: Path,
+    vocals: Path,
+    destination: Path,
+) -> tuple[Path, dict[str, float]]:
+    """Attenuate vocal-shaped bins after spatial guitar separation."""
+    import librosa
+    import numpy as np
+    import soundfile as sf
+    from scipy.ndimage import uniform_filter
+
+    sample_rate = 22050
+    part_audio, _ = librosa.load(
+        guitar_part,
+        sr=sample_rate,
+        mono=False,
+    )
+    vocal_audio, _ = librosa.load(
+        vocals,
+        sr=sample_rate,
+        mono=False,
+    )
+    if part_audio.ndim == 1:
+        part_audio = np.stack([part_audio, part_audio])
+    if vocal_audio.ndim == 1:
+        vocal_audio = np.stack([vocal_audio, vocal_audio])
+    sample_count = min(part_audio.shape[1], vocal_audio.shape[1])
+    if sample_count == 0:
+        return guitar_part, {
+            "retained_rms_ratio": 1.0,
+            "vocal_similarity_reduction": 0.0,
+        }
+    part_audio = part_audio[:, :sample_count]
+    vocal_audio = vocal_audio[:, :sample_count]
+    part_rms = float(np.sqrt(np.mean(np.square(part_audio))))
+    vocal_rms = float(np.sqrt(np.mean(np.square(vocal_audio))))
+    reference_scale = min(
+        1.5,
+        max(0.12, part_rms / max(vocal_rms, 1e-8) * 3.4),
+    )
+
+    cleaned_channels: list[np.ndarray] = []
+    before_similarity: list[np.ndarray] = []
+    after_similarity: list[np.ndarray] = []
+    for channel_index in range(part_audio.shape[0]):
+        part_spectrum = librosa.stft(
+            part_audio[channel_index],
+            n_fft=2048,
+            hop_length=256,
+        )
+        vocal_spectrum = librosa.stft(
+            vocal_audio[min(channel_index, vocal_audio.shape[0] - 1)],
+            n_fft=2048,
+            hop_length=256,
+        )
+        frame_count = min(part_spectrum.shape[1], vocal_spectrum.shape[1])
+        part_spectrum = part_spectrum[:, :frame_count]
+        vocal_spectrum = vocal_spectrum[:, :frame_count]
+        part_magnitude = np.abs(part_spectrum)
+        vocal_magnitude = np.abs(vocal_spectrum)
+        vocal_frame_rms = np.sqrt(np.mean(np.square(vocal_magnitude), axis=0))
+        vocal_activity = np.clip(
+            (
+                librosa.amplitude_to_db(
+                    vocal_frame_rms,
+                    ref=np.max,
+                )
+                + 45
+            )
+            / 15,
+            0,
+            1,
+        )
+        estimated_leakage = reference_scale * vocal_magnitude
+        mask = np.square(part_magnitude) / np.maximum(
+            np.square(part_magnitude) + np.square(estimated_leakage),
+            1e-12,
+        )
+        mask = np.maximum(
+            0.06,
+            uniform_filter(mask, size=(3, 7), mode="nearest"),
+        )
+        mask = 1 - vocal_activity[None, :] * (1 - mask)
+        cleaned_spectrum = part_spectrum * mask
+        cleaned_channels.append(
+            librosa.istft(
+                cleaned_spectrum,
+                hop_length=256,
+                length=sample_count,
+            )
+        )
+
+        active = vocal_activity >= 0.25
+        if np.any(active):
+            denominator = (
+                np.linalg.norm(part_magnitude, axis=0)
+                * np.linalg.norm(vocal_magnitude, axis=0)
+                + 1e-12
+            )
+            before_similarity.append(
+                (
+                    np.sum(part_magnitude * vocal_magnitude, axis=0)
+                    / denominator
+                )[active]
+            )
+            cleaned_magnitude = np.abs(cleaned_spectrum)
+            cleaned_denominator = (
+                np.linalg.norm(cleaned_magnitude, axis=0)
+                * np.linalg.norm(vocal_magnitude, axis=0)
+                + 1e-12
+            )
+            after_similarity.append(
+                (
+                    np.sum(cleaned_magnitude * vocal_magnitude, axis=0)
+                    / cleaned_denominator
+                )[active]
+            )
+
+    cleaned = np.stack(cleaned_channels)
+    cleaned_rms = float(np.sqrt(np.mean(np.square(cleaned))))
+    before = (
+        float(np.median(np.concatenate(before_similarity)))
+        if before_similarity
+        else 0.0
+    )
+    after = (
+        float(np.median(np.concatenate(after_similarity)))
+        if after_similarity
+        else before
+    )
+    cleaned_root = destination / "debleeded-guitar-parts"
+    cleaned_root.mkdir(parents=True, exist_ok=True)
+    path = cleaned_root / f"{guitar_part.stem}.wav"
+    sf.write(
+        path,
+        np.clip(cleaned.T, -1, 1),
+        sample_rate,
+        subtype="PCM_16",
+    )
+    return path, {
+        "retained_rms_ratio": round(
+            cleaned_rms / max(part_rms, 1e-8),
+            6,
+        ),
+        "vocal_similarity_reduction": round(
+            max(0.0, 1.0 - after / max(before, 1e-8)),
+            6,
+        ),
+    }
 
 
 def stabilize_beat_times(
@@ -196,6 +1734,83 @@ def stabilize_beat_times(
     return stabilized
 
 
+def regularize_beat_times(
+    beat_times: Iterable[float],
+    *,
+    maximum_window: int = 49,
+) -> list[float]:
+    """Reduce local detector jitter without flattening real tempo movement."""
+    import numpy as np
+
+    times = np.asarray([float(time) for time in beat_times], dtype=np.float64)
+    if len(times) < 3:
+        return times.tolist()
+    intervals = np.diff(times)
+    valid = intervals[np.isfinite(intervals) & (intervals > 0.08)]
+    if valid.size == 0:
+        return times.tolist()
+    median_interval = float(np.median(valid))
+    maximum_correction = min(0.05, median_interval * 0.1)
+    passes = max(2, min(4, maximum_window // 16))
+    return stabilize_beat_times(
+        times.tolist(),
+        maximum_correction=maximum_correction,
+        passes=passes,
+    )
+
+
+def select_quarter_note_grid(
+    onset_envelope: object,
+    fast_tempo: float,
+    fast_frames: Iterable[int],
+    slow_tempo: float,
+    slow_frames: Iterable[int],
+) -> tuple[float, list[int]]:
+    """Resolve a confident eighth-note/quarter-note octave ambiguity."""
+    import numpy as np
+
+    fast = [int(frame) for frame in fast_frames]
+    slow = [int(frame) for frame in slow_frames]
+    if (
+        not math.isfinite(fast_tempo)
+        or not math.isfinite(slow_tempo)
+        or fast_tempo < 155
+        or not 65 <= slow_tempo <= 100
+        or not 1.85 <= fast_tempo / max(slow_tempo, 1e-8) <= 2.15
+        or not 0.45 <= len(slow) / max(len(fast), 1) <= 0.55
+    ):
+        return fast_tempo, fast
+
+    envelope = np.asarray(onset_envelope)
+
+    def accent_contrast(frames: list[int]) -> float:
+        strengths = np.asarray(
+            [
+                float(
+                    np.max(
+                        envelope[
+                            max(0, frame - 1) :
+                            min(len(envelope), frame + 2)
+                        ],
+                        initial=0.0,
+                    )
+                )
+                for frame in frames
+            ]
+        )
+        if len(strengths) < 8:
+            return 0.0
+        even = float(np.mean(strengths[::2]))
+        odd = float(np.mean(strengths[1::2]))
+        return abs(even - odd) / max(even, odd, 1e-8)
+
+    fast_contrast = accent_contrast(fast)
+    slow_contrast = accent_contrast(slow)
+    if slow_contrast >= 0.06 and slow_contrast - fast_contrast >= 0.045:
+        return slow_tempo, slow
+    return fast_tempo, fast
+
+
 def estimate_tempo(path: Path) -> tuple[float, list[float], list[float]]:
     import librosa
     import numpy as np
@@ -205,12 +1820,25 @@ def estimate_tempo(path: Path) -> tuple[float, list[float], list[float]]:
         y=audio,
         sr=sample_rate,
     )
-    tempo, beat_frames = librosa.beat.beat_track(
+    fast_tempo, fast_beat_frames = librosa.beat.beat_track(
         onset_envelope=onset_envelope,
         sr=sample_rate,
+        start_bpm=120,
         trim=False,
     )
-    value = float(tempo[0] if hasattr(tempo, "__len__") else tempo)
+    slow_tempo, slow_beat_frames = librosa.beat.beat_track(
+        onset_envelope=onset_envelope,
+        sr=sample_rate,
+        start_bpm=80,
+        trim=False,
+    )
+    value, beat_frames = select_quarter_note_grid(
+        onset_envelope,
+        float(np.atleast_1d(fast_tempo)[0]),
+        fast_beat_frames,
+        float(np.atleast_1d(slow_tempo)[0]),
+        slow_beat_frames,
+    )
     bpm = round(value if math.isfinite(value) and value > 0 else 120.0, 2)
     onset_frames = librosa.onset.onset_detect(
         onset_envelope=onset_envelope,
@@ -226,6 +1854,7 @@ def estimate_tempo(path: Path) -> tuple[float, list[float], list[float]]:
         beat_times = [
             time for time in beat_times if time >= first_onset - 0.08
         ]
+    beat_times = regularize_beat_times(beat_times)
     usable_beats = [
         round(float(time), 4)
         for time in beat_times
@@ -1070,7 +2699,11 @@ def transcribe_basic_pitch(
         minimum_note_length=minimum_note_length,
     )
     all_midi_notes = sorted(
-        (note for instrument in midi_data.instruments for note in instrument.notes),
+        (
+            note
+            for instrument in midi_data.instruments
+            for note in instrument.notes
+        ),
         key=lambda note: (note.start, note.pitch),
     )
     midi_notes = [
@@ -1115,8 +2748,13 @@ def transcribe_basic_pitch(
     events = collapse_note_fragments(events)
     events, forced_harmonic_indices = collapse_harmonic_stacks(events)
     features = extract_note_features(path, events)
+    annotated = annotate_techniques(
+        events,
+        features,
+        forced_harmonic_indices,
+    )
     return (
-        annotate_techniques(events, features, forced_harmonic_indices),
+        annotated,
         dropped_note_count,
     )
 
@@ -1161,6 +2799,417 @@ def transcribe_string_model(
             "checkpoint": checkpoint_path.name,
         },
     )
+
+
+def transcribe_muscriptor(
+    path: Path,
+    model_reference: str,
+) -> tuple[list[NoteEvent], int, dict[str, object]]:
+    from importlib.metadata import version
+
+    from muscriptor.events import NoteEndEvent, NoteStartEvent, ProgressEvent
+    from muscriptor.transcription_model import TranscriptionModel
+
+    model = TranscriptionModel.load_model(weights_path=model_reference)
+    starts: dict[int, NoteStartEvent] = {}
+    decoded: list[tuple[float, float, int]] = []
+    for event in model.transcribe(
+        path,
+        instruments=[
+            "acoustic_guitar",
+            "clean_electric_guitar",
+            "distorted_electric_guitar",
+        ],
+    ):
+        if isinstance(event, ProgressEvent):
+            emit_muscriptor_progress(event.completed, event.total)
+            continue
+        if isinstance(event, NoteStartEvent):
+            starts[event.index] = event
+            continue
+        if not isinstance(event, NoteEndEvent):
+            continue
+        start = starts.pop(event.start_event_index, None)
+        if start is None:
+            continue
+        decoded.append(
+            (
+                max(0.0, float(start.start_time)),
+                max(float(start.start_time) + 0.03, float(event.end_time)),
+                int(start.pitch),
+            )
+        )
+    decoded.sort(key=lambda item: (item[0], item[2]))
+    guitar_notes = [
+        item
+        for item in decoded
+        if GUITAR_PITCH_RANGE[0] <= item[2] <= GUITAR_PITCH_RANGE[1]
+    ]
+    dropped_note_count = len(decoded) - len(guitar_notes)
+    groups: list[list[tuple[float, float, int]]] = []
+    for item in guitar_notes:
+        if not groups or item[0] - groups[-1][0][0] > 0.045:
+            groups.append([item])
+        else:
+            groups[-1].append(item)
+
+    events: list[NoteEvent] = []
+    previous_positions: list[tuple[int, int]] = []
+    for group in groups:
+        positions, position_confidence = assign_fingering_group(
+            [item[2] for item in group],
+            previous_positions,
+        )
+        for (start, end, pitch), (string, fret) in zip(
+            group,
+            positions,
+            strict=True,
+        ):
+            events.append(
+                NoteEvent(
+                    start=round(start, 4),
+                    end=round(end, 4),
+                    pitch=pitch,
+                    velocity=96,
+                    string=string,
+                    fret=fret,
+                    technique="pick",
+                    confidence=0.82,
+                    position_confidence=position_confidence,
+                    position_source="muscriptor-pitch-optimizer-v1",
+                )
+            )
+        previous_positions = positions
+
+    events = collapse_note_fragments(events)
+    events, forced_harmonic_indices = collapse_harmonic_stacks(events)
+    features = extract_note_features(path, events)
+    return (
+        annotate_techniques(
+            events,
+            features,
+            forced_harmonic_indices,
+        ),
+        dropped_note_count,
+        {
+            "name": "muscriptor",
+            "version": version("muscriptor"),
+            "kind": "trained",
+            "variant": (
+                model_reference
+                if model_reference in {"small", "medium", "large"}
+                else "local"
+            ),
+            "license": "CC-BY-NC-4.0",
+        },
+    )
+
+
+def transcribe_mr_mt3(
+    path: Path,
+    checkpoint_path: Path,
+) -> tuple[list[NoteEvent], int]:
+    import mido
+    import numpy as np
+    from mt3_infer.adapters.mr_mt3 import MRMT3Adapter
+
+    import librosa
+
+    device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+    audio, _ = librosa.load(path, sr=16000, mono=True)
+    adapter = MRMT3Adapter()
+    adapter.load_model(
+        str(checkpoint_path),
+        device=device,
+    )
+    midi = adapter.transcribe(audio.astype(np.float32), sr=16000)
+    tempo = 500_000
+    elapsed = 0.0
+    active: dict[tuple[int, int], tuple[float, int]] = {}
+    decoded: list[tuple[float, float, int, int]] = []
+    for message in mido.merge_tracks(midi.tracks):
+        elapsed += mido.tick2second(message.time, midi.ticks_per_beat, tempo)
+        if message.type == "set_tempo":
+            tempo = message.tempo
+            continue
+        if not hasattr(message, "channel") or message.channel == 9:
+            continue
+        key = (message.channel, message.note)
+        if message.type == "note_on" and message.velocity > 0:
+            active[key] = (elapsed, int(message.velocity))
+        elif message.type in {"note_off", "note_on"} and key in active:
+            start, velocity = active.pop(key)
+            decoded.append(
+                (
+                    start,
+                    max(start + 0.03, elapsed),
+                    int(message.note),
+                    velocity,
+                )
+            )
+
+    decoded.sort(key=lambda item: (item[0], item[2]))
+    guitar_notes = [
+        item
+        for item in decoded
+        if GUITAR_PITCH_RANGE[0] <= item[2] <= GUITAR_PITCH_RANGE[1]
+    ]
+    groups: list[list[tuple[float, float, int, int]]] = []
+    for item in guitar_notes:
+        if not groups or item[0] - groups[-1][0][0] > 0.045:
+            groups.append([item])
+        else:
+            groups[-1].append(item)
+    events: list[NoteEvent] = []
+    previous_positions: list[tuple[int, int]] = []
+    for group in groups:
+        positions, position_confidence = assign_fingering_group(
+            [item[2] for item in group],
+            previous_positions,
+        )
+        for (start, end, pitch, velocity), (string, fret) in zip(
+            group,
+            positions,
+            strict=True,
+        ):
+            events.append(
+                NoteEvent(
+                    start=round(start, 4),
+                    end=round(end, 4),
+                    pitch=pitch,
+                    velocity=velocity,
+                    string=string,
+                    fret=fret,
+                    technique="pick",
+                    confidence=min(0.9, 0.58 + velocity / 256),
+                    position_confidence=position_confidence,
+                    position_source="mr-mt3-pitch-optimizer-v1",
+                )
+            )
+        previous_positions = positions
+    return events, len(decoded) - len(guitar_notes)
+
+
+def transcribe_yourmt3(
+    path: Path,
+    checkpoint_path: Path,
+) -> tuple[list[NoteEvent], int]:
+    import mido
+    import numpy as np
+    import torch
+    from mt3_infer.adapters.yourmt3 import YourMT3Adapter
+
+    import librosa
+
+    audio, _ = librosa.load(path, sr=16000, mono=True)
+    adapter = YourMT3Adapter("yptf_moe_nops")
+    adapter.load_model(
+        str(checkpoint_path),
+        device="cuda" if torch.cuda.is_available() else "cpu",
+    )
+    midi = adapter.transcribe(audio.astype(np.float32), sr=16000)
+    tempo = 500_000
+    elapsed = 0.0
+    active: dict[tuple[int, int], tuple[float, int]] = {}
+    decoded: list[tuple[float, float, int, int]] = []
+    for message in mido.merge_tracks(midi.tracks):
+        elapsed += mido.tick2second(message.time, midi.ticks_per_beat, tempo)
+        if message.type == "set_tempo":
+            tempo = message.tempo
+            continue
+        if not hasattr(message, "channel") or message.channel == 9:
+            continue
+        key = (message.channel, message.note)
+        if message.type == "note_on" and message.velocity > 0:
+            active[key] = (elapsed, int(message.velocity))
+        elif message.type in {"note_off", "note_on"} and key in active:
+            start, velocity = active.pop(key)
+            decoded.append(
+                (
+                    start,
+                    max(start + 0.03, elapsed),
+                    int(message.note),
+                    velocity,
+                )
+            )
+
+    decoded.sort(key=lambda item: (item[0], item[2]))
+    guitar_notes = [
+        item
+        for item in decoded
+        if GUITAR_PITCH_RANGE[0] <= item[2] <= GUITAR_PITCH_RANGE[1]
+    ]
+    groups: list[list[tuple[float, float, int, int]]] = []
+    for item in guitar_notes:
+        if not groups or item[0] - groups[-1][0][0] > 0.045:
+            groups.append([item])
+        else:
+            groups[-1].append(item)
+    events: list[NoteEvent] = []
+    previous_positions: list[tuple[int, int]] = []
+    for group in groups:
+        positions, position_confidence = assign_fingering_group(
+            [item[2] for item in group],
+            previous_positions,
+        )
+        for (start, end, pitch, velocity), (string, fret) in zip(
+            group,
+            positions,
+            strict=True,
+        ):
+            events.append(
+                NoteEvent(
+                    start=round(start, 4),
+                    end=round(end, 4),
+                    pitch=pitch,
+                    velocity=velocity,
+                    string=string,
+                    fret=fret,
+                    technique="pick",
+                    confidence=min(0.9, 0.58 + velocity / 256),
+                    position_confidence=position_confidence,
+                    position_source="yourmt3-playability-v1",
+                )
+            )
+        previous_positions = positions
+    return events, len(decoded) - len(guitar_notes)
+
+
+def fuse_transcription_candidates(
+    primary: list[NoteEvent],
+    secondary: list[NoteEvent],
+    onset_tolerance: float = 0.06,
+) -> list[NoteEvent]:
+    used_secondary: set[int] = set()
+    fused: list[NoteEvent] = []
+    for primary_note in primary:
+        matches = [
+            (index, candidate)
+            for index, candidate in enumerate(secondary)
+            if index not in used_secondary
+            and candidate.pitch == primary_note.pitch
+            and abs(candidate.start - primary_note.start) <= onset_tolerance
+        ]
+        if not matches:
+            fused.append(primary_note)
+            continue
+        index, corroborating = min(
+            matches,
+            key=lambda item: abs(item[1].start - primary_note.start),
+        )
+        used_secondary.add(index)
+        fused.append(
+            replace(
+                primary_note,
+                start=round(
+                    primary_note.start * 0.7
+                    + corroborating.start * 0.3,
+                    4,
+                ),
+                end=round(
+                    primary_note.end * 0.7
+                    + corroborating.end * 0.3,
+                    4,
+                ),
+                confidence=min(
+                    0.99,
+                    max(primary_note.confidence, corroborating.confidence)
+                    + 0.05,
+                ),
+                position_confidence=max(
+                    primary_note.position_confidence,
+                    corroborating.position_confidence,
+                ),
+                position_source="multi-model-consensus-v1",
+            )
+        )
+    fused.extend(
+        replace(
+            candidate,
+            position_source="basic-pitch-residual-v1",
+        )
+        for index, candidate in enumerate(secondary)
+        if index not in used_secondary
+        and candidate.confidence >= 0.86
+        and candidate.end - candidate.start >= 0.08
+    )
+    return collapse_note_fragments(
+        sorted(fused, key=lambda note: (note.start, note.pitch))
+    )
+
+
+def refine_positions_with_noise2fret(
+    audio_path: Path,
+    events: list[NoteEvent],
+    checkpoint_path: Path,
+) -> tuple[list[NoteEvent], int]:
+    from stringtrace_ml.noise2fret import predict_position_priors
+
+    windows = sorted({max(0, int(event.start)) for event in events})
+    priors = predict_position_priors(
+        audio_path,
+        checkpoint_path,
+        windows,
+    )
+    refined = list(events)
+    changed = 0
+    for window in windows:
+        event_indices = [
+            index
+            for index, event in enumerate(refined)
+            if int(event.start) == window
+        ]
+        groups: list[list[int]] = []
+        for index in event_indices:
+            if (
+                not groups
+                or refined[index].start - refined[groups[-1][0]].start > 0.045
+            ):
+                groups.append([index])
+            else:
+                groups[-1].append(index)
+        remaining_slots = list(priors.get(window, []))
+        for group in groups:
+            pitches = {refined[index].pitch for index in group}
+            if not remaining_slots:
+                break
+            slot_index, slot = max(
+                enumerate(remaining_slots),
+                key=lambda item: sum(
+                    1 for _string, _fret, pitch in item[1] if pitch in pitches
+                ),
+            )
+            if not any(pitch in pitches for _string, _fret, pitch in slot):
+                continue
+            remaining_slots.pop(slot_index)
+            available = list(slot)
+            used_strings: set[int] = set()
+            for index in group:
+                note = refined[index]
+                matches = [
+                    position
+                    for position in available
+                    if position[2] == note.pitch
+                    and position[0] not in used_strings
+                ]
+                if not matches:
+                    continue
+                string, fret, _pitch = min(
+                    matches,
+                    key=lambda position: abs(position[1] - note.fret),
+                )
+                available.remove((string, fret, _pitch))
+                used_strings.add(string)
+                if (note.string, note.fret) != (string, fret):
+                    changed += 1
+                refined[index] = replace(
+                    note,
+                    string=string,
+                    fret=fret,
+                    position_confidence=max(note.position_confidence, 0.86),
+                    position_source="noise2fret-consensus-v1",
+                )
+    return refined, changed
 
 
 def transcribe_hybrid_model(
@@ -1275,18 +3324,290 @@ def transcribe_hybrid_model(
     )
 
 
+def transcribe_onset_position_research_model(
+    path: Path,
+    bundle_path: Path,
+) -> tuple[list[NoteEvent], int, dict[str, object]]:
+    import torch
+
+    from stringtrace_ml.onset_position_bundle import (
+        load_research_bundle,
+        transcribe_with_research_bundle,
+    )
+
+    device = torch.device(os.environ.get("STRINGTRACE_MODEL_DEVICE", "cpu"))
+    loaded = load_research_bundle(bundle_path, device)
+    primary_frontend = dict(
+        loaded.inference_config["primary_frontend"]
+    )
+    supplemental_frontend = dict(
+        loaded.inference_config["supplemental_frontend"]
+    )
+    primary_notes, primary_dropped = transcribe_basic_pitch(
+        path,
+        onset_threshold=float(primary_frontend["onset_threshold"]),
+        frame_threshold=float(primary_frontend["frame_threshold"]),
+        minimum_note_length=float(
+            primary_frontend["minimum_note_length"]
+        ),
+    )
+    supplemental_notes, supplemental_dropped = transcribe_basic_pitch(
+        path,
+        onset_threshold=float(supplemental_frontend["onset_threshold"]),
+        frame_threshold=float(supplemental_frontend["frame_threshold"]),
+        minimum_note_length=float(
+            supplemental_frontend["minimum_note_length"]
+        ),
+    )
+
+    def candidates(notes: list[NoteEvent]) -> list[dict[str, float | int]]:
+        return [
+            {
+                "onset": note.start,
+                "offset": note.end,
+                "pitch": note.pitch,
+                "confidence": note.confidence,
+            }
+            for note in notes
+        ]
+
+    predictions = transcribe_with_research_bundle(
+        path,
+        candidates(primary_notes),
+        candidates(supplemental_notes),
+        loaded,
+        device,
+    )
+    events = [
+        NoteEvent(
+            start=prediction.onset,
+            end=prediction.offset,
+            pitch=STANDARD_TUNING[prediction.string] + prediction.fret,
+            velocity=round(40 + prediction.confidence * 80),
+            string=prediction.string,
+            fret=prediction.fret,
+            technique="pick",
+            confidence=prediction.confidence,
+            position_confidence=prediction.confidence,
+            position_source="onset-position-research-v1",
+        )
+        for prediction in predictions
+    ]
+    features = extract_note_features(path, events)
+    return (
+        annotate_techniques(
+            events,
+            features,
+            preserve_positions=True,
+        ),
+        max(primary_dropped, supplemental_dropped),
+        {
+            "name": loaded.metadata.get(
+                "name",
+                "stringtrace-onset-position-research",
+            ),
+            "version": loaded.metadata.get("version", "unknown"),
+            "kind": "research",
+            "release_channel": "research",
+            "bundle": bundle_path.name,
+            "source_checkpoints": loaded.metadata.get(
+                "source_checkpoints",
+                {},
+            ),
+        },
+    )
+
+
 def transcribe_guitar(
     path: Path,
     checkpoint_path: Path | None = None,
     model_mode: str = "direct",
+    transcription_provider: str = "basic-pitch",
+    transcription_model: str | None = None,
+    position_model: Path | None = None,
+    verification_model: Path | None = None,
 ) -> tuple[list[NoteEvent], int, dict[str, object]]:
     if checkpoint_path:
         if model_mode == "hybrid":
             return transcribe_hybrid_model(path, checkpoint_path)
+        if model_mode == "onset-position-research":
+            return transcribe_onset_position_research_model(
+                path,
+                checkpoint_path,
+            )
         if model_mode != "direct":
             raise ValueError(f"Unknown trained model mode: {model_mode}")
         notes, model_info = transcribe_string_model(path, checkpoint_path)
         return notes, 0, model_info
+    if transcription_provider == "multitrack-research":
+        try:
+            if transcription_model is None:
+                raise FileNotFoundError("YourMT3+ checkpoint is unavailable")
+            primary, primary_dropped = transcribe_yourmt3(
+                path,
+                Path(transcription_model),
+            )
+            secondary, secondary_dropped = transcribe_basic_pitch(path)
+            fused = fuse_transcription_candidates(primary, secondary)
+            refined_count = 0
+            if position_model is not None:
+                fused, refined_count = refine_positions_with_noise2fret(
+                    path,
+                    fused,
+                    position_model,
+                )
+            model_names = ["yourmt3", "basic-pitch"]
+            if position_model is not None:
+                model_names.append("noise2fret")
+            return (
+                fused,
+                max(primary_dropped, secondary_dropped),
+                {
+                    "name": "-".join(model_names),
+                    "version": "yourmt3-0.2.0+basic-pitch-0.4",
+                    "kind": "research",
+                    "release_channel": "research",
+                    "position_refinements": refined_count,
+                },
+            )
+        except Exception as error:
+            notes, dropped_note_count = transcribe_basic_pitch(path)
+            return (
+                notes,
+                dropped_note_count,
+                {
+                    "name": "spotify-basic-pitch",
+                    "version": "0.4",
+                    "kind": "baseline",
+                    "requested_provider": "multitrack-research",
+                    "fallback_reason": (
+                        "YourMT3+ 研究模型不可用"
+                        if isinstance(error, FileNotFoundError)
+                        else "YourMT3+ 本次运行失败"
+                    ),
+                },
+            )
+    if transcription_provider == "muscriptor":
+        try:
+            primary, primary_dropped, primary_model = transcribe_muscriptor(
+                path,
+                transcription_model or "medium",
+            )
+            release_torch_accelerator_cache()
+            emit_progress(81, "transcribing", "正在运行 Basic Pitch 复核")
+            secondary, secondary_dropped = transcribe_basic_pitch(path)
+            fused = fuse_transcription_candidates(primary, secondary)
+            verification_warning = None
+            verification_used = False
+            verification_dropped = 0
+            if verification_model is not None:
+                try:
+                    emit_progress(
+                        81.5,
+                        "transcribing",
+                        "正在运行 MR-MT3 复核",
+                    )
+                    verification, verification_dropped = transcribe_mr_mt3(
+                        path,
+                        verification_model,
+                    )
+                    fused = fuse_transcription_candidates(
+                        fused,
+                        verification,
+                        onset_tolerance=0.07,
+                    )
+                    verification_used = True
+                except Exception:
+                    verification_warning = (
+                        "MR-MT3 复核模型运行失败，已使用 MuScriptor "
+                        "与 Basic Pitch 结果继续"
+                    )
+            position_warning = None
+            if position_model is not None:
+                try:
+                    emit_progress(
+                        81.8,
+                        "transcribing",
+                        "正在优化吉他弦品",
+                    )
+                    fused, refined_count = refine_positions_with_noise2fret(
+                        path,
+                        fused,
+                        position_model,
+                    )
+                except Exception:
+                    refined_count = 0
+                    position_warning = (
+                        "Noise2Fret 弦品模型运行失败，已保留原有指板优化结果"
+                    )
+            else:
+                refined_count = 0
+            model_names = ["muscriptor"]
+            if verification_used:
+                model_names.append("mr-mt3")
+            model_names.append("basic-pitch")
+            if position_model is not None and not position_warning:
+                model_names.append("noise2fret")
+            return (
+                fused,
+                max(
+                    primary_dropped,
+                    secondary_dropped,
+                    verification_dropped,
+                ),
+                {
+                    "name": "-".join(model_names),
+                    "version": (
+                        f"muscriptor-{primary_model['version']}"
+                        "+basic-pitch-0.4"
+                        + ("+mr-mt3-0.2.0" if verification_used else "")
+                    ),
+                    "kind": "trained",
+                    **(
+                        {"position_refinements": refined_count}
+                        if position_model is not None
+                        else {}
+                    ),
+                    **(
+                        {"position_model_warning": position_warning}
+                        if position_warning
+                        else {}
+                    ),
+                    **(
+                        {"verification_model_warning": verification_warning}
+                        if verification_warning
+                        else {}
+                    ),
+                },
+            )
+        except Exception as error:
+            notes, dropped_note_count = transcribe_basic_pitch(path)
+            if isinstance(error, ModuleNotFoundError):
+                reason = "MuScriptor 运行组件未安装"
+            elif isinstance(error, FileNotFoundError):
+                reason = "所选 MuScriptor 权重不可用"
+            elif error.__class__.__name__ == "ModelDownloadError":
+                reason = "MuScriptor 权重尚未完成 Hugging Face 授权或下载"
+            else:
+                reason = "MuScriptor 本次运行失败"
+            return (
+                notes,
+                dropped_note_count,
+                {
+                    "name": "spotify-basic-pitch",
+                    "version": "0.4",
+                    "kind": "baseline",
+                    "requested_provider": "muscriptor",
+                    "fallback_reason": reason,
+                },
+            )
+    if transcription_provider not in {
+        "basic-pitch",
+        "guitar-specialist",
+    }:
+        raise ValueError(
+            f"Unknown transcription provider: {transcription_provider}"
+        )
     notes, dropped_note_count = transcribe_basic_pitch(path)
     return (
         notes,
@@ -1424,6 +3745,34 @@ def infer_chords(notes: Iterable[NoteEvent], bpm: float) -> list[dict[str, objec
     return result
 
 
+def estimate_key(notes: Iterable[NoteEvent]) -> str:
+    pitch_weights = [0.0] * 12
+    for note in notes:
+        pitch_weights[note.pitch % 12] += (
+            max(0.04, note.end - note.start)
+            * max(1, note.velocity)
+            * max(0.1, note.confidence)
+        )
+    total = sum(pitch_weights)
+    if total <= 0:
+        return "Unknown"
+    pitch_weights = [weight / total for weight in pitch_weights]
+    profiles = {
+        "major": (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88),
+        "minor": (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17),
+    }
+    best = ("Unknown", float("-inf"))
+    for quality, profile in profiles.items():
+        for root in range(12):
+            score = sum(
+                pitch_weights[pitch_class] * profile[(pitch_class - root) % 12]
+                for pitch_class in range(12)
+            )
+            if score > best[1]:
+                best = (f"{PITCH_NAMES[root]} {quality}", score)
+    return best[0]
+
+
 def json_default(value: object) -> object:
     if hasattr(value, "item"):
         return value.item()
@@ -1432,10 +3781,44 @@ def json_default(value: object) -> object:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    source_group = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument(
+        "--hardware-probe",
+        action="store_true",
+        help="Report local accelerator and optional provider availability.",
+    )
+    parser.add_argument(
+        "--prepare-transcription-provider",
+        action="store_true",
+        help="Download and verify the selected transcription provider.",
+    )
+    source_group = parser.add_mutually_exclusive_group(required=False)
     source_group.add_argument("--input", type=Path)
     source_group.add_argument("--url")
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--transcription-provider",
+        choices=(
+            "basic-pitch",
+            "muscriptor",
+            "guitar-specialist",
+            "multitrack-research",
+        ),
+        default=os.environ.get(
+            "GTS_TRANSCRIPTION_PROVIDER",
+            "basic-pitch",
+        ),
+    )
+    parser.add_argument(
+        "--transcription-model",
+        default=os.environ.get("GTS_TRANSCRIPTION_MODEL"),
+        help="Provider model variant or local weights path.",
+    )
+    parser.add_argument(
+        "--transcription-variant",
+        choices=("small", "medium", "large"),
+        default=os.environ.get("GTS_TRANSCRIPTION_VARIANT"),
+        help="Resolved hardware tier for auxiliary model selection.",
+    )
     parser.add_argument(
         "--tab-model",
         type=Path,
@@ -1443,9 +3826,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--tab-model-mode",
-        choices=("direct", "hybrid"),
+        choices=("direct", "hybrid", "onset-position-research"),
         default=os.environ.get("STRINGTRACE_TAB_MODEL_MODE", "direct"),
-        help="Use direct StringTrace decoding or Basic Pitch plus StringTrace.",
+        help=(
+            "Use direct StringTrace decoding, Basic Pitch plus StringTrace, "
+            "or the explicit onset-position research bundle."
+        ),
     )
     parser.add_argument(
         "--technique-model",
@@ -1462,22 +3848,97 @@ def main() -> None:
         type=Path,
         help="Optional selective multi-model technique bundle.",
     )
+    parser.add_argument(
+        "--acquire-only",
+        action="store_true",
+        help="Download an online source into the output directory and stop.",
+    )
     arguments = parser.parse_args()
 
+    if arguments.hardware_probe:
+        print(json.dumps(hardware_probe(), ensure_ascii=False))
+        return
+    if arguments.prepare_transcription_provider:
+        prepare_transcription_provider(
+            arguments.transcription_provider,
+            arguments.transcription_model,
+            arguments.transcription_variant,
+        )
+        return
+    if arguments.output is None:
+        parser.error("--output is required")
+    if arguments.input is None and arguments.url is None:
+        parser.error("one of --input or --url is required")
     output = arguments.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
 
     if arguments.url:
+        emit_progress(3, "acquiring", "正在获取在线媒体")
         source, metadata = acquire_url(arguments.url, output)
+        emit_progress(10, "acquiring", "在线媒体获取完成")
     else:
         source = arguments.input.resolve()
         metadata = {"title": source.stem, "artist": "本地上传"}
+        emit_progress(10, "acquiring", "本地媒体读取完成")
     if not source.exists():
         raise FileNotFoundError(source)
+    if arguments.acquire_only:
+        emit_progress(100, "acquiring", "在线媒体已保存到本机临时目录")
+        return
 
+    emit_progress(13, "separating", "正在标准化音频")
     normalized = normalize_audio(source, output)
+    decoded_duration = decoded_audio_duration(normalized)
+    catalog_duration = metadata.get("duration")
+    preview_warning = None
+    if (
+        isinstance(catalog_duration, (int, float))
+        and catalog_duration > decoded_duration + 2
+    ):
+        preview_warning = (
+            f"媒体源仅提供 {decoded_duration:.1f} 秒可播放音频，"
+            f"短于页面标注的 {float(catalog_duration):.1f} 秒；"
+            "项目已按实际音频截断。"
+        )
+    metadata["duration"] = decoded_duration
+    emit_progress(20, "separating", "音频标准化完成")
+    emit_progress(22, "separating", "正在分离人声与乐器")
     stems = separate_audio(normalized, output)
+    emit_progress(50, "separating", "基础分轨完成，正在抑制吉他串音")
+    cleaned_guitar, guitar_leakage_report = suppress_guitar_stem_leakage(
+        stems["guitar"],
+        {
+            name: path
+            for name, path in stems.items()
+            if name != "guitar"
+        },
+        output,
+    )
+    stems["guitar"] = cleaned_guitar
+    emit_progress(53, "separating", "吉他串音抑制完成，正在检测多吉他声部")
+    guitar_parts = separate_guitar_parts(stems["guitar"], output)
+    vocal_leakage_reports: list[dict[str, float]] = []
+    for part in guitar_parts:
+        cleaned_part, leakage_report = suppress_vocal_leakage_in_guitar_part(
+            Path(part["path"]),
+            stems["vocals"],
+            output,
+        )
+        part["path"] = cleaned_part
+        part["vocal_leakage_report"] = leakage_report
+        vocal_leakage_reports.append(leakage_report)
+    emit_progress(
+        55,
+        "separating",
+        (
+            f"检测到 {len(guitar_parts)} 个可分离吉他声部"
+            if len(guitar_parts) > 1
+            else "吉他声部检测完成"
+        ),
+    )
+    emit_progress(57, "transcribing", "正在检测速度与拍点")
     bpm, beat_times, onset_times = estimate_tempo(source)
+    emit_progress(63, "transcribing", "拍点检测完成")
     note_source, source_warning = transcription_source(normalized, stems)
     configured_model = arguments.tab_model
     if configured_model is None and os.environ.get("STRINGTRACE_TAB_MODEL"):
@@ -1486,11 +3947,27 @@ def main() -> None:
         configured_model = configured_model.resolve()
         if not configured_model.is_file():
             raise FileNotFoundError(configured_model)
+    configured_position_model = (
+        Path(os.environ["NOISE2FRET_MODEL"]).resolve()
+        if os.environ.get("NOISE2FRET_MODEL")
+        else None
+    )
+    configured_verification_model = (
+        Path(os.environ["MR_MT3_MODEL"]).resolve()
+        if os.environ.get("MR_MT3_MODEL")
+        else None
+    )
+    emit_progress(65, "transcribing", "正在识别吉他音符")
     notes, dropped_note_count, transcription_model = transcribe_guitar(
         note_source,
         configured_model,
         model_mode=arguments.tab_model_mode,
+        transcription_provider=arguments.transcription_provider,
+        transcription_model=arguments.transcription_model,
+        position_model=configured_position_model,
+        verification_model=configured_verification_model,
     )
+    emit_progress(82, "transcribing", "吉他音符识别完成")
     configured_technique_model = arguments.technique_model
     configured_technique_gate = arguments.technique_gate
     configured_technique_bundle = arguments.technique_bundle
@@ -1528,6 +4005,7 @@ def main() -> None:
         raise ValueError(
             "Technique model and gate must be configured together"
         )
+    emit_progress(84, "transcribing", "正在分析演奏技法")
     if configured_technique_bundle is not None:
         configured_technique_bundle = configured_technique_bundle.resolve()
         if not configured_technique_bundle.is_file():
@@ -1552,15 +4030,56 @@ def main() -> None:
         )
     else:
         technique_model = {
-            "name": "stringtrace-technique-baseline",
-            "version": "heuristic-v4",
+            "name": "unreviewed-technique-candidates",
+            "version": "v1",
             "kind": "heuristic",
-            "labels": list(TECHNIQUE_LABELS),
+            "labels": ["unknown"],
         }
+        for note in notes:
+            if note.harmonic_type is not None:
+                note.string, note.fret = select_fingering(note.pitch, None)
+                note.position_source = "pitch-preserving-fallback-v1"
+            note.technique = "unknown"
+            note.technique_confidence = 0.0
+            note.technique_source = "unreviewed-heuristic"
+            note.technique_evidence = ["heuristic-candidate-withheld"]
+            note.related_note_index = None
+            note.harmonic_type = None
+            note.harmonic_touch_fret = None
+    emit_progress(89, "transcribing", "演奏技法分析完成")
+    emit_progress(91, "mapping", "正在提取人声旋律与歌词")
+    vocal_melody = extract_vocal_melody(stems["vocals"])
+    lyric_lines = metadata.get("timed_lyrics", [])
+    lyrics = align_lyrics_to_melody(
+        lyric_lines if isinstance(lyric_lines, list) else [],
+        vocal_melody,
+    )
+    vocal_melody = complete_vocal_melody_for_lyrics(
+        vocal_melody,
+        lyrics,
+    )
+    emit_progress(93, "mapping", "正在生成波形与可视化")
     levels = {name: audio_rms(path) for name, path in stems.items()}
     waveforms = {name: waveform(path) for name, path in stems.items()}
+    for part in guitar_parts:
+        part["level"] = audio_rms(Path(part["path"]))
+        part["waveform"] = waveform(Path(part["path"]))
     visualization = visualization_timeline(normalized)
-    playable_stems = compress_stems(stems, output)
+    emit_progress(96, "mapping", "波形与可视化生成完成")
+    emit_progress(97, "mapping", "正在编码播放音轨")
+    playable_stems = compress_stems(
+        {
+            **stems,
+            **{
+                str(part["id"]): Path(part["path"])
+                for part in guitar_parts
+            },
+        },
+        output,
+    )
+    for part in guitar_parts:
+        part["path"] = str(playable_stems[str(part["id"])].resolve())
+    emit_progress(99, "mapping", "正在写入分析结果")
     normalized.unlink(missing_ok=True)
     warnings = []
     if (
@@ -1576,7 +4095,11 @@ def main() -> None:
             "Only independently gated technique labels are applied; "
             "all other predictions remain unknown."
         )
-    if configured_model is None:
+    if transcription_model.get("fallback_reason"):
+        warnings.append(
+            f"{transcription_model['fallback_reason']}，已自动回退到 Basic Pitch。"
+        )
+    elif transcription_model.get("name") == "spotify-basic-pitch":
         warnings.append(
             "String and fret positions use the Basic Pitch baseline and require review."
         )
@@ -1584,8 +4107,40 @@ def main() -> None:
         warnings.append(
             "String and fret positions use a trained model; publish only after benchmark gates pass."
         )
+    if transcription_model.get("position_model_warning"):
+        warnings.append(str(transcription_model["position_model_warning"]))
+    if transcription_model.get("verification_model_warning"):
+        warnings.append(
+            str(transcription_model["verification_model_warning"])
+        )
     if source_warning:
         warnings.append(source_warning)
+    if preview_warning:
+        warnings.append(preview_warning)
+    if len(guitar_parts) > 1:
+        warnings.append(
+            "Multiple spatially distinct guitar parts were separated; "
+            "centered or mono guitar layers can still remain combined."
+        )
+        if vocal_leakage_reports:
+            median_reduction = sum(
+                report["vocal_similarity_reduction"]
+                for report in vocal_leakage_reports
+            ) / len(vocal_leakage_reports)
+            warnings.append(
+                "Post-separation vocal-reference masking reduced median "
+                f"vocal spectral similarity by {median_reduction:.1%}."
+            )
+    else:
+        warnings.append(
+            "No independently separable guitar layers were found; "
+            "centered or mono multiple guitars remain in the aggregate guitar track."
+        )
+    warnings.append(
+        "Coherent leakage shared with non-guitar stems was suppressed before "
+        f"guitar-part separation ({guitar_leakage_report['removed_energy_ratio']:.1%} "
+        "of estimated stem energy removed)."
+    )
     if dropped_note_count:
         warnings.append(
             f"{dropped_note_count} note events outside the 24-fret guitar range were discarded."
@@ -1596,9 +4151,21 @@ def main() -> None:
         "technique_model": technique_model,
         "metadata": metadata,
         "bpm": bpm,
+        "time_signature": [4, 4],
+        "key": estimate_key(notes),
+        "capo": 0,
         "beats": beat_times,
         "onsets": onset_times,
+        "vocal_melody": vocal_melody,
+        "lyrics": lyrics,
         "stems": {name: str(path.resolve()) for name, path in playable_stems.items()},
+        "stem_tracks": [
+            {
+                **part,
+                "path": str(part["path"]),
+            }
+            for part in guitar_parts
+        ],
         "levels": levels,
         "waveforms": waveforms,
         "visualization": visualization,

@@ -14,6 +14,7 @@ import {
 } from 'node:fs'
 import { relative, resolve } from 'node:path'
 import type { ReviewDocument, ReviewEvent, ReviewPackage } from './reviews.js'
+import { runtimeDataRoot } from './runtime.js'
 
 const SAFE_ALIAS = /^[\p{L}\p{N}][\p{L}\p{N}._-]{1,31}$/u
 const SAFE_RUNNER_ID = /^[a-z0-9][a-z0-9._-]{1,63}$/
@@ -24,6 +25,11 @@ const DEFAULT_RUNNER_LEASE_SECONDS = 300
 const MAX_ACTIVE_EXPERIMENTS_PER_ACCOUNT = 2
 const MAX_DAILY_EXPERIMENTS_PER_ACCOUNT = 10
 const MAX_EXPERIMENT_ATTEMPTS = 3
+const MAX_SUBMISSIONS_PER_MINUTE = 60
+const MAX_DAILY_SUBMISSIONS_PER_ACCOUNT = 500
+const FAST_SUBMISSION_WINDOW = 12
+const FAST_SUBMISSION_THRESHOLD_MS = 500
+const CONTRIBUTOR_SUSPENSION_MS = 15 * 60 * 1000
 const BUILTIN_DATASETS: ReadonlyMap<
   string,
   { manifest: string; name: string }
@@ -87,6 +93,8 @@ interface CommunityAccount {
   reputation: Partial<Record<CommunityTaskType, ReputationCounter>>
   createdAt: string
   disabledAt?: string
+  suspendedUntil?: string
+  anomalyReason?: string
 }
 
 export interface CommunityAccountView {
@@ -101,6 +109,8 @@ export interface CommunityAccountView {
     >
   >
   createdAt: string
+  suspendedUntil?: string
+  anomalyReason?: string
 }
 
 export interface CommunityCredential {
@@ -219,7 +229,7 @@ export interface DatasetRelease {
 }
 
 export interface DatasetReleaseManifest {
-  schemaVersion: 1
+  schemaVersion: 2
   release: {
     id: string
     name: string
@@ -246,6 +256,24 @@ export interface DatasetReleaseManifest {
       reviewName: string
     }
   }>
+  dataCard: {
+    intendedUse: string
+    prohibitedUses: string[]
+    licenses: string[]
+    split: 'train'
+    recordCount: number
+    sourceCount: number
+    taskTypes: Partial<Record<CommunityTaskType, number>>
+    lineage: {
+      performerCount: number
+      workCount: number
+      recordingCount: number
+      sessionCount: number
+      lineageCount: number
+      crossSplitLeakage: 0
+    }
+    limitations: string[]
+  }
 }
 
 type RecipeParameterRule = {
@@ -364,6 +392,19 @@ export interface CommunityStoreOptions {
   builtinDatasetManifestSha256?: Partial<Record<string, string>>
   gateCredentials?: Record<string, string>
   sealedGateCredentials?: Record<string, string>
+  onOperationalAlert?: (alert: OperationalAlert) => void | Promise<void>
+}
+
+export interface OperationalAlert {
+  schemaVersion: 1
+  type: 'deployment-auto-rollback'
+  severity: 'critical'
+  occurredAt: string
+  promotionId: string
+  modelVersion: string
+  mode: 'canary' | 'champion'
+  errorRatePercent: number
+  observations: number
 }
 
 export interface PromotionGateAgent {
@@ -759,6 +800,8 @@ function accountView(
       ]),
     ),
     createdAt: account.createdAt,
+    suspendedUntil: account.suspendedUntil,
+    anomalyReason: account.anomalyReason,
   }
 }
 
@@ -978,7 +1021,7 @@ export class CommunityStore {
   private state: CommunityState
 
   constructor(
-    private readonly root = resolve(process.cwd(), 'data', 'community'),
+    private readonly root = resolve(runtimeDataRoot(), 'community'),
     private readonly options: CommunityStoreOptions = {},
   ) {
     for (const [runnerId, secret] of Object.entries(
@@ -1029,6 +1072,16 @@ export class CommunityStore {
 
   private now(): string {
     return this.nowDate().toISOString()
+  }
+
+  private emitOperationalAlert(alert: OperationalAlert): void {
+    try {
+      void Promise.resolve(this.options.onOperationalAlert?.(alert)).catch(
+        () => undefined,
+      )
+    } catch {
+      // Alert delivery must never prevent the local rollback.
+    }
   }
 
   private runnerLeaseSeconds(): number {
@@ -1407,6 +1460,84 @@ export class CommunityStore {
     return { sourceId, addedTasks }
   }
 
+  private assertSubmissionAllowed(account: CommunityAccount): void {
+    const now = this.nowDate().getTime()
+    if (
+      account.suspendedUntil &&
+      new Date(account.suspendedUntil).getTime() > now
+    ) {
+      throw new CommunityRequestError('账号因异常作答已临时暂停', 429)
+    }
+    if (account.suspendedUntil) {
+      account.suspendedUntil = undefined
+      account.anomalyReason = undefined
+    }
+    const submissions = this.state.submissions.filter(
+      (submission) =>
+        submission.accountId === account.id && !submission.withdrawnAt,
+    )
+    const inLastMinute = submissions.filter(
+      (submission) =>
+        now - new Date(submission.createdAt).getTime() < 60 * 1000,
+    ).length
+    const inLastDay = submissions.filter(
+      (submission) =>
+        now - new Date(submission.createdAt).getTime() < 24 * 60 * 60 * 1000,
+    ).length
+    if (
+      inLastMinute >= MAX_SUBMISSIONS_PER_MINUTE ||
+      inLastDay >= MAX_DAILY_SUBMISSIONS_PER_ACCOUNT
+    ) {
+      throw new CommunityRequestError('提交频率超过限制，请稍后再试', 429)
+    }
+  }
+
+  private detectSubmissionAnomaly(account: CommunityAccount): void {
+    const recent = this.state.submissions
+      .filter(
+        (submission) =>
+          submission.accountId === account.id && !submission.withdrawnAt,
+      )
+      .slice(-FAST_SUBMISSION_WINDOW)
+    const fastCount = recent.filter(
+      (submission) =>
+        submission.durationMs > 0 &&
+        submission.durationMs < FAST_SUBMISSION_THRESHOLD_MS,
+    ).length
+    const calibration = recent.filter(
+      (submission) => submission.calibrationCorrect !== undefined,
+    )
+    const lowCalibrationAccuracy =
+      calibration.length >= 8 &&
+      calibration.filter((submission) => submission.calibrationCorrect)
+        .length /
+        calibration.length <
+        0.5
+    if (
+      recent.length < FAST_SUBMISSION_WINDOW ||
+      (fastCount < FAST_SUBMISSION_WINDOW && !lowCalibrationAccuracy)
+    ) {
+      return
+    }
+    account.suspendedUntil = new Date(
+      this.nowDate().getTime() + CONTRIBUTOR_SUSPENSION_MS,
+    ).toISOString()
+    account.anomalyReason =
+      fastCount >= FAST_SUBMISSION_WINDOW
+        ? 'rapid-submission-pattern'
+        : 'calibration-quality-drop'
+    this.audit(
+      'system:abuse-control',
+      'account.auto-suspended',
+      'account',
+      account.id,
+      {
+        reason: account.anomalyReason,
+        until: account.suspendedUntil,
+      },
+    )
+  }
+
   submit(
     account: CommunityAccount,
     taskId: string,
@@ -1416,6 +1547,7 @@ export class CommunityStore {
       durationMs?: unknown
     },
   ): CommunitySubmissionResult {
+    this.assertSubmissionAllowed(account)
     const task = this.state.tasks.find((candidate) => candidate.id === taskId)
     if (!task || task.status === 'withdrawn') {
       throw new CommunityRequestError('社区任务不存在', 404)
@@ -1461,6 +1593,7 @@ export class CommunityStore {
     }
     this.state.submissions.push(submission)
     this.updateReputation(account, task.type, calibrationCorrect)
+    this.detectSubmissionAnomaly(account)
     if (!task.calibrationAnswer) this.recalculateConsensus(task)
     this.persist()
     this.audit(account.id, 'submission.created', 'submission', submission.id, {
@@ -1763,8 +1896,17 @@ export class CommunityStore {
     if (digest(compact) !== release.manifestSha256) {
       throw new CommunityRequestError('数据版本清单哈希不匹配', 409)
     }
+    const taskTypes = records.reduce<
+      Partial<Record<CommunityTaskType, number>>
+    >((counts, record) => {
+      counts[record.type] = (counts[record.type] ?? 0) + 1
+      return counts
+    }, {})
+    const uniqueCount = (
+      field: 'performerId' | 'workId' | 'recordingId' | 'sessionId' | 'lineageId',
+    ) => new Set(records.map((record) => record.source[field])).size
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       release: {
         id: release.id,
         name: release.name,
@@ -1774,6 +1916,34 @@ export class CommunityStore {
         createdAt: release.createdAt,
       },
       records,
+      dataCard: {
+        intendedUse:
+          'Guitar Tab Studio approved-recipe research training and public validation.',
+        prohibitedUses: [
+          'identity inference',
+          'rights circumvention',
+          'sealed evaluation',
+        ],
+        licenses: [
+          ...new Set(records.map((record) => record.source.license)),
+        ].sort(),
+        split: 'train',
+        recordCount: records.length,
+        sourceCount: new Set(records.map((record) => record.source.id)).size,
+        taskTypes,
+        lineage: {
+          performerCount: uniqueCount('performerId'),
+          workCount: uniqueCount('workId'),
+          recordingCount: uniqueCount('recordingId'),
+          sessionCount: uniqueCount('sessionId'),
+          lineageCount: uniqueCount('lineageId'),
+          crossSplitLeakage: 0,
+        },
+        limitations: [
+          'Owner-verified consensus is not equivalent to expert gold data.',
+          'This release contains training records only and cannot be used as sealed evaluation.',
+        ],
+      },
     }
   }
 
@@ -3155,6 +3325,17 @@ export class CommunityStore {
         promotion.id,
         { mode: input.mode, errorRate, observations: recent.length },
       )
+      this.emitOperationalAlert({
+        schemaVersion: 1,
+        type: 'deployment-auto-rollback',
+        severity: 'critical',
+        occurredAt: this.now(),
+        promotionId: promotion.id,
+        modelVersion: promotion.modelVersion,
+        mode: input.mode,
+        errorRatePercent: errorRate,
+        observations: recent.length,
+      })
     }
     this.persist()
     this.audit(
@@ -3290,6 +3471,11 @@ export class CommunityStore {
     const blockedReleases = this.state.releases.filter(
       (release) => release.status === 'blocked',
     ).length
+    const suspendedContributors = this.state.accounts.filter(
+      (account) =>
+        account.suspendedUntil &&
+        new Date(account.suspendedUntil).getTime() > this.nowDate().getTime(),
+    ).length
     const deployment = this.inferenceDeploymentStatus()
     if (escalated > 0) {
       maintenance.push({
@@ -3301,6 +3487,12 @@ export class CommunityStore {
       maintenance.push({
         severity: 'warning',
         message: `${blockedReleases} 个数据版本因来源撤回被阻断`,
+      })
+    }
+    if (suspendedContributors > 0) {
+      maintenance.push({
+        severity: 'warning',
+        message: `${suspendedContributors} 个账号因异常作答被临时暂停`,
       })
     }
     if (

@@ -61,8 +61,8 @@ class CandidateActivityHead(nn.Module):
             raise ValueError("activity dropout must be in [0, 1)")
         if self.config.repeat_interval <= 0:
             raise ValueError("repeat interval must be positive")
-        if self.config.temporal_feature_count not in (0, 6):
-            raise ValueError("temporal feature count must be 0 or 6")
+        if self.config.temporal_feature_count not in (0, 6, 12):
+            raise ValueError("temporal feature count must be 0, 6 or 12")
         if self.config.temporal_max_interval <= 0:
             raise ValueError("temporal max interval must be positive")
         encoded_size = (
@@ -102,18 +102,32 @@ def candidate_temporal_context(
     onsets: list[float],
     pitches: list[list[int]],
     confidences: list[list[float]],
+    durations: list[list[float]] | None = None,
     *,
     repeat_interval: float,
     maximum_interval: float,
+    feature_count: int = 6,
 ) -> np.ndarray:
     if not (len(onsets) == len(pitches) == len(confidences)):
         raise ValueError("candidate context inputs must have equal lengths")
-    features = np.zeros((len(onsets), 6), dtype=np.float32)
+    if durations is not None and len(durations) != len(onsets):
+        raise ValueError("candidate durations must align with onsets")
+    if feature_count not in (6, 12):
+        raise ValueError("candidate context feature count must be 6 or 12")
+    if feature_count == 12 and durations is None:
+        raise ValueError("extended candidate context requires durations")
+    duration_groups = durations or [[] for _onset in onsets]
+    features = np.zeros((len(onsets), feature_count), dtype=np.float32)
     previous_onset: float | None = None
     previous_pitches: set[int] = set()
     last_onset_by_pitch: dict[int, float] = {}
-    for index, (onset, group_pitches, group_confidences) in enumerate(
-        zip(onsets, pitches, confidences)
+    for index, (
+        onset,
+        group_pitches,
+        group_confidences,
+        group_durations,
+    ) in enumerate(
+        zip(onsets, pitches, confidences, duration_groups)
     ):
         current_pitches = set(group_pitches)
         previous_gap = (
@@ -132,24 +146,48 @@ def candidate_temporal_context(
             if same_pitch_gaps
             else maximum_interval
         )
-        features[index] = np.asarray(
-            (
-                min(previous_gap, maximum_interval) / maximum_interval,
-                min(same_pitch_gap, maximum_interval) / maximum_interval,
-                float(
-                    bool(same_pitch_gaps)
-                    and same_pitch_gap <= repeat_interval
-                ),
-                float(bool(current_pitches & previous_pitches)),
-                min(len(group_pitches), 6) / 6,
-                (
-                    sum(group_confidences) / len(group_confidences)
-                    if group_confidences
-                    else 1.0
-                ),
+        normalized_confidences = group_confidences or [1.0]
+        base_features = (
+            min(previous_gap, maximum_interval) / maximum_interval,
+            min(same_pitch_gap, maximum_interval) / maximum_interval,
+            float(
+                bool(same_pitch_gaps)
+                and same_pitch_gap <= repeat_interval
             ),
-            dtype=np.float32,
+            float(bool(current_pitches & previous_pitches)),
+            min(len(group_pitches), 6) / 6,
+            sum(normalized_confidences) / len(normalized_confidences),
         )
+        if feature_count == 6:
+            features[index] = np.asarray(base_features, dtype=np.float32)
+        else:
+            normalized_durations = group_durations or [0.0]
+            pitch_span = (
+                max(group_pitches) - min(group_pitches)
+                if group_pitches
+                else 0
+            )
+            features[index] = np.asarray(
+                (
+                    *base_features,
+                    max(normalized_confidences),
+                    min(normalized_confidences),
+                    float(np.std(normalized_confidences)),
+                    min(pitch_span, 48) / 48,
+                    min(
+                        sum(normalized_durations)
+                        / len(normalized_durations),
+                        maximum_interval,
+                    )
+                    / maximum_interval,
+                    min(
+                        min(normalized_durations),
+                        maximum_interval,
+                    )
+                    / maximum_interval,
+                ),
+                dtype=np.float32,
+            )
         previous_onset = onset
         previous_pitches = current_pitches
         for pitch in current_pitches:
@@ -268,8 +306,18 @@ class CandidateActivityDataset(Dataset[dict[str, Tensor]]):
                         )
                         for group in groups
                     ],
+                    [
+                        list(
+                            group.input_durations
+                            or (0.0,) * len(group.input_pitches or ())
+                        )
+                        for group in groups
+                    ],
                     repeat_interval=activity_config.repeat_interval,
                     maximum_interval=activity_config.temporal_max_interval,
+                    feature_count=(
+                        activity_config.temporal_feature_count
+                    ),
                 )
                 self.temporal_contexts[group_indexes] = contexts
 

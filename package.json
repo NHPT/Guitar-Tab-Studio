@@ -1,23 +1,31 @@
 {
   "name": "guitar-tab-studio",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.0-preview.1",
   "license": "Apache-2.0",
   "workspaces": [
-    "apps/*"
+    "apps/*",
+    "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n api,web -c cyan,green \"npm run dev -w @gts/api\" \"npm run dev -w web\"",
-    "build": "npm run build -w @gts/api && npm run build -w web",
-    "test": "npm run test -w @gts/api && npm run lint -w web",
+    "dev": "npm run build -w @gts/core && concurrently -n api,web -c cyan,green \"npm run dev -w @gts/api\" \"npm run dev -w web\"",
+    "desktop:dev": "npm run dev -w @gts/desktop",
+    "desktop:smoke": "npm run smoke -w @gts/desktop",
+    "desktop:sidecar": "node scripts/build-desktop-sidecar.mjs",
+    "demo:audio": "node scripts/validate-builtin-recording.mjs",
+    "demo:audio:check": "node scripts/validate-builtin-recording.mjs",
+    "build": "npm run build -w @gts/core && npm run build -w @gts/api && npm run build -w web && npm run build -w @gts/desktop",
+    "test": "npm run test -w @gts/core && npm run test -w @gts/api && npm run test -w @gts/desktop && npm run lint -w web",
     "test:gate": ".venv/bin/python -m unittest discover -s services/promotion_gate -p 'test_*.py'",
     "test:runner": ".venv/bin/python -m unittest discover -s services/training_runner -p 'test_*.py'",
     "test:sealed-gate": "PYTHONPATH=services/worker .venv/bin/python -m unittest discover -s services/sealed_gate -p 'test_*.py'",
     "test:e2e": "PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright playwright test",
+    "test:e2e:timing": "PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright playwright test tests/score-timing.spec.ts --grep 'places notes on the playhead|marks three evenly spaced subdivisions' --workers=1",
     "promotion:gate": ".venv/bin/python services/promotion_gate/gate.py",
     "sealed:gate": "PYTHONPATH=services/worker .venv/bin/python services/sealed_gate/gate.py",
     "training:runner": ".venv/bin/python services/training_runner/runner.py",
-    "start": "npm run start -w @gts/api"
+    "start": "npm run start -w @gts/api",
+    "postinstall": "npm run build -w @gts/core"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",

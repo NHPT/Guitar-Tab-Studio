@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .cache/
+.dbg/
+debug-*.md
 .DS_Store
 *.log
 test-results/
@@ -16,6 +18,13 @@ apps/api/data/training/
 apps/api/data/worker-smoke/
 apps/api/data/state/
 apps/api/data/community/
+apps/desktop/data/
+apps/desktop/apps/desktop/data/
+apps/desktop/build-resources/api/
+apps/desktop/build-resources/sidecar/*
+!apps/desktop/build-resources/sidecar/README.md
+apps/desktop/.sidecar-build/
+apps/desktop/release/
 
 .env
 .env.local

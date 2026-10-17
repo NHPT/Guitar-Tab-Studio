@@ -3,12 +3,21 @@ import {
   Check,
   ChevronDown,
   CircleAlert,
+  Cloud,
   Download,
+  Drum,
+  ExternalLink,
   FileAudio,
+  FileImage,
+  FolderOpen,
   Gauge,
   Guitar,
+  HardDrive,
   Headphones,
+  History,
+  KeyRound,
   Link2,
+  Laptop,
   LoaderCircle,
   Maximize2,
   Minimize2,
@@ -17,27 +26,49 @@ import {
   Pause,
   Play,
   Plus,
+  PackagePlus,
   RotateCcw,
+  Save,
   Scissors,
   SkipBack,
   SlidersHorizontal,
+  TimerReset,
   Upload,
   Users,
   Volume2,
   VolumeX,
+  Trash2,
+  WandSparkles,
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import './App.css'
 import {
-  fetchDemoProject,
-  fetchHealth,
-  fetchJob,
-  fetchPlatforms,
-  fetchProject,
-  submitLink,
-  submitUpload,
-} from './api'
+  arrangementPreservesPitch,
+  authorizedMediaProviderForContent,
+  countInBeatDurations,
+  createEasyArrangement,
+  formatTimeSignature,
+  PRACTICE_RHYTHMS,
+  practiceTempoProfile,
+  requiresAuthorizedMediaDecode,
+  rhythmCompatibilityForTempoProfile,
+  type DesktopLocalFileSource,
+  type DesktopRecentProject,
+  type DesktopRuntimeStatus,
+  type AuthorizedMediaProvider,
+  type InstalledModelPackage,
+  type ProjectRevision,
+  type RhythmGroup,
+  type RhythmKit,
+  type StorageCleanupStatus,
+  type StudioApplication,
+  type TranscriptionModelVariant,
+  type TranscriptionProviderId,
+  type TranscriptionSetupProgress,
+} from '@gts/core'
+import './App.css'
+import { studioApplication } from './api'
+import type { DesktopStudioControls } from './desktop'
 import type {
   AnalysisJob,
   BeatStyle,
@@ -79,6 +110,106 @@ const visualizerModes: Array<{ id: VisualizerMode; label: string }> = [
   { id: 'reactor', label: '反应堆控制杆' },
 ]
 
+const countInBarOptions = [0, 1, 2, 3, 4] as const
+const countInKitOptions = [
+  { id: 'click', label: '电子滴答' },
+  { id: 'wood', label: '木质节拍' },
+] as const
+type CountInKit = (typeof countInKitOptions)[number]['id']
+type ProtectedImportRequest =
+  | {
+      kind: 'upload'
+      file: File
+      provider: AuthorizedMediaProvider
+    }
+  | {
+      kind: 'link'
+      url: string
+      provider: 'qqmusic' | 'netease'
+    }
+const protectedProviderLabels: Record<AuthorizedMediaProvider, string> = {
+  qqmusic: 'QQ 音乐',
+  netease: '网易云音乐',
+  moo: 'MOO 音乐',
+  kuwo: '酷我音乐',
+  kugou: '酷狗音乐',
+  unknown: '合作平台',
+}
+const huggingFaceOAuthApplicationUrl =
+  'https://huggingface.co/settings/applications/new'
+const huggingFaceOAuthRedirectUri =
+  'http://127.0.0.1/oauth/callback'
+type DesktopMediaSource = Exclude<DesktopLocalFileSource, 'default'>
+const desktopMediaSourceOptions: Array<{
+  id: DesktopMediaSource
+  label: string
+}> = [
+  { id: 'qqmusic', label: 'QQ 音乐' },
+  { id: 'netease', label: '网易云音乐' },
+  { id: 'moo', label: 'MOO 音乐' },
+  { id: 'kuwo', label: '酷我音乐' },
+  { id: 'kugou', label: '酷狗音乐' },
+]
+const rhythmKitOptions: Array<{
+  id: 'pattern' | RhythmKit
+  label: string
+}> = [
+  { id: 'pattern', label: '跟随节奏型' },
+  { id: 'acoustic', label: '原声鼓' },
+  { id: 'electronic', label: '电子鼓' },
+  { id: 'brush', label: '刷奏' },
+  { id: 'wood', label: '木质' },
+]
+type RhythmKitSelection = (typeof rhythmKitOptions)[number]['id']
+const rhythmGroupOrder: RhythmGroup[] = [
+  'metronome',
+  'rock',
+  'pop',
+  'funk',
+  'blues',
+  'electronic',
+  'world',
+  'other-meter',
+]
+const rhythmGroupLabels: Record<RhythmGroup, string> = {
+  metronome: '节拍器',
+  rock: '摇滚',
+  pop: '流行',
+  funk: '放克与灵魂',
+  blues: '布鲁斯',
+  electronic: '电子',
+  world: '世界节奏',
+  'other-meter': '其他拍号',
+}
+
+interface CountInProgress {
+  bar: number
+  beat: number
+  totalBars: number
+  beatsPerBar: number
+  tempo: number
+}
+
+const projectListDefaultHeight = 464
+const projectListMinimumHeight = 116
+const projectListReservedViewportHeight = 408
+
+function projectListMaximumHeight(): number {
+  return Math.max(
+    projectListMinimumHeight,
+    window.innerHeight - projectListReservedViewportHeight,
+  )
+}
+
+function initialProjectListHeight(): number {
+  const stored = Number(window.localStorage.getItem('gts-project-list-height'))
+  const preferred =
+    Number.isFinite(stored) && stored >= projectListMinimumHeight
+      ? stored
+      : projectListDefaultHeight
+  return Math.min(preferred, projectListMaximumHeight())
+}
+
 function initialTheme(): ThemeId {
   const stored = window.localStorage.getItem('gts-theme')
   return themePresets.some((theme) => theme.id === stored) ? (stored as ThemeId) : 'vermilion'
@@ -89,6 +220,50 @@ function initialVisualizer(): VisualizerMode {
   return visualizerModes.some((mode) => mode.id === stored)
     ? (stored as VisualizerMode)
     : 'glow'
+}
+
+function initialCountInBars(): number {
+  const persisted = window.localStorage.getItem('gts-count-in-bars')
+  if (persisted === null) return 2
+  const stored = Number(persisted)
+  return countInBarOptions.includes(
+    stored as (typeof countInBarOptions)[number],
+  )
+    ? stored
+    : 2
+}
+
+function initialRhythmId(): string {
+  const stored = window.localStorage.getItem('gts-rhythm-id')
+  return PRACTICE_RHYTHMS.some((rhythm) => rhythm.id === stored)
+    ? stored!
+    : 'rock-basic'
+}
+
+function initialRhythmVolume(): number {
+  const stored = Number(window.localStorage.getItem('gts-rhythm-volume'))
+  return Number.isFinite(stored) && stored >= 0.1 && stored <= 1 ? stored : 0.68
+}
+
+function initialCountInVolume(): number {
+  const persisted = window.localStorage.getItem('gts-count-in-volume')
+  if (persisted === null) return 0.8
+  const stored = Number(persisted)
+  return Number.isFinite(stored) && stored >= 0 && stored <= 1 ? stored : 0.8
+}
+
+function initialCountInKit(): CountInKit {
+  const stored = window.localStorage.getItem('gts-count-in-kit')
+  return countInKitOptions.some((option) => option.id === stored)
+    ? (stored as CountInKit)
+    : 'click'
+}
+
+function initialRhythmKit(): RhythmKitSelection {
+  const stored = window.localStorage.getItem('gts-rhythm-kit')
+  return rhythmKitOptions.some((option) => option.id === stored)
+    ? (stored as RhythmKitSelection)
+    : 'pattern'
 }
 
 function extractSharedUrl(value: string): string | null {
@@ -111,8 +286,6 @@ function detectInputPlatform(
   if (!url) return null
   const host = new URL(url).hostname.toLowerCase()
   const unsupportedHosts = [
-    'y.qq.com',
-    'c.y.qq.com',
     'qishui.douyin.com',
     'music.douyin.com',
     'qishui.com',
@@ -209,6 +382,12 @@ function formatTime(seconds: number): string {
   return `${minutes}:${remainder.toString().padStart(2, '0')}`
 }
 
+function formatStorageSize(bytes: number): string {
+  const gibibytes = bytes / 1024 ** 3
+  if (gibibytes >= 1) return `${gibibytes.toFixed(1)} GB`
+  return `${(bytes / 1024 ** 2).toFixed(0)} MB`
+}
+
 function initialMixes(project: StudioProject): Record<string, TrackMix> {
   return Object.fromEntries(
     project.tracks.map((track) => [
@@ -216,7 +395,10 @@ function initialMixes(project: StudioProject): Record<string, TrackMix> {
       {
         muted: false,
         solo: false,
-        volume: track.role === 'vocals' ? 0.72 : 0.86,
+        volume:
+          project.analysisMode === 'demo'
+            ? 0.86
+            : track.role === 'vocals' ? 0.72 : 0.86,
       },
     ]),
   )
@@ -231,7 +413,13 @@ function recommendedCapoForProject(project: StudioProject): number {
   return containsHarmonics ? 0 : recommendCapo(project.tab.measures)
 }
 
-function App() {
+export interface AppProps {
+  application?: StudioApplication<File> & Partial<DesktopStudioControls>
+}
+
+function App({ application = studioApplication }: AppProps) {
+  const desktopControls = application as StudioApplication<File> &
+    Partial<DesktopStudioControls>
   const [project, setProject] = useState<StudioProject | null>(null)
   const [capabilities, setCapabilities] = useState<CapabilityState | null>(null)
   const [platforms, setPlatforms] = useState<PlatformDescriptor[]>([])
@@ -239,6 +427,18 @@ function App() {
   const [playing, setPlaying] = useState(false)
   const [position, setPosition] = useState(0)
   const [speed, setSpeed] = useState(1)
+  const [countInBars, setCountInBars] = useState(initialCountInBars)
+  const [countInKit, setCountInKit] = useState<CountInKit>(initialCountInKit)
+  const [countInVolume, setCountInVolume] = useState(initialCountInVolume)
+  const [countInProgress, setCountInProgress] =
+    useState<CountInProgress | null>(null)
+  const [rhythmEnabled, setRhythmEnabled] = useState(
+    () => window.localStorage.getItem('gts-rhythm-enabled') === 'true',
+  )
+  const [rhythmId, setRhythmId] = useState(initialRhythmId)
+  const [rhythmKit, setRhythmKit] =
+    useState<RhythmKitSelection>(initialRhythmKit)
+  const [rhythmVolume, setRhythmVolume] = useState(initialRhythmVolume)
   const [loopEnabled, setLoopEnabled] = useState(false)
   const [loopStartMeasure, setLoopStartMeasure] = useState(1)
   const [loopEndMeasure, setLoopEndMeasure] = useState(1)
@@ -253,23 +453,88 @@ function App() {
   const [selectedMeasureNumber, setSelectedMeasureNumber] = useState<number>()
   const [selectedBeatIndex, setSelectedBeatIndex] = useState<number>()
   const [importOpen, setImportOpen] = useState(false)
-  const [importMode, setImportMode] = useState<'upload' | 'link'>('upload')
+  const [runtimeOpen, setRuntimeOpen] = useState(false)
+  const [runtimeBusy, setRuntimeBusy] = useState(false)
+  const [runtimeError, setRuntimeError] = useState('')
+  const [runtimeNotice, setRuntimeNotice] = useState('')
+  const [runtimeStatus, setRuntimeStatus] =
+    useState<DesktopRuntimeStatus | null>(null)
+  const [runtimeLocation, setRuntimeLocation] = useState<'local' | 'cloud'>(
+    'local',
+  )
+  const [transcriptionScheme, setTranscriptionScheme] =
+    useState<TranscriptionProviderId>('basic-pitch')
+  const [transcriptionChoice, setTranscriptionChoice] = useState<
+    'auto' | TranscriptionModelVariant
+  >('auto')
+  const [cloudApiRoot, setCloudApiRoot] = useState('')
+  const [oauthSetup, setOauthSetup] = useState(false)
+  const [huggingFaceOAuthClientId, setHuggingFaceOAuthClientId] =
+    useState('')
+  const [transcriptionLicenseAccepted, setTranscriptionLicenseAccepted] =
+    useState(false)
+  const [transcriptionProgress, setTranscriptionProgress] =
+    useState<TranscriptionSetupProgress | null>(null)
+  const [transcriptionSetupError, setTranscriptionSetupError] = useState('')
+  const [storageCleanup, setStorageCleanup] =
+    useState<StorageCleanupStatus | null>(null)
+  const [cleanupEnabled, setCleanupEnabled] = useState(true)
+  const [cleanupTriggerGiB, setCleanupTriggerGiB] = useState('5')
+  const [cleanupTargetGiB, setCleanupTargetGiB] = useState('8')
+  const [cleanupRetentionHours, setCleanupRetentionHours] = useState('24')
+  const [revisions, setRevisions] = useState<ProjectRevision[]>([])
+  const [localProjects, setLocalProjects] = useState<DesktopRecentProject[]>(
+    [],
+  )
+  const [builtinProject, setBuiltinProject] =
+    useState<StudioProject | null>(null)
+  const [projectListHeight, setProjectListHeight] = useState(
+    initialProjectListHeight,
+  )
+  const [projectListHeightMaximum, setProjectListHeightMaximum] = useState(
+    projectListMaximumHeight,
+  )
+  const [projectContextMenu, setProjectContextMenu] = useState<{
+    project: DesktopRecentProject
+    x: number
+    y: number
+  } | null>(null)
+  const [revisionBusy, setRevisionBusy] = useState(false)
+  const [revisionNotice, setRevisionNotice] = useState('')
+  const [scoreLayer, setScoreLayer] = useState<'original' | 'easy'>('original')
+  const [modelPackages, setModelPackages] = useState<InstalledModelPackage[]>([])
+  const [modelManifestUrl, setModelManifestUrl] = useState('')
+  const [importMode, setImportMode] = useState<'upload' | 'score' | 'link'>('upload')
   const [linkValue, setLinkValue] = useState('')
   const [job, setJob] = useState<AnalysisJob | null>(null)
+  const [protectedImport, setProtectedImport] =
+    useState<ProtectedImportRequest | null>(null)
+  const [scoreImportBusy, setScoreImportBusy] = useState(false)
   const [error, setError] = useState('')
+  const [mediaKeyNotice, setMediaKeyNotice] = useState('')
   const playbackPositionRef = useRef(0)
   const animationRef = useRef<number | null>(null)
   const previousFrameRef = useRef<number | null>(null)
   const previousUiFrameRef = useRef(0)
   const timeReadoutRef = useRef<HTMLElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const countInConsumedRef = useRef(false)
+  const projectListResizeRef = useRef<{
+    pointerId: number
+    startY: number
+    startHeight: number
+  } | null>(null)
+  const projectId = project?.id
 
   const loadProject = useCallback((nextProject: StudioProject) => {
     const finalMeasure = Math.max(1, nextProject.tab.measures.length)
     setProject(nextProject)
     setMixes(initialMixes(nextProject))
     playbackPositionRef.current = 0
+    countInConsumedRef.current = false
     setPosition(0)
     setPlaying(false)
+    setCountInProgress(null)
     setLoopEnabled(false)
     setLoopStartMeasure(1)
     setLoopEndMeasure(finalMeasure)
@@ -280,18 +545,42 @@ function App() {
     setSelectedNoteId(undefined)
     setSelectedMeasureNumber(undefined)
     setSelectedBeatIndex(undefined)
+    setScoreLayer('original')
+    setRevisionNotice('')
   }, [])
+
+  const refreshLocalProjects = useCallback(async () => {
+    if (!desktopControls.localProjects) return []
+    const items = await desktopControls.localProjects()
+    setLocalProjects(items)
+    return items
+  }, [desktopControls])
+
+  const openLocalProject = useCallback(
+    async (id: string) => {
+      const nextProject = await application.getProject(id)
+      loadProject(nextProject)
+      window.history.replaceState(null, '', `?project=${nextProject.id}`)
+      await refreshLocalProjects()
+    },
+    [application, loadProject, refreshLocalProjects],
+  )
 
   useEffect(() => {
     let active = true
     const requestedProject = new URLSearchParams(window.location.search).get('project')
+    const demoProject = application.getDemoProject()
     void Promise.all([
-      requestedProject ? fetchProject(requestedProject) : fetchDemoProject(),
-      fetchHealth(),
-      fetchPlatforms(),
+      requestedProject
+        ? application.getProject(requestedProject)
+        : demoProject,
+      application.getCapabilities(),
+      application.listPlatforms(),
+      demoProject,
     ])
-      .then(([loadedProject, capabilityState, platformList]) => {
+      .then(([loadedProject, capabilityState, platformList, loadedDemo]) => {
         if (!active) return
+        setBuiltinProject(loadedDemo)
         loadProject(loadedProject)
         setCapabilities(capabilityState)
         setPlatforms(platformList)
@@ -303,7 +592,65 @@ function App() {
     return () => {
       active = false
     }
-  }, [loadProject])
+  }, [application, loadProject])
+
+  useEffect(() => {
+    if (!projectId) return
+    let active = true
+    void application
+      .listProjectRevisions(projectId)
+      .then((items) => {
+        if (active) setRevisions(items)
+      })
+      .catch(() => {
+        if (active) setRevisions([])
+      })
+    return () => {
+      active = false
+    }
+  }, [application, projectId])
+
+  useEffect(() => {
+    if (!desktopControls.localProjects) return
+    let active = true
+    void desktopControls
+      .localProjects()
+      .then((items) => {
+        if (active) setLocalProjects(items)
+      })
+      .catch(() => {
+        if (active) setLocalProjects([])
+      })
+    return () => {
+      active = false
+    }
+  }, [desktopControls, projectId])
+
+  useEffect(() => {
+    if (!projectContextMenu) return
+    const closeMenu = () => setProjectContextMenu(null)
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeMenu()
+    }
+    window.addEventListener('pointerdown', closeMenu)
+    window.addEventListener('blur', closeMenu)
+    window.addEventListener('keydown', closeOnEscape)
+    window.addEventListener('scroll', closeMenu, true)
+    return () => {
+      window.removeEventListener('pointerdown', closeMenu)
+      window.removeEventListener('blur', closeMenu)
+      window.removeEventListener('keydown', closeOnEscape)
+      window.removeEventListener('scroll', closeMenu, true)
+    }
+  }, [projectContextMenu])
+
+  useEffect(() => {
+    if (!desktopControls.onTranscriptionProgress) return
+    return desktopControls.onTranscriptionProgress((progress) => {
+      setTranscriptionProgress(progress)
+      setRuntimeNotice(progress.stageLabel)
+    })
+  }, [desktopControls])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -311,36 +658,265 @@ function App() {
   }, [theme])
 
   useEffect(() => {
+    const updateMaximumHeight = () => {
+      const maximum = projectListMaximumHeight()
+      setProjectListHeightMaximum(maximum)
+      setProjectListHeight((current) => Math.min(current, maximum))
+    }
+    window.addEventListener('resize', updateMaximumHeight)
+    return () => window.removeEventListener('resize', updateMaximumHeight)
+  }, [])
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      'gts-project-list-height',
+      String(Math.round(projectListHeight)),
+    )
+  }, [projectListHeight])
+
+  useEffect(
+    () =>
+      application.subscribe?.((event) => {
+        if (event.type === 'open-media') {
+          setImportMode('upload')
+          setImportOpen(true)
+          window.setTimeout(() => fileInputRef.current?.click(), 0)
+          return
+        }
+        void application
+          .getProject(event.projectId)
+          .then((nextProject) => {
+            loadProject(nextProject)
+            window.history.replaceState(
+              null,
+              '',
+              `?project=${nextProject.id}`,
+            )
+          })
+          .catch((loadError: unknown) =>
+            setError(
+              loadError instanceof Error
+                ? loadError.message
+                : '项目加载失败',
+            ),
+          )
+      }),
+    [application, loadProject],
+  )
+
+  const refreshDesktopRuntime = useCallback(async (
+    preserveTranscriptionScheme = false,
+  ) => {
+    if (!desktopControls.runtimeStatus || !desktopControls.modelPackages) return
+    const [status, packages, cleanup] = await Promise.all([
+      desktopControls.runtimeStatus(project?.id),
+      desktopControls.modelPackages(),
+      desktopControls.storageCleanupStatus?.() ?? Promise.resolve(null),
+    ])
+    setRuntimeStatus(status)
+    setRuntimeLocation(status.providerMode)
+    if (!preserveTranscriptionScheme) {
+      setTranscriptionScheme(status.transcription.preference.providerId)
+    }
+    setCloudApiRoot(status.cloudApiRoot ?? '')
+    setTranscriptionChoice(
+      status.transcription.preference.selectionMode === 'manual' &&
+        status.transcription.preference.variant
+        ? status.transcription.preference.variant
+        : 'auto',
+    )
+    setTranscriptionLicenseAccepted(
+      status.transcription.preference.licenseAcceptedVersion ===
+        'CC-BY-NC-4.0',
+    )
+    setHuggingFaceOAuthClientId(
+      status.transcription.oauthClientId ?? '',
+    )
+    setModelPackages(packages)
+    setStorageCleanup(cleanup)
+    if (cleanup) {
+      setCleanupEnabled(cleanup.config.enabled)
+      setCleanupTriggerGiB(
+        (cleanup.config.triggerFreeBytes / 1024 ** 3).toString(),
+      )
+      setCleanupTargetGiB(
+        (cleanup.config.targetFreeBytes / 1024 ** 3).toString(),
+      )
+      setCleanupRetentionHours(cleanup.config.retentionHours.toString())
+    }
+  }, [desktopControls, project?.id])
+
+  const runDesktopAction = async (
+    action: () => Promise<unknown>,
+    options: {
+      errorScope?: 'transcription'
+      preserveTranscriptionScheme?: boolean
+    } = {},
+  ) => {
+    setRuntimeBusy(true)
+    setRuntimeError('')
+    setRuntimeNotice('')
+    if (options.errorScope === 'transcription') {
+      setTranscriptionSetupError('')
+    }
+    try {
+      await action()
+      await refreshDesktopRuntime(
+        options.preserveTranscriptionScheme === true,
+      )
+      if (options.errorScope === 'transcription') {
+        setTranscriptionProgress(null)
+      }
+      setCapabilities(await application.getCapabilities())
+    } catch (cause) {
+      const message =
+        cause instanceof Error ? cause.message : '桌面运行时操作失败'
+      setTranscriptionProgress(null)
+      if (message.includes('已取消') && message.includes('模型准备')) {
+        setRuntimeNotice(message)
+        setRuntimeError('')
+        setTranscriptionSetupError('')
+      } else if (options.errorScope === 'transcription') {
+        setRuntimeNotice('')
+        setRuntimeError('')
+        setTranscriptionSetupError(message)
+      } else {
+        setRuntimeNotice('')
+        setRuntimeError(message)
+      }
+    } finally {
+      setRuntimeBusy(false)
+    }
+  }
+
+  useEffect(() => {
     window.localStorage.setItem('gts-visualizer', visualizerMode)
   }, [visualizerMode])
 
+  useEffect(() => {
+    window.localStorage.setItem('gts-count-in-bars', String(countInBars))
+    window.localStorage.setItem('gts-count-in-kit', countInKit)
+    window.localStorage.setItem(
+      'gts-count-in-volume',
+      String(countInVolume),
+    )
+  }, [countInBars, countInKit, countInVolume])
+
+  useEffect(() => {
+    window.localStorage.setItem('gts-rhythm-enabled', String(rhythmEnabled))
+    window.localStorage.setItem('gts-rhythm-id', rhythmId)
+    window.localStorage.setItem('gts-rhythm-kit', rhythmKit)
+    window.localStorage.setItem('gts-rhythm-volume', String(rhythmVolume))
+  }, [rhythmEnabled, rhythmId, rhythmKit, rhythmVolume])
+
+  const scoreProject = useMemo(() => {
+    if (!project || scoreLayer !== 'easy' || !project.easyArrangement) {
+      return project
+    }
+    return { ...project, tab: project.easyArrangement.tab }
+  }, [project, scoreLayer])
+
   const loopRange = useMemo(() => {
-    if (!project) {
+    if (!scoreProject) {
       return { start: 0, end: 0 }
     }
-    const start = project.tab.measures[loopStartMeasure - 1]?.start ?? 0
-    const endMeasure = project.tab.measures[loopEndMeasure - 1]
+    const start = scoreProject.tab.measures[loopStartMeasure - 1]?.start ?? 0
+    const endMeasure = scoreProject.tab.measures[loopEndMeasure - 1]
     return {
       start,
-      end: endMeasure ? endMeasure.start + endMeasure.duration : project.duration,
+      end: endMeasure
+        ? endMeasure.start + endMeasure.duration
+        : scoreProject.duration,
     }
-  }, [loopEndMeasure, loopStartMeasure, project])
+  }, [loopEndMeasure, loopStartMeasure, scoreProject])
 
-  const { analyserRef, activateAudio, seekAudio } = usePracticeAudio({
+  const timeSignature =
+    project?.tab.timeSignature ?? PRACTICE_RHYTHMS[0].timeSignature
+  const tempoProfile = useMemo(() => {
+    const fallback = (project?.bpm ?? 120) * speed
+    return (
+      practiceTempoProfile(project?.tab.measures ?? [], speed) ?? {
+        low: fallback,
+        typical: fallback,
+        high: fallback,
+      }
+    )
+  }, [project, speed])
+  const tempoLabel =
+    Math.round(tempoProfile.high) - Math.round(tempoProfile.low) >= 2
+      ? `${Math.round(tempoProfile.low)}–${Math.round(tempoProfile.high)}`
+      : String(Math.round(tempoProfile.typical))
+  const requestedRhythm =
+    PRACTICE_RHYTHMS.find((rhythm) => rhythm.id === rhythmId) ??
+    PRACTICE_RHYTHMS[0]
+  const selectedRhythm =
+    rhythmCompatibilityForTempoProfile(
+      requestedRhythm,
+      tempoProfile,
+      timeSignature,
+    ).compatible
+      ? requestedRhythm
+      : PRACTICE_RHYTHMS.find(
+          (rhythm) =>
+            rhythm.group === 'metronome' &&
+            rhythmCompatibilityForTempoProfile(
+              rhythm,
+              tempoProfile,
+              timeSignature,
+            ).compatible,
+        ) ??
+        PRACTICE_RHYTHMS.find(
+          (rhythm) =>
+            rhythmCompatibilityForTempoProfile(
+              rhythm,
+              tempoProfile,
+              timeSignature,
+            ).compatible,
+        ) ??
+        requestedRhythm
+  const compatibleRhythmCount = PRACTICE_RHYTHMS.filter(
+    (rhythm) =>
+      rhythmCompatibilityForTempoProfile(
+        rhythm,
+        tempoProfile,
+        timeSignature,
+      ).compatible,
+  ).length
+
+  const {
+    analyserRef,
+    activateAudio,
+    seekAudio,
+    startCountIn,
+    cancelCountIn,
+  } = usePracticeAudio({
     project,
     playing,
     position,
+    playbackPositionRef,
     speed,
     mixes,
+    rhythm: {
+      enabled: rhythmEnabled,
+      definition: selectedRhythm,
+      kit: rhythmKit === 'pattern' ? selectedRhythm.kit : rhythmKit,
+      volume: rhythmVolume,
+    },
   })
+
+  useEffect(() => {
+    cancelCountIn()
+  }, [cancelCountIn, projectId])
 
   const seekPosition = useCallback(
     (seconds: number) => {
+      cancelCountIn()
+      setCountInProgress(null)
       playbackPositionRef.current = seconds
       setPosition(seconds)
       seekAudio(seconds)
     },
-    [seekAudio],
+    [cancelCountIn, seekAudio],
   )
 
   useEffect(() => {
@@ -365,6 +941,7 @@ function App() {
       } else if (next >= project.duration) {
         next = 0
         seekAudio(0)
+        countInConsumedRef.current = false
         setPlaying(false)
         forceUiUpdate = true
       }
@@ -399,17 +976,21 @@ function App() {
 
   const allNotes = useMemo(
     () =>
-      project?.tab.measures.flatMap((measure) =>
+      scoreProject?.tab.measures.flatMap((measure) =>
         measure.beats.flatMap((beat) => beat.notes),
       ) ?? [],
-    [project],
+    [scoreProject],
   )
   const selectedNote = allNotes.find((note) => note.id === selectedNoteId)
   const detectedPlatform = useMemo(
     () => detectInputPlatform(linkValue, platforms),
     [linkValue, platforms],
   )
-  const selectedMeasure = project?.tab.measures.find(
+  const jobTerminal = Boolean(
+    job &&
+      ['completed', 'degraded', 'failed', 'cancelled'].includes(job.status),
+  )
+  const selectedMeasure = scoreProject?.tab.measures.find(
     (measure) => measure.number === selectedMeasureNumber,
   )
   const selectedBeat =
@@ -418,8 +999,8 @@ function App() {
       : undefined
   const selectedBeatStyle = selectedBeat ? inferBeatStyle(selectedBeat) : undefined
   const recommendedCapo = useMemo(
-    () => (project ? recommendedCapoForProject(project) : 0),
-    [project],
+    () => (scoreProject ? recommendedCapoForProject(scoreProject) : 0),
+    [scoreProject],
   )
   const activeCapo = capoEnabled ? capoFret : 0
   const visibleTracks = useMemo(() => {
@@ -440,15 +1021,32 @@ function App() {
     return detected.length > 0 ? detected : available.slice(0, 1)
   }, [project])
 
+  const updateActiveTab = (
+    update: (tab: StudioProject['tab']) => StudioProject['tab'],
+  ) => {
+    setProject((current) => {
+      if (!current) return current
+      if (scoreLayer === 'easy' && current.easyArrangement) {
+        return {
+          ...current,
+          easyArrangement: {
+            ...current.easyArrangement,
+            tab: update(current.easyArrangement.tab),
+          },
+        }
+      }
+      return { ...current, tab: update(current.tab) }
+    })
+    setRevisionNotice('有未保存的谱面修改')
+  }
+
   const updateSelectedNote = (update: Partial<TabNote>) => {
     if (!project || !selectedNoteId) {
       return
     }
-    setProject({
-      ...project,
-      tab: {
-        ...project.tab,
-        measures: project.tab.measures.map((measure) => ({
+    updateActiveTab((tab) => ({
+      ...tab,
+      measures: tab.measures.map((measure) => ({
           ...measure,
           beats: measure.beats.map((beat) => ({
             ...beat,
@@ -457,30 +1055,24 @@ function App() {
             ),
           })),
         })),
-      },
-    })
+    }))
   }
 
   const updateSelectedChord = (chord: string) => {
     if (!project || !selectedMeasureNumber) return
-    setProject({
-      ...project,
-      tab: {
-        ...project.tab,
-        measures: project.tab.measures.map((measure) =>
+    updateActiveTab((tab) => ({
+      ...tab,
+      measures: tab.measures.map((measure) =>
           measure.number === selectedMeasureNumber ? { ...measure, chord } : measure,
         ),
-      },
-    })
+    }))
   }
 
   const updateSelectedBeatStyle = (style: BeatStyle) => {
     if (!project || !selectedMeasureNumber || selectedBeatIndex === undefined) return
-    setProject({
-      ...project,
-      tab: {
-        ...project.tab,
-        measures: project.tab.measures.map((measure) =>
+    updateActiveTab((tab) => ({
+      ...tab,
+      measures: tab.measures.map((measure) =>
           measure.number === selectedMeasureNumber
             ? {
                 ...measure,
@@ -490,8 +1082,70 @@ function App() {
               }
             : measure,
         ),
-      },
-    })
+    }))
+  }
+
+  const saveRevision = async (
+    nextProject: StudioProject,
+    label: string,
+    kind: 'manual' | 'arrangement' = 'manual',
+  ) => {
+    setRevisionBusy(true)
+    setRevisionNotice('')
+    try {
+      const revision = await application.saveProjectRevision(
+        nextProject,
+        label,
+        kind,
+        revisions[0]?.id ?? null,
+      )
+      setProject(revision.project)
+      setRevisions((current) => [
+        revision,
+        ...current.filter((item) => item.id !== revision.id),
+      ])
+      setRevisionNotice('修订已保存')
+    } catch (cause) {
+      setRevisionNotice(
+        cause instanceof Error ? cause.message : '保存修订失败',
+      )
+    } finally {
+      setRevisionBusy(false)
+    }
+  }
+
+  const generateEasyArrangement = () => {
+    if (!project) return
+    const easyArrangement = createEasyArrangement(project)
+    if (!arrangementPreservesPitch(project.tab, easyArrangement.tab)) {
+      setRevisionNotice('易弹版音高校验失败，未应用更改')
+      return
+    }
+    setProject({ ...project, easyArrangement })
+    setScoreLayer('easy')
+    setRevisionNotice('易弹版已生成，保存修订后持久化')
+  }
+
+  const restoreRevision = async (revisionId: string) => {
+    if (!project || !revisionId) return
+    setRevisionBusy(true)
+    setRevisionNotice('')
+    try {
+      const revision = await application.restoreProjectRevision(
+        project.id,
+        revisionId,
+      )
+      loadProject(revision.project)
+      const items = await application.listProjectRevisions(project.id)
+      setRevisions(items)
+      setRevisionNotice('已恢复为新修订，历史记录未被覆盖')
+    } catch (cause) {
+      setRevisionNotice(
+        cause instanceof Error ? cause.message : '恢复修订失败',
+      )
+    } finally {
+      setRevisionBusy(false)
+    }
   }
 
   const updateMix = (trackId: string, update: Partial<TrackMix>) => {
@@ -519,30 +1173,106 @@ function App() {
     setSelectedBeatIndex(undefined)
   }, [])
 
+  const cancelPreparation = () => {
+    cancelCountIn()
+    setCountInProgress(null)
+  }
+
+  const changePlaybackSpeed = (nextSpeed: number) => {
+    cancelPreparation()
+    setSpeed(nextSpeed)
+  }
+
   const togglePlayback = () => {
+    if (!project) return
+    if (countInProgress) {
+      cancelPreparation()
+      return
+    }
     if (playing) {
       setPosition(playbackPositionRef.current)
       setPlaying(false)
       return
     }
     const currentPosition = playbackPositionRef.current
+    const firstMeasureStart = scoreProject?.tab.measures[0]?.start ?? 0
     if (
       loopEnabled &&
       (currentPosition < loopRange.start || currentPosition >= loopRange.end)
     ) {
       seekPosition(loopRange.start)
+    } else if (countInBars > 0) {
+      if (currentPosition < firstMeasureStart) {
+        seekPosition(firstMeasureStart)
+      }
     }
-    void activateAudio()
-    setPlaying(true)
+    const startsAtSongOpening =
+      Math.abs(playbackPositionRef.current - firstMeasureStart) <= 0.05
+    const shouldCountIn =
+      countInBars > 0 &&
+      startsAtSongOpening &&
+      !countInConsumedRef.current
+    if (!shouldCountIn) {
+      countInConsumedRef.current = true
+      void activateAudio()
+      setPlaying(true)
+      return
+    }
+    const beatDurations = countInBeatDurations(
+      project.bpm,
+      timeSignature[0],
+    )
+    const beatsPerBar = beatDurations.length
+    const averageBeatDuration =
+      beatDurations.reduce((total, duration) => total + duration, 0) /
+      beatsPerBar
+    const countInTempo = Math.round((60 * speed) / averageBeatDuration)
+    setCountInProgress({
+      bar: 1,
+      beat: 0,
+      totalBars: countInBars,
+      beatsPerBar,
+      tempo: countInTempo,
+    })
+    void startCountIn({
+      bars: countInBars,
+      speed,
+      beatDurations,
+      kit: countInKit,
+      volume: countInVolume,
+      onBeat: (bar, beat) =>
+        setCountInProgress({
+          bar,
+          beat,
+          totalBars: countInBars,
+          beatsPerBar,
+          tempo: countInTempo,
+        }),
+      onComplete: () => {
+        countInConsumedRef.current = true
+        previousFrameRef.current = null
+        setCountInProgress(null)
+        setPlaying(true)
+      },
+    }).catch((cause: unknown) => {
+      setCountInProgress(null)
+      setError(
+        cause instanceof Error ? cause.message : '无法启动预备节拍',
+      )
+    })
   }
 
   const pollJob = useCallback(
     async (jobId: string) => {
-      let nextJob = await fetchJob(jobId)
+      let nextJob = await application.getJob(jobId)
       setJob(nextJob)
-      while (!['completed', 'degraded', 'failed'].includes(nextJob.status)) {
+      while (
+        !['completed', 'degraded', 'failed', 'cancelled'].includes(
+          nextJob.status,
+        )
+      ) {
         await new Promise((resolve) => window.setTimeout(resolve, 450))
-        nextJob = await fetchJob(jobId)
+        nextJob = await application.getJob(jobId)
         setJob(nextJob)
       }
 
@@ -551,9 +1281,10 @@ function App() {
         setJob(null)
         return
       }
+      if (nextJob.status === 'cancelled') return
 
       if (nextJob.projectId) {
-        const nextProject = await fetchProject(nextJob.projectId)
+        const nextProject = await application.getProject(nextJob.projectId)
         loadProject(nextProject)
         window.history.replaceState(null, '', `?project=${nextProject.id}`)
         window.setTimeout(() => {
@@ -562,17 +1293,29 @@ function App() {
         }, 700)
       }
     },
-    [loadProject],
+    [application, loadProject],
   )
 
-  const startLinkImport = async () => {
+  const authorizedMediaConsent = {
+    accepted: true,
+    policyVersion: 2,
+  } as const
+
+  const startLinkImport = async (
+    authorized = false,
+    preparedUrl?: string,
+  ) => {
     setError('')
     try {
-      const normalizedUrl = extractSharedUrl(linkValue)
+      const normalizedUrl = preparedUrl ?? extractSharedUrl(linkValue)
       if (!normalizedUrl || !detectedPlatform) {
         throw new Error('未识别该链接来源，请粘贴受支持平台的完整分享链接')
       }
-      const nextJob = await submitLink(normalizedUrl)
+      const nextJob = await application.submitLink(
+        normalizedUrl,
+        authorized ? authorizedMediaConsent : undefined,
+      )
+      setProtectedImport(null)
       setJob(nextJob)
       await pollJob(nextJob.id)
     } catch (importError) {
@@ -580,14 +1323,149 @@ function App() {
     }
   }
 
-  const startUpload = async (file: File) => {
+  const startUpload = async (file: File, authorized = false) => {
     setError('')
     try {
-      const nextJob = await submitUpload(file)
+      const nextJob = await application.submitUpload(
+        file,
+        authorized ? authorizedMediaConsent : undefined,
+      )
+      setProtectedImport(null)
       setJob(nextJob)
       await pollJob(nextJob.id)
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : '上传失败')
+    }
+  }
+
+  const requestUpload = async (file: File) => {
+    setError('')
+    const header = new Uint8Array(
+      await file.slice(0, 16).arrayBuffer(),
+    )
+    const provider = authorizedMediaProviderForContent(file.name, header)
+    if (provider) {
+      if (requiresAuthorizedMediaDecode(file.name, header)) {
+        setProtectedImport({ kind: 'upload', file, provider })
+        return
+      }
+    }
+    await startUpload(file)
+  }
+
+  const requestLinkImport = async () => {
+    setError('')
+    try {
+      const normalizedUrl = extractSharedUrl(linkValue)
+      if (!normalizedUrl || !detectedPlatform) {
+        throw new Error('未识别该链接来源，请粘贴受支持平台的完整分享链接')
+      }
+      if (
+        detectedPlatform.id === 'qqmusic' ||
+        detectedPlatform.id === 'netease'
+      ) {
+        setProtectedImport({
+          kind: 'link',
+          url: normalizedUrl,
+          provider: detectedPlatform.id,
+        })
+        return
+      }
+      await startLinkImport(false, normalizedUrl)
+    } catch (importError) {
+      setError(
+        importError instanceof Error ? importError.message : '链接导入失败',
+      )
+    }
+  }
+
+  const startScoreUpload = async (file: File) => {
+    setError('')
+    setScoreImportBusy(true)
+    try {
+      const nextProject = await application.submitScore(file)
+      loadProject(nextProject)
+      window.history.replaceState(null, '', `?project=${nextProject.id}`)
+      setImportOpen(false)
+    } catch (uploadError) {
+      setError(
+        uploadError instanceof Error ? uploadError.message : '曲谱识别失败',
+      )
+    } finally {
+      setScoreImportBusy(false)
+    }
+  }
+
+  const selectDesktopFile = async (
+    kind: 'media' | 'score',
+    source: DesktopLocalFileSource = 'default',
+  ) => {
+    if (!desktopControls.selectLocalFile) return
+    setError('')
+    try {
+      const file = await desktopControls.selectLocalFile(kind, source)
+      if (!file) return
+      if (kind === 'media') await requestUpload(file)
+      else await startScoreUpload(file)
+    } catch (selectionError) {
+      setError(
+        selectionError instanceof Error
+          ? selectionError.message
+          : '无法打开所选文件',
+      )
+    }
+  }
+
+  const importMediaKeyDatabase = async (
+    provider: 'kuwo' | 'kugou',
+  ) => {
+    if (!desktopControls.importMediaKeyDatabase) return
+    setError('')
+    setMediaKeyNotice('')
+    try {
+      const result =
+        await desktopControls.importMediaKeyDatabase(provider)
+      if (!result) return
+      setMediaKeyNotice(
+        `${provider === 'kuwo' ? '酷我' : '酷狗'}密钥库已载入 ${result.count} 条密钥；密钥仅保留在本次桌面运行内存中。`,
+      )
+    } catch (importError) {
+      setError(
+        importError instanceof Error
+          ? importError.message
+          : '密钥库导入失败',
+      )
+    }
+  }
+
+  const removeLocalProject = async (item: DesktopRecentProject) => {
+    setProjectContextMenu(null)
+    if (
+      !desktopControls.removeProject ||
+      !window.confirm(`确定删除本地项目“${item.title}”吗？`)
+    ) {
+      return
+    }
+    setError('')
+    try {
+      await desktopControls.removeProject(item.id)
+      const remaining = await refreshLocalProjects()
+      if (project?.id !== item.id) return
+      const next = remaining[0]
+      if (next) {
+        await openLocalProject(next.id)
+        return
+      }
+      const demoProject = await application.getDemoProject()
+      setBuiltinProject(demoProject)
+      loadProject(demoProject)
+      window.history.replaceState(null, '', window.location.pathname)
+    } catch (deleteError) {
+      setError(
+        deleteError instanceof Error
+          ? deleteError.message
+          : '无法删除本地项目',
+      )
     }
   }
 
@@ -600,9 +1478,144 @@ function App() {
       </main>
     )
   }
+  const displayedProject = scoreProject ?? project
+  const selectedTranscriptionVariant =
+    transcriptionChoice === 'auto'
+      ? runtimeStatus?.transcription.recommendation.variant
+      : transcriptionChoice
+  const selectedTranscriptionWeightSource = selectedTranscriptionVariant
+    ? runtimeStatus?.transcription.variantWeights[
+        selectedTranscriptionVariant
+      ]
+    : undefined
+  const selectedTranscriptionDescriptor =
+    runtimeStatus?.transcription.providers
+      .find((provider) => provider.id === 'muscriptor')
+      ?.variants.find(
+        (variant) => variant.id === selectedTranscriptionVariant,
+      )
+  const muscriptorComponent = runtimeStatus?.transcription.pipeline.find(
+    (component) => component.id === 'muscriptor',
+  )
+  const noise2FretComponent = runtimeStatus?.transcription.pipeline.find(
+    (component) => component.id === 'noise2fret',
+  )
+  const mrMt3Component = runtimeStatus?.transcription.pipeline.find(
+    (component) => component.id === 'mr-mt3',
+  )
+  const mrMt3Selected =
+    selectedTranscriptionVariant !== 'small' &&
+    runtimeStatus?.transcription.device.accelerator === 'cuda'
+  const highAccuracyRuntimeAvailable =
+    muscriptorComponent?.runtimeAvailable === true &&
+    (!mrMt3Selected || mrMt3Component?.runtimeAvailable === true)
+  const highAccuracyDownloadRequired =
+    selectedTranscriptionWeightSource === 'download-required' ||
+    noise2FretComponent?.ready === false ||
+    (mrMt3Selected && mrMt3Component?.ready === false)
+  const highAccuracyDownloadBytes =
+    (selectedTranscriptionWeightSource === 'download-required'
+      ? selectedTranscriptionDescriptor?.weightSizeBytes ?? 0
+      : 0) +
+    (noise2FretComponent?.ready === false
+      ? noise2FretComponent.weightSizeBytes ?? 0
+      : 0) +
+    (mrMt3Selected && mrMt3Component?.ready === false
+      ? mrMt3Component.weightSizeBytes ?? 0
+      : 0)
+  const highAccuracyProviderAvailable =
+    runtimeStatus?.transcription.providers.some(
+      (provider) => provider.id === 'muscriptor',
+    ) === true
+  const activeHighAccuracyVariant =
+    runtimeStatus?.transcription.resolvedVariant ??
+    (runtimeStatus?.transcription.preference.providerId === 'muscriptor'
+      ? runtimeStatus.transcription.preference.selectionMode === 'manual'
+        ? runtimeStatus.transcription.preference.variant
+        : runtimeStatus.transcription.recommendation.variant
+      : undefined)
+  const highAccuracySelectionActive =
+    runtimeStatus?.transcription.preference.providerId === 'muscriptor' &&
+    activeHighAccuracyVariant === selectedTranscriptionVariant &&
+    highAccuracyRuntimeAvailable &&
+    !highAccuracyDownloadRequired
+  const guitarSpecialistComponent =
+    runtimeStatus?.transcription.pipeline.find(
+      (component) => component.id === 'stringtrace',
+    )
+  const multitrackResearchComponent =
+    runtimeStatus?.transcription.pipeline.find(
+      (component) => component.id === 'yourmt3',
+    )
+  const transcriptionSetupActive =
+    Boolean(
+      transcriptionProgress &&
+        transcriptionProgress.phase !== 'ready',
+    )
+  const transcriptionAuthorizationActive =
+    transcriptionSetupActive &&
+    transcriptionProgress?.phase === 'authorizing'
+  const cloudModeLabel = !runtimeStatus?.cloudAvailable
+    ? '云端 · 配置'
+    : runtimeStatus.cloudReady
+      ? '云端'
+      : '云端 · 不可用'
+  const cloudModeTitle = !runtimeStatus?.cloudAvailable
+    ? '尚未配置云端服务地址'
+    : runtimeStatus.cloudReady
+      ? '切换到云端推理，待分析音频将上传到已配置服务'
+      : `云端服务当前不可用${
+          runtimeStatus.cloudError ? `：${runtimeStatus.cloudError}` : ''
+        }`
+  const libraryProjects = [
+    ...(builtinProject
+      ? [
+          {
+            id: builtinProject.id,
+            title: builtinProject.title,
+            sourceLabel: builtinProject.source.label,
+            openedAt: builtinProject.createdAt,
+          },
+        ]
+      : []),
+    ...localProjects,
+    {
+      id: project.id,
+      title: project.title,
+      sourceLabel: project.source.label,
+      openedAt: project.createdAt,
+    },
+  ].filter(
+    (item, index, items) =>
+      items.findIndex((candidate) => candidate.id === item.id) === index,
+  )
 
   return (
-    <div className={`app-shell${selectedNote || selectedMeasure ? ' has-inspector' : ''}`}>
+    <div
+      className={`app-shell${selectedNote || selectedMeasure ? ' has-inspector' : ''}`}
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes('Files')) {
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'copy'
+        }
+      }}
+      onDrop={(event) => {
+        const file = event.dataTransfer.files[0]
+        if (!file) return
+        event.preventDefault()
+        setImportOpen(true)
+        const scoreFile =
+          file.type === 'application/pdf' ||
+          file.type.startsWith('image/') ||
+          /\.(?:pdf|png|jpe?g|webp)$/iu.test(file.name)
+        setImportMode(scoreFile ? 'score' : 'upload')
+        if (scoreFile) {
+          void startScoreUpload(file)
+        } else {
+          void requestUpload(file)
+        }
+      }}
+    >
       <header className="app-header">
         <div className="brand">
           <span className="brand-mark">
@@ -610,7 +1623,7 @@ function App() {
           </span>
           <div>
             <strong>Guitar Tab Studio</strong>
-            <span>HackAll · AI 吉他谱与分轨</span>
+            <span>AI 吉他谱与分轨</span>
           </div>
         </div>
         <div className="header-status">
@@ -624,6 +1637,23 @@ function App() {
           </span>
         </div>
         <div className="header-actions">
+          {desktopControls.runtimeStatus && (
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="桌面运行时"
+              title="桌面运行时"
+              onClick={() => {
+                setRuntimeOpen(true)
+                setRuntimeLocation(runtimeStatus?.providerMode ?? 'local')
+                setRuntimeError('')
+                setRuntimeNotice('')
+                void refreshDesktopRuntime()
+              }}
+            >
+              <HardDrive aria-hidden="true" />
+            </button>
+          )}
           <button
             className="icon-button"
             type="button"
@@ -699,16 +1729,120 @@ function App() {
             <Plus aria-label="新建项目" />
           </button>
         </div>
-        <button className="session-item is-current" type="button">
-          <span className="session-art">
-            <Music2 aria-hidden="true" />
-          </span>
-          <span>
-            <strong>{project.title}</strong>
-            <small>{project.source.label}</small>
-          </span>
-          <i />
-        </button>
+        <div
+          className="project-list"
+          style={{ height: projectListHeight }}
+        >
+          {libraryProjects.map((item) => (
+            <button
+              className={`session-item${
+                item.id === project.id ? ' is-current' : ''
+              }`}
+              type="button"
+              key={item.id}
+              onClick={() => {
+                if (item.id === builtinProject?.id) {
+                  loadProject(builtinProject)
+                  window.history.replaceState(
+                    null,
+                    '',
+                    window.location.pathname,
+                  )
+                  return
+                }
+                void openLocalProject(item.id)
+              }}
+              onContextMenu={(event) => {
+                if (
+                  !desktopControls.removeProject ||
+                  !localProjects.some((local) => local.id === item.id)
+                ) {
+                  return
+                }
+                event.preventDefault()
+                setProjectContextMenu({
+                  project: item,
+                  x: Math.min(event.clientX, window.innerWidth - 156),
+                  y: Math.min(event.clientY, window.innerHeight - 52),
+                })
+              }}
+            >
+              <span className="session-art">
+                <Music2 aria-hidden="true" />
+              </span>
+              <span>
+                <strong>{item.title}</strong>
+                <small>{item.sourceLabel}</small>
+              </span>
+              {item.id === project.id ? <i /> : null}
+            </button>
+          ))}
+        </div>
+        <div
+          className="project-list-resizer"
+          role="separator"
+          aria-label="调整项目列表高度"
+          aria-orientation="horizontal"
+          aria-valuemin={projectListMinimumHeight}
+          aria-valuemax={projectListHeightMaximum}
+          aria-valuenow={Math.round(projectListHeight)}
+          tabIndex={0}
+          title="拖拽调整项目列表高度"
+          onPointerDown={(event) => {
+            if (event.button !== 0) return
+            projectListResizeRef.current = {
+              pointerId: event.pointerId,
+              startY: event.clientY,
+              startHeight: projectListHeight,
+            }
+            event.currentTarget.setPointerCapture(event.pointerId)
+            event.preventDefault()
+          }}
+          onPointerMove={(event) => {
+            const resize = projectListResizeRef.current
+            if (!resize || resize.pointerId !== event.pointerId) return
+            setProjectListHeight(
+              Math.min(
+                projectListHeightMaximum,
+                Math.max(
+                  projectListMinimumHeight,
+                  resize.startHeight + event.clientY - resize.startY,
+                ),
+              ),
+            )
+          }}
+          onPointerUp={(event) => {
+            if (projectListResizeRef.current?.pointerId !== event.pointerId) {
+              return
+            }
+            projectListResizeRef.current = null
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId)
+            }
+          }}
+          onPointerCancel={() => {
+            projectListResizeRef.current = null
+          }}
+          onKeyDown={(event) => {
+            const step = event.shiftKey ? 58 : 12
+            if (event.key === 'ArrowUp') {
+              setProjectListHeight((current) =>
+                Math.max(projectListMinimumHeight, current - step),
+              )
+            } else if (event.key === 'ArrowDown') {
+              setProjectListHeight((current) =>
+                Math.min(projectListHeightMaximum, current + step),
+              )
+            } else if (event.key === 'Home') {
+              setProjectListHeight(projectListMinimumHeight)
+            } else if (event.key === 'End') {
+              setProjectListHeight(projectListHeightMaximum)
+            } else {
+              return
+            }
+            event.preventDefault()
+          }}
+        />
         <div className="rail-section">
           <span>来源</span>
           <button type="button" onClick={() => setImportOpen(true)}>
@@ -742,6 +1876,26 @@ function App() {
           </p>
         </div>
       </aside>
+      {projectContextMenu ? (
+        <div
+          className="project-context-menu"
+          role="menu"
+          style={{
+            left: projectContextMenu.x,
+            top: projectContextMenu.y,
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => void removeLocalProject(projectContextMenu.project)}
+          >
+            <Trash2 aria-hidden="true" />
+            删除项目
+          </button>
+        </div>
+      ) : null}
 
       <main className="workspace">
         <section className="project-bar">
@@ -774,13 +1928,82 @@ function App() {
                 }
               >
                 {project.analysisMode === 'demo'
-                  ? '演示数据'
+                  ? '待复核'
                   : project.transcriptionModel?.kind === 'trained'
                   ? '弦级模型'
                   : '通用基线'}
               </dd>
             </div>
           </dl>
+          <div className="project-revision-controls">
+            <div className="score-layer-switch" role="group" aria-label="谱面版本">
+              <button
+                type="button"
+                className={scoreLayer === 'original' ? 'is-active' : ''}
+                onClick={() => setScoreLayer('original')}
+              >
+                原始谱
+              </button>
+              <button
+                type="button"
+                className={scoreLayer === 'easy' ? 'is-active' : ''}
+                onClick={() => {
+                  if (project.easyArrangement) setScoreLayer('easy')
+                  else generateEasyArrangement()
+                }}
+              >
+                <WandSparkles aria-hidden="true" />
+                易弹版
+              </button>
+            </div>
+            <label className="revision-picker">
+              <History aria-hidden="true" />
+              <select
+                aria-label="恢复项目修订"
+                value=""
+                disabled={revisionBusy || revisions.length === 0}
+                onChange={(event) => void restoreRevision(event.target.value)}
+              >
+                <option value="">修订历史</option>
+                {revisions.map((revision) => (
+                  <option value={revision.id} key={revision.id}>
+                    {revision.label} ·{' '}
+                    {new Date(revision.createdAt).toLocaleString('zh-CN', {
+                      month: '2-digit',
+                      day: '2-digit',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" />
+            </label>
+            <button
+              className="secondary-button save-revision-button"
+              type="button"
+              disabled={revisionBusy}
+              onClick={() =>
+                void saveRevision(
+                  project,
+                  scoreLayer === 'easy' ? '易弹版修订' : '人工校订',
+                  scoreLayer === 'easy' ? 'arrangement' : 'manual',
+                )
+              }
+            >
+              {revisionBusy ? (
+                <LoaderCircle className="spin" aria-hidden="true" />
+              ) : (
+                <Save aria-hidden="true" />
+              )}
+              保存修订
+            </button>
+            {revisionNotice ? (
+              <span className="revision-notice" role="status">
+                {revisionNotice}
+              </span>
+            ) : null}
+          </div>
         </section>
 
         <section className="transport-section">
@@ -797,10 +2020,16 @@ function App() {
             <button
               className="play-button"
               type="button"
-              aria-label={playing ? '暂停' : '播放'}
+              aria-label={
+                countInProgress ? '取消预备' : playing ? '暂停' : '播放'
+              }
               onClick={togglePlayback}
             >
-              {playing ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}
+              {playing || countInProgress ? (
+                <Pause aria-hidden="true" />
+              ) : (
+                <Play aria-hidden="true" />
+              )}
             </button>
             <div className="time-readout">
               <strong ref={timeReadoutRef}>{formatTime(position)}</strong>
@@ -815,7 +2044,9 @@ function App() {
                 max="1.25"
                 step="0.05"
                 value={speed}
-                onChange={(event) => setSpeed(Number(event.target.value))}
+                onChange={(event) =>
+                  changePlaybackSpeed(Number(event.target.value))
+                }
               />
               <strong>{speed.toFixed(2)}×</strong>
             </div>
@@ -846,7 +2077,7 @@ function App() {
                       )
                     }}
                   >
-                    {project.tab.measures.map((measure) => (
+                    {displayedProject.tab.measures.map((measure) => (
                       <option value={measure.number} key={measure.number}>
                         第 {measure.number} 小节
                       </option>
@@ -869,7 +2100,7 @@ function App() {
                       )
                     }}
                   >
-                    {project.tab.measures.map((measure) => (
+                    {displayedProject.tab.measures.map((measure) => (
                       <option value={measure.number} key={measure.number}>
                         第 {measure.number} 小节
                       </option>
@@ -897,6 +2128,176 @@ function App() {
               <ChevronDown aria-hidden="true" />
             </label>
           </div>
+          <div className="practice-controls">
+            <label className="practice-picker count-in-picker">
+              <TimerReset aria-hidden="true" />
+              <span>预备</span>
+              <select
+                aria-label="预备小节数"
+                value={countInBars}
+                onChange={(event) => {
+                  cancelPreparation()
+                  setCountInBars(Number(event.target.value))
+                }}
+              >
+                {countInBarOptions.map((bars) => (
+                  <option value={bars} key={bars}>
+                    {bars === 0 ? '关闭' : `${bars} 小节`}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" />
+            </label>
+            <label className="practice-picker count-in-sound">
+              <span>预备音色</span>
+              <select
+                aria-label="预备节拍音色"
+                value={countInKit}
+                disabled={countInBars === 0}
+                onChange={(event) =>
+                  setCountInKit(event.target.value as CountInKit)
+                }
+              >
+                {countInKitOptions.map((option) => (
+                  <option value={option.id} key={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" />
+            </label>
+            <label className="rhythm-volume count-in-volume">
+              <Volume2 aria-hidden="true" />
+              <input
+                aria-label="预备节拍音量"
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={countInVolume}
+                disabled={countInBars === 0}
+                onChange={(event) =>
+                  setCountInVolume(Number(event.target.value))
+                }
+              />
+            </label>
+            <button
+              className={`rhythm-toggle${rhythmEnabled ? ' is-active' : ''}`}
+              type="button"
+              aria-label="节奏伴奏"
+              aria-pressed={rhythmEnabled}
+              onClick={() => setRhythmEnabled((current) => !current)}
+            >
+              <Drum aria-hidden="true" />
+              <span>节奏伴奏</span>
+            </button>
+            <label className="practice-picker rhythm-picker">
+              <span>节奏</span>
+              <select
+                aria-label="节奏型"
+                value={selectedRhythm.id}
+                onChange={(event) => setRhythmId(event.target.value)}
+              >
+                {rhythmGroupOrder.map((group) => (
+                  <optgroup label={rhythmGroupLabels[group]} key={group}>
+                    {PRACTICE_RHYTHMS.filter(
+                      (rhythm) => rhythm.group === group,
+                    ).map((rhythm) => {
+                      const compatibility = rhythmCompatibilityForTempoProfile(
+                        rhythm,
+                        tempoProfile,
+                        timeSignature,
+                      )
+                      return (
+                        <option
+                          value={rhythm.id}
+                          disabled={!compatibility.compatible}
+                          key={rhythm.id}
+                        >
+                          {rhythm.label}
+                          {compatibility.message
+                            ? ` · ${compatibility.message}`
+                            : ''}
+                        </option>
+                      )
+                    })}
+                  </optgroup>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" />
+            </label>
+            <label className="practice-picker rhythm-kit-picker">
+              <span>鼓组音色</span>
+              <select
+                aria-label="鼓组音色"
+                value={rhythmKit}
+                disabled={!rhythmEnabled}
+                onChange={(event) =>
+                  setRhythmKit(
+                    event.target.value as RhythmKitSelection,
+                  )
+                }
+              >
+                {rhythmKitOptions.map((option) => (
+                  <option value={option.id} key={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" />
+            </label>
+            <label className="rhythm-volume">
+              <Volume2 aria-hidden="true" />
+              <input
+                aria-label="节奏伴奏音量"
+                type="range"
+                min="0.1"
+                max="1"
+                step="0.05"
+                value={rhythmVolume}
+                disabled={!rhythmEnabled}
+                onChange={(event) =>
+                  setRhythmVolume(Number(event.target.value))
+                }
+              />
+            </label>
+            <span className="rhythm-availability" role="status">
+              {formatTimeSignature(timeSignature)} · {tempoLabel} BPM ·{' '}
+              {compatibleRhythmCount}/{PRACTICE_RHYTHMS.length} 可用
+            </span>
+          </div>
+          {countInProgress ? (
+            <div className="count-in-status" role="status" aria-live="polite">
+              <div>
+                <TimerReset aria-hidden="true" />
+                <span>
+                  预备 {countInProgress.bar}/{countInProgress.totalBars} 小节
+                  {' · '}
+                  {countInProgress.tempo} BPM
+                </span>
+              </div>
+              <strong>
+                {countInProgress.beat || '准备'}
+              </strong>
+              <div className="count-in-beats" aria-hidden="true">
+                {Array.from(
+                  { length: countInProgress.beatsPerBar },
+                  (_, index) => (
+                    <i
+                      className={
+                        index + 1 === countInProgress.beat
+                          ? 'is-current'
+                          : index + 1 < countInProgress.beat
+                            ? 'is-past'
+                            : ''
+                      }
+                      key={index}
+                    />
+                  ),
+                )}
+              </div>
+            </div>
+          ) : null}
           <AudioVisualizer
             project={project}
             position={position}
@@ -909,6 +2310,11 @@ function App() {
         </section>
 
         <section className="tab-workspace">
+          {project.analysisMode === 'demo' ? (
+            <p className="score-review-status" role="note">
+              当前为音频分析候选谱，整首逐音准确性尚未通过独立验证。
+            </p>
+          ) : null}
           <header className="section-heading">
             <div>
               <span className="eyebrow">和弦 · 节奏 · 六线谱 · 技法为实验性建议</span>
@@ -986,7 +2392,7 @@ function App() {
 
           {scorePart === 'guitar' ? (
             <FullScore
-              project={project}
+              project={displayedProject}
               positionSnapshot={position}
               playbackPositionRef={playbackPositionRef}
               playing={playing}
@@ -1018,13 +2424,19 @@ function App() {
               <SlidersHorizontal aria-hidden="true" />
               {project.analysisMode === 'inference'
                 ? `${visibleTracks.length} 条有效音轨`
-                : '内置示例音色'}
+                : `${visibleTracks.length} 条独立分轨`}
             </span>
           </header>
           <div className="mixer-grid">
             {visibleTracks.map((track) => {
               const mix = mixes[track.id]
-              const trackName = trackRoleLabels[track.role] ?? track.name
+              const hasRoleSiblings =
+                visibleTracks.filter((candidate) => candidate.role === track.role)
+                  .length > 1
+              const trackName =
+                project.analysisMode === 'demo' || hasRoleSiblings
+                  ? track.name
+                  : (trackRoleLabels[track.role] ?? track.name)
               return (
                 <div className="track-strip" key={track.id}>
                   <div className="track-title">
@@ -1356,6 +2768,14 @@ function App() {
                         ? '连奏把位优化'
                       : selectedNote.positionSource?.startsWith('playable')
                         ? '和弦把位优化'
+                        : selectedNote.positionSource?.startsWith(
+                              'onset-position',
+                            )
+                          ? '弦品模型'
+                          : selectedNote.positionSource?.startsWith(
+                                'audio-spectrum',
+                              )
+                            ? '频谱支持 · 弦品待复核'
                         : '兼容结果'}
                 </strong>
               </div>
@@ -1423,17 +2843,123 @@ function App() {
                 type="button"
                 aria-label="关闭"
                 onClick={() => {
-                  if (!job) setImportOpen(false)
+                  if ((!job || jobTerminal) && !scoreImportBusy) {
+                    setImportOpen(false)
+                    setJob(null)
+                    setProtectedImport(null)
+                  }
                 }}
               >
                 <X aria-hidden="true" />
               </button>
             </header>
-            {job ? (
+            {protectedImport ? (
+              <div className="protected-media-consent">
+                <CircleAlert aria-hidden="true" />
+                <div>
+                  <span className="eyebrow">受保护媒体</span>
+                  <h3>版权与处理确认</h3>
+                  <p>
+                    已识别为
+                    {protectedProviderLabels[protectedImport.provider]}
+                    {protectedImport.kind === 'upload'
+                      ? ` 加密文件“${protectedImport.file.name}”`
+                      : ' 可能受保护的媒体链接'}
+                    。继续前请确认你拥有该媒体的版权、有效许可或其他合法处理权。
+                  </p>
+                </div>
+                <dl>
+                  <div>
+                    <dt>用途限制</dt>
+                    <dd>仅用于本次音轨分析和曲谱生成</dd>
+                  </div>
+                  <div>
+                    <dt>临时处理</dt>
+                    <dd>解码结果不提供下载，任务结束后删除</dd>
+                  </div>
+                  <div>
+                    <dt>责任说明</dt>
+                    <dd>工具不核验或授予权利，权利责任由用户承担</dd>
+                  </div>
+                  {protectedImport.provider === 'qqmusic' &&
+                    desktopControls.selectLocalFile && (
+                      <div>
+                        <dt>账号授权</dt>
+                        <dd>新版 QMC2 会使用本机登录态向 QQ 音乐官方接口验证当前账号权限，凭据与密钥不保存</dd>
+                      </div>
+                    )}
+                </dl>
+                <p className="consent-notice">
+                  点击“确认并继续”即表示你已理解并同意上述内容，并对所提交媒体的合法来源及处理权限负责。
+                </p>
+                <p
+                  className={`decoder-status${
+                    capabilities?.localAuthorizedMediaDecoder ? ' is-ready' : ''
+                  }`}
+                >
+                  {capabilities?.localAuthorizedMediaDecoder
+                    ? desktopControls.selectLocalFile
+                      ? '桌面处理端离线解码器已就绪'
+                      : 'API 服务端离线解码器已就绪'
+                    : desktopControls.selectLocalFile
+                      ? '桌面处理端离线解码器不可用'
+                      : 'API 服务端离线解码器不可用'}
+                </p>
+                <div className="protected-media-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => {
+                      setProtectedImport(null)
+                      if (fileInputRef.current) {
+                        fileInputRef.current.value = ''
+                      }
+                    }}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={!capabilities?.localAuthorizedMediaDecoder}
+                    onClick={() => {
+                      if (protectedImport.kind === 'upload') {
+                        void startUpload(protectedImport.file, true)
+                      } else {
+                        void startLinkImport(
+                          true,
+                          protectedImport.url,
+                        )
+                      }
+                    }}
+                  >
+                    确认并继续
+                  </button>
+                </div>
+              </div>
+            ) : scoreImportBusy ? (
+              <div className="job-progress">
+                <span className="job-icon">
+                  <LoaderCircle className="spin" aria-hidden="true" />
+                </span>
+                <strong>正在识别曲谱</strong>
+                <p>检测谱线、小节、弦品、和弦与文字</p>
+                <i
+                  role="progressbar"
+                  aria-label="曲谱识别进度"
+                  className="is-animated is-indeterminate"
+                >
+                  <b />
+                </i>
+              </div>
+            ) : job ? (
               <div className="job-progress">
                 <span className="job-icon">
                   {job.status === 'completed' || job.status === 'degraded' ? (
                     <Check aria-hidden="true" />
+                  ) : job.status === 'cancelled' ||
+                    job.status === 'failed' ? (
+                    <X aria-hidden="true" />
                   ) : (
                     <LoaderCircle className="spin" aria-hidden="true" />
                   )}
@@ -1449,7 +2975,8 @@ function App() {
                   className={
                     job.status === 'completed' ||
                     job.status === 'degraded' ||
-                    job.status === 'failed'
+                    job.status === 'failed' ||
+                    job.status === 'cancelled'
                       ? ''
                       : 'is-animated'
                   }
@@ -1459,6 +2986,25 @@ function App() {
                 <span className="job-progress-value" aria-live="polite">
                   {Math.round(Math.max(0, Math.min(100, job.progress)))}%
                 </span>
+                {!jobTerminal && (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() =>
+                      void application.cancelJob(job.id).then(setJob).catch(
+                        (cancelError: unknown) =>
+                          setError(
+                            cancelError instanceof Error
+                              ? cancelError.message
+                              : '取消任务失败',
+                          ),
+                      )
+                    }
+                  >
+                    <X aria-hidden="true" />
+                    取消任务
+                  </button>
+                )}
               </div>
             ) : (
               <>
@@ -1473,6 +3019,14 @@ function App() {
                   </button>
                   <button
                     type="button"
+                    className={importMode === 'score' ? 'is-active' : ''}
+                    onClick={() => setImportMode('score')}
+                  >
+                    <FileImage aria-hidden="true" />
+                    图片 / PDF
+                  </button>
+                  <button
+                    type="button"
                     className={importMode === 'link' ? 'is-active' : ''}
                     onClick={() => setImportMode('link')}
                   >
@@ -1481,20 +3035,114 @@ function App() {
                   </button>
                 </div>
                 {importMode === 'upload' ? (
-                  <label className="drop-zone">
-                    <FileAudio aria-hidden="true" />
-                    <strong>选择音频或视频</strong>
-                    <span>MP3、WAV、FLAC、APE、M4A、AAC、OGG、MP4、MOV、WEBM，最大 500 MB</span>
-                    <small>MGG / MFLAC 仅在内容实际为标准音频时可用；加密容器和 NCM 无法处理。</small>
-                    <input
-                      type="file"
-                      accept=".mp3,.wav,.flac,.ape,.m4a,.aac,.ogg,.mp4,.mov,.webm,.mgg,.mflac,audio/*,video/*"
-                      onChange={(event) => {
-                        const file = event.target.files?.[0]
-                        if (file) void startUpload(file)
-                      }}
-                    />
-                  </label>
+                  desktopControls.selectLocalFile ? (
+                    <div className="desktop-media-picker">
+                      <button
+                        className="drop-zone"
+                        type="button"
+                        onClick={() => void selectDesktopFile('media')}
+                      >
+                        <FileAudio aria-hidden="true" />
+                        <strong>选择音频或视频</strong>
+                        <span>MP3、WAV、FLAC、APE、M4A、AAC、OGG、MP4、MOV、WEBM，最大 500 MB</span>
+                        <small>使用系统原生文件窗口；加密容器经授权确认后在本机临时解码。</small>
+                      </button>
+                      <div
+                        className="media-source-shortcuts"
+                        aria-label="音乐平台下载目录"
+                      >
+                        {desktopMediaSourceOptions.map((source) => (
+                          <button
+                            className="media-source-button"
+                            type="button"
+                            onClick={() =>
+                              void selectDesktopFile('media', source.id)
+                            }
+                            key={source.id}
+                          >
+                            <FolderOpen aria-hidden="true" />
+                            {source.label}
+                          </button>
+                        ))}
+                      </div>
+                      {desktopControls.importMediaKeyDatabase ? (
+                        <>
+                          <div
+                            className="media-source-shortcuts"
+                            aria-label="分离密钥库"
+                          >
+                            <button
+                              className="media-source-button"
+                              type="button"
+                              onClick={() =>
+                                void importMediaKeyDatabase('kuwo')
+                              }
+                            >
+                              <KeyRound aria-hidden="true" />
+                              导入酷我密钥库
+                            </button>
+                            <button
+                              className="media-source-button"
+                              type="button"
+                              onClick={() =>
+                                void importMediaKeyDatabase('kugou')
+                              }
+                            >
+                              <KeyRound aria-hidden="true" />
+                              导入酷狗密钥库
+                            </button>
+                          </div>
+                          {mediaKeyNotice ? (
+                            <p className="policy-copy">{mediaKeyNotice}</p>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <label className="drop-zone">
+                      <FileAudio aria-hidden="true" />
+                      <strong>选择音频或视频</strong>
+                      <span>MP3、WAV、FLAC、APE、M4A、AAC、OGG、MP4、MOV、WEBM，最大 500 MB</span>
+                      <small>加密容器经确认后由 API 服务端临时解码；无内嵌密钥的新版 QMC2 需使用 macOS 桌面版。</small>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".mp3,.wav,.flac,.ape,.m4a,.aac,.ogg,.mp4,.mov,.webm,.qmc0,.qmc2,.qmc3,.qmcflac,.qmcogg,.tkm,.tm0,.tm2,.tm3,.tm6,.bkcmp3,.bkcflac,.mflac,.mflac0,.mgg,.mgg0,.mgg1,.ncm,.kwm,.kgg,.kgm,.kgma,.vpr,audio/*,video/*"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0]
+                          if (file) void requestUpload(file)
+                        }}
+                      />
+                    </label>
+                  )
+                ) : importMode === 'score' ? (
+                  desktopControls.selectLocalFile ? (
+                    <button
+                      className="drop-zone"
+                      type="button"
+                      onClick={() => void selectDesktopFile('score')}
+                    >
+                      <FileImage aria-hidden="true" />
+                      <strong>选择吉他谱图片或 PDF</strong>
+                      <span>PNG、JPG、WEBP、PDF，最多 24 页</span>
+                      <small>使用系统原生文件窗口；导入后可逐音修改并直接合成播放。</small>
+                    </button>
+                  ) : (
+                    <label className="drop-zone">
+                      <FileImage aria-hidden="true" />
+                      <strong>选择吉他谱图片或 PDF</strong>
+                      <span>PNG、JPG、WEBP、PDF，最多 24 页</span>
+                      <small>识别六线谱、小节、品位、和弦与歌词；导入后可逐音修改并直接合成播放。</small>
+                      <input
+                        type="file"
+                        accept=".png,.jpg,.jpeg,.webp,.pdf,image/png,image/jpeg,image/webp,application/pdf"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0]
+                          if (file) void startScoreUpload(file)
+                        }}
+                      />
+                    </label>
+                  )
                 ) : (
                   <div className="link-import">
                     <label>
@@ -1516,7 +3164,7 @@ function App() {
                               event.currentTarget.select()
                             }
                           }}
-                          placeholder="粘贴哔哩哔哩、抖音或网易云音乐公开链接"
+                          placeholder="粘贴 YouTube 或其他受支持的公开音视频链接"
                           spellCheck={false}
                         />
                       </div>
@@ -1536,7 +3184,7 @@ function App() {
                       className="primary-button wide"
                       type="button"
                       disabled={!linkValue.trim() || !detectedPlatform}
-                      onClick={() => void startLinkImport()}
+                      onClick={() => void requestLinkImport()}
                     >
                       开始分析
                     </button>
@@ -1548,13 +3196,1276 @@ function App() {
                       </p>
                     ) : null}
                     <p className="policy-copy">
-                      QQ 音乐和汽水音乐需要登录凭据或无稳定公开媒体接口，因此不提供在线导入。
+                      在线导入取决于平台能否返回可解码媒体流；登录、验证、地区限制或 DRM 会显示具体原因。
                     </p>
                   </div>
                 )}
               </>
             )}
-            {error ? <p className="dialog-error">{error}</p> : null}
+            {error ? (
+              <>
+                <p className="dialog-error">{error}</p>
+                {error.includes('完全磁盘访问权限') &&
+                desktopControls.openFullDiskAccessSettings ? (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() =>
+                      void desktopControls
+                        .openFullDiskAccessSettings?.()
+                        .catch((settingsError: unknown) =>
+                          setError(
+                            settingsError instanceof Error
+                              ? settingsError.message
+                              : '无法打开 macOS 权限设置',
+                          ),
+                        )
+                    }
+                  >
+                    <HardDrive aria-hidden="true" />
+                    打开权限设置
+                  </button>
+                ) : null}
+              </>
+            ) : null}
+          </section>
+        </div>
+      ) : null}
+
+      {runtimeOpen && desktopControls.runtimeStatus ? (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            className="runtime-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="桌面运行时"
+          >
+            <header>
+              <div>
+                <span className="eyebrow">Desktop runtime</span>
+                <h2>运行模型与存储</h2>
+              </div>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="关闭"
+                onClick={() => setRuntimeOpen(false)}
+              >
+                <X aria-hidden="true" />
+              </button>
+            </header>
+            <div
+              className={`runtime-mode ${
+                runtimeLocation === 'cloud' ? 'is-cloud' : ''
+              }`}
+            >
+              <div className="runtime-control runtime-location-control">
+                <span>执行位置</span>
+                <div role="group" aria-label="执行位置">
+                  <button
+                    type="button"
+                    className={
+                      runtimeLocation === 'local' ? 'is-active' : ''
+                    }
+                    disabled={runtimeBusy || !desktopControls.setRuntimeMode}
+                    onClick={() => {
+                      setRuntimeLocation('local')
+                      setRuntimeError('')
+                      setRuntimeNotice('')
+                      if (runtimeStatus?.providerMode === 'local') return
+                      void runDesktopAction(() =>
+                        desktopControls.setRuntimeMode!('local', project?.id),
+                      )
+                    }}
+                  >
+                    <Laptop aria-hidden="true" />
+                    本地
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      runtimeLocation === 'cloud' ? 'is-active' : ''
+                    }
+                    disabled={
+                      runtimeBusy ||
+                    (!runtimeStatus?.cloudReady &&
+                      !desktopControls.configureCloudRuntime) ||
+                    (runtimeStatus?.cloudReady &&
+                      !desktopControls.setRuntimeMode)
+                    }
+                    title={cloudModeTitle}
+                    onClick={() => {
+                      setRuntimeLocation('cloud')
+                      setRuntimeError('')
+                      setRuntimeNotice('')
+                      if (!runtimeStatus?.cloudReady) return
+                      if (runtimeStatus.providerMode === 'cloud') return
+                      if (
+                        !window.confirm(
+                          '云端推理会将待分析音频上传到已配置服务。是否切换？',
+                        )
+                      ) {
+                        return
+                      }
+                      void runDesktopAction(() =>
+                        desktopControls.setRuntimeMode!(
+                          'cloud',
+                          project?.id,
+                        ),
+                      )
+                    }}
+                  >
+                    <Cloud aria-hidden="true" />
+                    {cloudModeLabel}
+                  </button>
+                </div>
+              </div>
+              {runtimeLocation === 'local' ? (
+                <>
+                  <label className="runtime-control">
+                    <span>转录方案</span>
+                    <select
+                      aria-label="转录方案"
+                      value={transcriptionScheme}
+                      disabled={
+                        runtimeBusy ||
+                        !runtimeStatus ||
+                        !desktopControls.setTranscriptionProvider
+                      }
+                      onChange={(event) => {
+                        const providerId =
+                          event.target.value as TranscriptionProviderId
+                        setTranscriptionScheme(providerId)
+                        setTranscriptionProgress(null)
+                        setTranscriptionSetupError('')
+                        if (providerId !== 'basic-pitch') {
+                          return
+                        }
+                        void runDesktopAction(() =>
+                          desktopControls.setTranscriptionProvider!({
+                            providerId: 'basic-pitch',
+                          }),
+                        )
+                      }}
+                    >
+                      {runtimeStatus?.transcription.providers.map((provider) => (
+                        <option value={provider.id} key={provider.id}>
+                          {provider.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="runtime-control">
+                    <span>模型档位</span>
+                    <select
+                      aria-label="模型档位"
+                      value={transcriptionChoice}
+                      disabled={
+                        runtimeBusy || transcriptionScheme !== 'muscriptor'
+                      }
+                      onChange={(event) =>
+                        {
+                          setTranscriptionChoice(
+                            event.target.value as
+                              | 'auto'
+                              | TranscriptionModelVariant,
+                          )
+                          setTranscriptionSetupError('')
+                        }
+                      }
+                    >
+                      <option value="auto">
+                        自动 ·{' '}
+                        {runtimeStatus?.transcription.recommendation.variant.toUpperCase() ??
+                          '检测中'}
+                      </option>
+                      <option value="small">Small · 103M</option>
+                      <option value="medium">Medium · 307M</option>
+                      <option value="large">Large · 1.4B</option>
+                    </select>
+                  </label>
+                  <p>
+                    {runtimeStatus
+                      ? `${runtimeStatus.resourceNote} · 预计 ${Math.ceil(runtimeStatus.estimatedSeconds.minimum / 60)}–${Math.ceil(runtimeStatus.estimatedSeconds.maximum / 60)} 分钟`
+                      : '正在检查运行环境'}
+                  </p>
+                </>
+              ) : (
+                <div className="runtime-mode-summary" aria-live="polite">
+                  <span>云端推理</span>
+                  <strong>
+                    {runtimeStatus?.cloudReady
+                      ? runtimeStatus.providerMode === 'cloud'
+                        ? '当前项目正在使用'
+                        : '服务已连接'
+                      : runtimeStatus?.cloudAvailable
+                        ? '连接异常'
+                        : '等待配置'}
+                  </strong>
+                  <small>音频由云端处理，项目与编辑结果保留在本机</small>
+                </div>
+              )}
+            </div>
+            {runtimeLocation === 'cloud' ? (
+              <section
+                className="runtime-cloud-panel"
+                aria-label="云端运行配置"
+              >
+                <div className="runtime-cloud-heading">
+                  <span>
+                    <strong>云端 API</strong>
+                    <small>
+                      仅接受 HTTPS 地址，保存前会验证服务能力
+                    </small>
+                  </span>
+                  <i
+                    className={
+                      runtimeStatus?.cloudReady
+                        ? 'is-ready'
+                        : runtimeStatus?.cloudAvailable
+                          ? 'is-error'
+                          : ''
+                    }
+                  >
+                    {runtimeStatus?.cloudReady
+                      ? '已连接'
+                      : runtimeStatus?.cloudAvailable
+                        ? '连接失败'
+                        : '未配置'}
+                  </i>
+                </div>
+                <form
+                  className="runtime-cloud-config"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void runDesktopAction(async () => {
+                    await desktopControls.configureCloudRuntime?.(
+                      cloudApiRoot.trim(),
+                      project?.id,
+                    )
+                    setRuntimeNotice('云端服务连接成功，已切换为云端推理')
+                  })
+                }}
+                >
+                  <label>
+                    <span>服务地址</span>
+                    <input
+                      type="url"
+                      required
+                      aria-label="云端 API 地址"
+                      placeholder="https://api.example.com"
+                      value={cloudApiRoot}
+                      disabled={runtimeBusy}
+                      onChange={(event) =>
+                        setCloudApiRoot(event.target.value)
+                      }
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    className="primary-button"
+                    disabled={
+                      runtimeBusy ||
+                      !desktopControls.configureCloudRuntime ||
+                      !cloudApiRoot.trim()
+                    }
+                  >
+                    <Cloud aria-hidden="true" />
+                    {runtimeStatus?.cloudReady &&
+                    runtimeStatus.providerMode === 'cloud'
+                      ? '重新验证并保存'
+                      : '保存并切换'}
+                  </button>
+                </form>
+                <dl className="runtime-cloud-features">
+                  <div>
+                    <dt>连接校验</dt>
+                    <dd>HTTPS · /health 能力检查</dd>
+                  </div>
+                  <div>
+                    <dt>音频处理</dt>
+                    <dd>待分析音频上传至已配置服务</dd>
+                  </div>
+                  <div>
+                    <dt>项目数据</dt>
+                    <dd>曲谱、编辑记录与项目文件保留本机</dd>
+                  </div>
+                  <div>
+                    <dt>应用范围</dt>
+                    <dd>{project ? '当前项目' : '后续新项目默认值'}</dd>
+                  </div>
+                </dl>
+                {runtimeStatus?.cloudError ? (
+                  <p className="runtime-warning">
+                    云端连接失败，本地项目与已下载模型不受影响：
+                    {runtimeStatus.cloudError}
+                  </p>
+                ) : null}
+              </section>
+            ) : null}
+            <section
+              className="runtime-transcription"
+              hidden={runtimeLocation !== 'local'}
+            >
+              {transcriptionScheme === 'muscriptor' &&
+              highAccuracyProviderAvailable ? (
+                <div className="runtime-transcription-setup">
+                  <div className="runtime-model-recommendation">
+                    <strong>
+                      推荐{' '}
+                      {runtimeStatus.transcription.recommendation.variant.toUpperCase()}
+                    </strong>
+                    <span>
+                      {runtimeStatus.transcription.recommendation.reason}
+                    </span>
+                    <small>
+                      {runtimeStatus.transcription.device.accelerator.toUpperCase()}{' '}
+                      ·{' '}
+                      {formatStorageSize(
+                        runtimeStatus.transcription.device.totalMemoryBytes,
+                      )}{' '}
+                      内存 ·{' '}
+                      {runtimeStatus.transcription.device.logicalCpuCount} 线程
+                    </small>
+                  </div>
+                  <p className="runtime-model-state">
+                    {highAccuracySelectionActive
+                      ? `已启用高精度 · ${
+                          selectedTranscriptionVariant?.toUpperCase() ??
+                          '自动档位'
+                        }`
+                      : !highAccuracyRuntimeAvailable
+                      ? mrMt3Selected &&
+                        mrMt3Component?.runtimeAvailable === false
+                        ? '当前 Worker 未包含 MR-MT3 复核组件'
+                        : '当前 Worker 未包含 MuScriptor 运行组件'
+                      : highAccuracyDownloadRequired
+                        ? `尚未准备，启用时将从官方模型源下载并校验${
+                            highAccuracyDownloadBytes > 0
+                              ? `（约 ${formatStorageSize(
+                                  highAccuracyDownloadBytes,
+                                )}）`
+                              : ''
+                          }`
+                        : selectedTranscriptionWeightSource ===
+                          'local-import'
+                        ? '已导入本地权重'
+                        : selectedTranscriptionWeightSource ===
+                            'managed-cache'
+                          ? '推荐档位权重已缓存'
+                          : '高精度模型已准备'}
+                  </p>
+                  {transcriptionProgress &&
+                  transcriptionProgress.phase !== 'ready' ? (
+                    <div className="runtime-model-progress" aria-live="polite">
+                      <div>
+                        <span>{transcriptionProgress.stageLabel}</span>
+                        <strong>
+                          {Math.round(transcriptionProgress.progress)}%
+                        </strong>
+                      </div>
+                      <progress
+                        max="100"
+                        value={transcriptionProgress.progress}
+                      />
+                      {transcriptionProgress.phase === 'authorizing' ? (
+                        <small>
+                          已打开系统浏览器
+                          {transcriptionProgress.userCode
+                            ? ` · 验证码 ${transcriptionProgress.userCode}`
+                            : ''}
+                        </small>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {transcriptionSetupError ? (
+                    <div className="runtime-model-error" role="alert">
+                      <CircleAlert aria-hidden="true" />
+                      <span>
+                        <strong>启用失败</strong>
+                        <small>{transcriptionSetupError}</small>
+                      </span>
+                    </div>
+                  ) : null}
+                  <p className="runtime-model-stack">
+                    <strong>当前组合</strong>
+                    <span>
+                      MuScriptor 主转录 ·{' '}
+                      {mrMt3Selected ? 'MR-MT3 与 ' : ''}Basic Pitch 复核补漏 ·
+                      Noise2Fret 弦品优化
+                    </span>
+                  </p>
+                  {selectedTranscriptionWeightSource ===
+                    'download-required' &&
+                  (!runtimeStatus.transcription.oauthConfigured ||
+                    oauthSetup) ? (
+                    <form
+                      className="runtime-inline-config runtime-oauth-config"
+                      onSubmit={(event) => {
+                        event.preventDefault()
+                        void runDesktopAction(
+                          async () => {
+                            await desktopControls.configureHuggingFaceOAuth?.(
+                              huggingFaceOAuthClientId.trim(),
+                            )
+                            setHuggingFaceOAuthClientId('')
+                            setOauthSetup(false)
+                            setRuntimeNotice(
+                              'Hugging Face OAuth 已配置，可以开始授权下载',
+                            )
+                          },
+                          {
+                            errorScope: 'transcription',
+                            preserveTranscriptionScheme: true,
+                          },
+                        )
+                      }}
+                    >
+                      <div className="runtime-oauth-intro">
+                        <span>
+                          <strong>OAuth 应用配置</strong>
+                          <small>
+                            此处填写应用的 Client ID，不是浏览器返回的
+                            Authorization Code
+                          </small>
+                        </span>
+                        <a
+                          className="secondary-button"
+                          href={huggingFaceOAuthApplicationUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <ExternalLink aria-hidden="true" />
+                          创建 OAuth 应用
+                        </a>
+                      </div>
+                      <div className="runtime-oauth-redirect">
+                        <span>应用类型</span>
+                        <strong>Public · 不创建 Client Secret</strong>
+                        <span>Redirect URI</span>
+                        <code>{huggingFaceOAuthRedirectUri}</code>
+                      </div>
+                      <label>
+                        <span>OAuth 客户端 ID</span>
+                        <input
+                          type="text"
+                          required
+                          aria-label="Hugging Face OAuth Client ID"
+                          placeholder="创建应用后复制 Client ID"
+                          value={huggingFaceOAuthClientId}
+                          disabled={runtimeBusy}
+                          onChange={(event) =>
+                            setHuggingFaceOAuthClientId(event.target.value)
+                          }
+                        />
+                      </label>
+                      <button
+                        type="submit"
+                        className="secondary-button"
+                        disabled={
+                          runtimeBusy ||
+                          !desktopControls.configureHuggingFaceOAuth ||
+                          !huggingFaceOAuthClientId.trim()
+                        }
+                      >
+                        <KeyRound aria-hidden="true" />
+                        保存 OAuth 配置
+                      </button>
+                    </form>
+                  ) : selectedTranscriptionWeightSource ===
+                      'download-required' ? (
+                    <div className="runtime-oauth-ready">
+                      <span>Hugging Face OAuth 已配置</span>
+                      <button
+                        type="button"
+                        disabled={runtimeBusy}
+                        onClick={() => setOauthSetup(true)}
+                      >
+                        修改
+                      </button>
+                    </div>
+                  ) : null}
+                  <label className="runtime-license-confirmation">
+                    <input
+                      type="checkbox"
+                      checked={transcriptionLicenseAccepted}
+                      disabled={
+                        runtimeBusy ||
+                        (Boolean(
+                          runtimeStatus.transcription.preference
+                            .licenseAcceptedAt,
+                        ) &&
+                          runtimeStatus.transcription.preference
+                            .licenseAcceptedVersion ===
+                            'CC-BY-NC-4.0')
+                      }
+                      onChange={(event) =>
+                        setTranscriptionLicenseAccepted(event.target.checked)
+                      }
+                    />
+                    <span>
+                      我确认 MuScriptor 官方权重采用 CC BY-NC 4.0，仅用于非商用场景
+                    </span>
+                  </label>
+                  <div className="runtime-model-actions">
+                    {transcriptionAuthorizationActive ? (
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        disabled={
+                          !desktopControls.openTranscriptionAuthorization
+                        }
+                        onClick={() =>
+                          void desktopControls
+                            .openTranscriptionAuthorization?.()
+                            .catch((authorizationError: unknown) =>
+                              setRuntimeError(
+                                authorizationError instanceof Error
+                                  ? authorizationError.message
+                                  : '无法重新打开登录页',
+                              ),
+                            )
+                        }
+                      >
+                        <Link2 aria-hidden="true" />
+                        重新打开登录页
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        disabled={
+                          runtimeBusy ||
+                          !desktopControls.openTranscriptionProviderPage
+                        }
+                        onClick={() =>
+                          void desktopControls.openTranscriptionProviderPage?.(
+                            transcriptionChoice === 'auto'
+                              ? runtimeStatus.transcription.recommendation
+                                  .variant
+                              : transcriptionChoice,
+                          )
+                        }
+                      >
+                        <Link2 aria-hidden="true" />
+                        官方授权页
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={
+                        runtimeBusy ||
+                        !transcriptionLicenseAccepted ||
+                        !desktopControls.importTranscriptionWeights
+                      }
+                      onClick={() =>
+                        void runDesktopAction(
+                          async () => {
+                            const variant =
+                              transcriptionChoice === 'auto'
+                                ? runtimeStatus.transcription.recommendation
+                                    .variant
+                                : transcriptionChoice
+                            const imported =
+                              await desktopControls.importTranscriptionWeights?.(
+                                variant,
+                                transcriptionLicenseAccepted,
+                              )
+                            if (imported) {
+                              await desktopControls.setTranscriptionProvider?.({
+                                providerId: 'muscriptor',
+                                selectionMode:
+                                  transcriptionChoice === 'auto'
+                                    ? 'auto'
+                                    : 'manual',
+                                ...(transcriptionChoice === 'auto'
+                                  ? {}
+                                  : { variant }),
+                                licenseAccepted:
+                                  transcriptionLicenseAccepted,
+                              })
+                              setRuntimeNotice(
+                                `MuScriptor ${variant.toUpperCase()} 权重已导入`,
+                              )
+                            }
+                          },
+                          { errorScope: 'transcription' },
+                        )
+                      }
+                    >
+                      <FolderOpen aria-hidden="true" />
+                      导入权重
+                    </button>
+                    {transcriptionSetupActive ? (
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        disabled={!desktopControls.cancelTranscriptionSetup}
+                        onClick={() => {
+                          setRuntimeNotice('正在取消模型准备')
+                          void desktopControls
+                            .cancelTranscriptionSetup?.()
+                            .then((result) => {
+                              if (result.cancelled) return
+                              setRuntimeBusy(false)
+                              setTranscriptionProgress(null)
+                              setRuntimeNotice('模型准备已结束，可以重新尝试')
+                            })
+                            .catch((cancelError: unknown) =>
+                              setRuntimeError(
+                                cancelError instanceof Error
+                                  ? cancelError.message
+                                  : '无法取消模型准备',
+                              ),
+                            )
+                        }}
+                      >
+                        <X aria-hidden="true" />
+                        {transcriptionAuthorizationActive
+                          ? '取消等待'
+                          : '取消下载'}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="primary-button"
+                        disabled={
+                          runtimeBusy ||
+                          !transcriptionLicenseAccepted ||
+                          (selectedTranscriptionWeightSource ===
+                            'download-required' &&
+                            !runtimeStatus.transcription.oauthConfigured) ||
+                          !highAccuracyRuntimeAvailable ||
+                          highAccuracySelectionActive ||
+                          !desktopControls.setTranscriptionProvider
+                        }
+                        onClick={() =>
+                          void runDesktopAction(
+                            async () => {
+                              setTranscriptionProgress({
+                                phase: 'checking',
+                                progress: 1,
+                                stageLabel: '正在检查高精度模型和登录状态',
+                              })
+                              setRuntimeNotice(
+                                highAccuracyDownloadRequired
+                                  ? '正在检查并下载高精度模型，完成前不会切换转录策略'
+                                  : '正在检查高精度模型完整性',
+                              )
+                              await desktopControls.setTranscriptionProvider?.({
+                                providerId: 'muscriptor',
+                                selectionMode:
+                                  transcriptionChoice === 'auto'
+                                    ? 'auto'
+                                    : 'manual',
+                                ...(transcriptionChoice === 'auto'
+                                  ? {}
+                                  : { variant: transcriptionChoice }),
+                                licenseAccepted:
+                                  transcriptionLicenseAccepted,
+                              })
+                              setRuntimeNotice(
+                                `高精度模型已启用，当前使用 ${
+                                  transcriptionChoice === 'auto'
+                                    ? `自动推荐的 ${runtimeStatus.transcription.recommendation.variant.toUpperCase()}`
+                                    : transcriptionChoice.toUpperCase()
+                                }`,
+                              )
+                            },
+                            { errorScope: 'transcription' },
+                          )
+                        }
+                      >
+                        <Check aria-hidden="true" />
+                        {runtimeBusy
+                          ? '正在准备模型'
+                          : highAccuracySelectionActive
+                            ? '高精度已启用'
+                          : highAccuracyDownloadRequired
+                            ? '下载并启用'
+                            : '启用高精度'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ) : transcriptionScheme === 'guitar-specialist' ? (
+                <div className="runtime-transcription-setup">
+                  <div className="runtime-model-recommendation">
+                    <strong>吉他专用 · StringTrace</strong>
+                    <span>
+                      起音与弦品联合识别，随后执行可演奏性指法约束
+                    </span>
+                    <small>适用于分离后的吉他音轨 · 研究模式</small>
+                  </div>
+                  <p className="runtime-model-state">
+                    {guitarSpecialistComponent?.ready
+                      ? '吉他专用模型包已准备'
+                      : '需要安装包含 StringTrace 转录模型的研究模型包'}
+                  </p>
+                  <p className="runtime-model-stack">
+                    <strong>当前组合</strong>
+                    <span>
+                      StringTrace 起音/弦品联合模型 · 可演奏性指法解码
+                    </span>
+                  </p>
+                  <div className="runtime-model-actions">
+                    <button
+                      type="button"
+                      className="primary-button"
+                      disabled={
+                        runtimeBusy ||
+                        !guitarSpecialistComponent?.runtimeAvailable ||
+                        (!guitarSpecialistComponent?.ready &&
+                          (!desktopControls.installModelPackage ||
+                            !desktopControls.activateModelPackage)) ||
+                        !desktopControls.setTranscriptionProvider
+                      }
+                      onClick={() =>
+                        void runDesktopAction(async () => {
+                          if (!guitarSpecialistComponent?.ready) {
+                            const installed =
+                              await desktopControls.installModelPackage?.()
+                            if (!installed) return
+                            await desktopControls.activateModelPackage?.(
+                              installed.manifest.id,
+                              installed.manifest.version,
+                            )
+                          }
+                          await desktopControls.setTranscriptionProvider?.({
+                            providerId: 'guitar-specialist',
+                          })
+                          setRuntimeNotice('吉他专用方案已启用')
+                        })
+                      }
+                    >
+                      <Guitar aria-hidden="true" />
+                      {guitarSpecialistComponent?.ready
+                        ? '启用吉他专用'
+                        : '安装模型包并启用'}
+                    </button>
+                  </div>
+                </div>
+              ) : transcriptionScheme === 'multitrack-research' ? (
+                <div className="runtime-transcription-setup">
+                  <div className="runtime-model-recommendation">
+                    <strong>多轨研究 · YourMT3+</strong>
+                    <span>
+                      多乐器事件转录，提取吉他声部后与 Basic Pitch 融合
+                    </span>
+                    <small>约 536 MB · 研究模式 · 首次使用自动下载</small>
+                  </div>
+                  <p className="runtime-model-state">
+                    {multitrackResearchComponent?.ready
+                      ? 'YourMT3+ 权重已缓存'
+                      : multitrackResearchComponent?.runtimeAvailable
+                        ? '尚未准备，启用时将下载并校验研究模型'
+                        : '当前 Worker 未包含 YourMT3+ 运行组件'}
+                  </p>
+                  {transcriptionProgress &&
+                  transcriptionProgress.phase !== 'ready' ? (
+                    <div className="runtime-model-progress" aria-live="polite">
+                      <div>
+                        <span>{transcriptionProgress.stageLabel}</span>
+                        <strong>
+                          {Math.round(transcriptionProgress.progress)}%
+                        </strong>
+                      </div>
+                      <progress
+                        max="100"
+                        value={transcriptionProgress.progress}
+                      />
+                    </div>
+                  ) : null}
+                  <p className="runtime-model-stack">
+                    <strong>当前组合</strong>
+                    <span>
+                      YourMT3+ 多轨转录 · Basic Pitch 补漏 · Noise2Fret 弦品优化
+                    </span>
+                  </p>
+                  <div className="runtime-model-actions">
+                    {transcriptionSetupActive ? (
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        disabled={!desktopControls.cancelTranscriptionSetup}
+                        onClick={() => {
+                          setRuntimeNotice('正在取消模型准备')
+                          void desktopControls.cancelTranscriptionSetup?.()
+                        }}
+                      >
+                        <X aria-hidden="true" />
+                        取消下载
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="primary-button"
+                        disabled={
+                          runtimeBusy ||
+                          !multitrackResearchComponent?.runtimeAvailable ||
+                          !desktopControls.setTranscriptionProvider
+                        }
+                        onClick={() =>
+                          void runDesktopAction(async () => {
+                            setTranscriptionProgress({
+                              phase: 'checking',
+                              progress: 1,
+                              stageLabel: '正在检查多轨研究模型',
+                            })
+                            await desktopControls.setTranscriptionProvider?.({
+                              providerId: 'multitrack-research',
+                            })
+                            setRuntimeNotice('多轨研究方案已启用')
+                          })
+                        }
+                      >
+                        <Check aria-hidden="true" />
+                        {multitrackResearchComponent?.ready
+                          ? '启用多轨研究'
+                          : '下载并启用'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ) : null}
+            </section>
+            <dl
+              className="runtime-status runtime-status-local"
+              hidden={runtimeLocation !== 'local'}
+            >
+              <div>
+                <dt>本地 API</dt>
+                <dd>{runtimeStatus?.apiReady ? '可用' : '检查中'}</dd>
+              </div>
+              <div>
+                <dt>项目存储</dt>
+                <dd>{runtimeStatus?.storageReady ? 'SQLite' : '检查中'}</dd>
+              </div>
+              <div>
+                <dt>推理 Worker</dt>
+                <dd>{runtimeStatus?.workerReady ? '可用' : '未安装'}</dd>
+              </div>
+              <div>
+                <dt>活动模型</dt>
+                <dd>
+                  {runtimeStatus?.activeModel
+                    ? `${runtimeStatus.activeModel.id} ${runtimeStatus.activeModel.version} · ${
+                        runtimeStatus.activeModel.releaseChannel === 'production'
+                          ? '生产'
+                          : '研究'
+                      }`
+                    : '内置基线'}
+                </dd>
+              </div>
+            </dl>
+            {runtimeLocation === 'local' && runtimeStatus?.modelWarning ? (
+              <p className="runtime-warning">{runtimeStatus.modelWarning}</p>
+            ) : null}
+            <div
+              className="runtime-actions"
+              hidden={runtimeLocation !== 'local'}
+            >
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={runtimeBusy || !desktopControls.installModelPackage}
+                onClick={() =>
+                  void runDesktopAction(async () => {
+                    await desktopControls.installModelPackage?.()
+                  })
+                }
+              >
+                <PackagePlus aria-hidden="true" />
+                安装模型包
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={runtimeBusy || !desktopControls.rollbackModelPackage}
+                onClick={() =>
+                  void runDesktopAction(async () => {
+                    await desktopControls.rollbackModelPackage?.()
+                  })
+                }
+              >
+                <RotateCcw aria-hidden="true" />
+                回滚模型
+              </button>
+            </div>
+            <form
+              className="runtime-download"
+              hidden={runtimeLocation !== 'local'}
+              onSubmit={(event) => {
+                event.preventDefault()
+                void runDesktopAction(async () => {
+                  await desktopControls.downloadModelPackage?.(
+                    modelManifestUrl.trim(),
+                  )
+                  setModelManifestUrl('')
+                  setRuntimeNotice('模型包已下载并校验')
+                })
+              }}
+            >
+              <label>
+                <span>模型清单地址</span>
+                <input
+                  type="url"
+                  value={modelManifestUrl}
+                  placeholder="https://…/manifest.json"
+                  onChange={(event) => setModelManifestUrl(event.target.value)}
+                />
+              </label>
+              <button
+                type="submit"
+                className="secondary-button"
+                disabled={
+                  runtimeBusy ||
+                  !desktopControls.downloadModelPackage ||
+                  !modelManifestUrl.trim()
+                }
+              >
+                <Download aria-hidden="true" />
+                下载
+              </button>
+            </form>
+            <div
+              className="runtime-package-list"
+              hidden={runtimeLocation !== 'local'}
+            >
+              {modelPackages.map((item) => (
+                <article key={`${item.manifest.id}:${item.manifest.version}`}>
+                  <span>
+                    <strong>{item.manifest.id}</strong>
+                    <small>
+                      {item.manifest.version} · {item.manifest.runtime.platform}{' '}
+                      {item.manifest.runtime.arch} ·{' '}
+                      {item.manifest.releaseChannel === 'production'
+                        ? '生产'
+                        : '研究'}
+                    </small>
+                  </span>
+                  {item.active ? (
+                    <i>当前</i>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        disabled={
+                          runtimeBusy ||
+                          !desktopControls.activateModelPackage
+                        }
+                        onClick={() =>
+                          void runDesktopAction(() =>
+                            desktopControls.activateModelPackage!(
+                              item.manifest.id,
+                              item.manifest.version,
+                            ),
+                          )
+                        }
+                      >
+                        启用
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-button"
+                        aria-label={`删除模型 ${item.manifest.id} ${item.manifest.version}`}
+                        disabled={
+                          runtimeBusy ||
+                          !desktopControls.removeModelPackage
+                        }
+                        onClick={() =>
+                          void runDesktopAction(() =>
+                            desktopControls.removeModelPackage!(
+                              item.manifest.id,
+                              item.manifest.version,
+                            ),
+                          )
+                        }
+                      >
+                        <Trash2 aria-hidden="true" />
+                      </button>
+                    </>
+                  )}
+                </article>
+              ))}
+              {modelPackages.length === 0 && (
+                <p>未安装额外模型包，当前使用内置基线。</p>
+              )}
+            </div>
+            {runtimeLocation === 'local' &&
+            storageCleanup &&
+            desktopControls.setStorageCleanupConfig ? (
+              <form
+                className="runtime-cleanup"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void runDesktopAction(async () => {
+                    const result =
+                      await desktopControls.setStorageCleanupConfig?.({
+                        enabled: cleanupEnabled,
+                        triggerFreeBytes: Math.round(
+                          Number(cleanupTriggerGiB) * 1024 ** 3,
+                        ),
+                        targetFreeBytes: Math.round(
+                          Number(cleanupTargetGiB) * 1024 ** 3,
+                        ),
+                        retentionHours: Number(cleanupRetentionHours),
+                      })
+                    if (result) {
+                      setStorageCleanup(result)
+                      setRuntimeNotice('自动清理配置已保存')
+                    }
+                  })
+                }}
+              >
+                <div className="runtime-cleanup-heading">
+                  <span>
+                    <strong>自动清理</strong>
+                    <small>
+                      可用 {formatStorageSize(storageCleanup.availableBytes)} ·
+                      可回收{' '}
+                      {formatStorageSize(storageCleanup.reclaimableBytes)}
+                    </small>
+                  </span>
+                  <label className="runtime-cleanup-toggle">
+                    <input
+                      type="checkbox"
+                      checked={cleanupEnabled}
+                      disabled={runtimeBusy}
+                      onChange={(event) =>
+                        setCleanupEnabled(event.target.checked)
+                      }
+                    />
+                    <i aria-hidden="true" />
+                    <span>{cleanupEnabled ? '已启用' : '已关闭'}</span>
+                  </label>
+                </div>
+                <div className="runtime-cleanup-fields">
+                  <label>
+                    <span>启动阈值</span>
+                    <span>
+                      <input
+                        type="number"
+                        min="0.25"
+                        step="0.25"
+                        value={cleanupTriggerGiB}
+                        disabled={runtimeBusy}
+                        onChange={(event) =>
+                          setCleanupTriggerGiB(event.target.value)
+                        }
+                      />
+                      GB
+                    </span>
+                  </label>
+                  <label>
+                    <span>清理目标</span>
+                    <span>
+                      <input
+                        type="number"
+                        min="0.25"
+                        step="0.25"
+                        value={cleanupTargetGiB}
+                        disabled={runtimeBusy}
+                        onChange={(event) =>
+                          setCleanupTargetGiB(event.target.value)
+                        }
+                      />
+                      GB
+                    </span>
+                  </label>
+                  <label>
+                    <span>保留时间</span>
+                    <span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="8760"
+                        step="1"
+                        value={cleanupRetentionHours}
+                        disabled={runtimeBusy}
+                        onChange={(event) =>
+                          setCleanupRetentionHours(event.target.value)
+                        }
+                      />
+                      小时
+                    </span>
+                  </label>
+                </div>
+                <div className="runtime-cleanup-footer">
+                  <small>
+                    {storageCleanup.lastRun
+                      ? `最近运行 ${new Date(
+                          storageCleanup.lastRun.completedAt,
+                        ).toLocaleString('zh-CN')} · 释放 ${formatStorageSize(
+                          storageCleanup.lastRun.removedBytes,
+                        )}`
+                      : '尚未运行'}
+                  </small>
+                  <span>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={
+                        runtimeBusy || !desktopControls.runStorageCleanup
+                      }
+                      onClick={() =>
+                        void runDesktopAction(async () => {
+                          const result =
+                            await desktopControls.runStorageCleanup?.()
+                          if (result) {
+                            setStorageCleanup(result)
+                            setRuntimeNotice(
+                              `已释放 ${formatStorageSize(
+                                result.lastRun?.removedBytes ?? 0,
+                              )}`,
+                            )
+                          }
+                        })
+                      }
+                    >
+                      <Trash2 aria-hidden="true" />
+                      立即清理
+                    </button>
+                    <button
+                      type="submit"
+                      className="primary-button"
+                      disabled={
+                        runtimeBusy ||
+                        !Number.isFinite(Number(cleanupTriggerGiB)) ||
+                        !Number.isFinite(Number(cleanupTargetGiB)) ||
+                        !Number.isFinite(Number(cleanupRetentionHours)) ||
+                        Number(cleanupTriggerGiB) < 0.25 ||
+                        Number(cleanupTargetGiB) <
+                          Number(cleanupTriggerGiB) ||
+                        Number(cleanupRetentionHours) < 0
+                      }
+                    >
+                      <Save aria-hidden="true" />
+                      保存
+                    </button>
+                  </span>
+                </div>
+              </form>
+            ) : null}
+            <div className="runtime-maintenance">
+              <strong>项目与数据</strong>
+              <div>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={
+                    runtimeBusy ||
+                    !project ||
+                    !desktopControls.exportProject
+                  }
+                  onClick={() =>
+                    void runDesktopAction(async () => {
+                      const result = await desktopControls.exportProject?.(
+                        project!.id,
+                      )
+                      if (result) setRuntimeNotice('项目已导出')
+                    })
+                  }
+                >
+                  <Download aria-hidden="true" />
+                  导出项目
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={runtimeBusy || !desktopControls.importProject}
+                  onClick={() =>
+                    void runDesktopAction(async () => {
+                      const imported = await desktopControls.importProject?.()
+                      if (!imported) return
+                      loadProject(imported)
+                      window.history.replaceState(
+                        null,
+                        '',
+                        `?project=${imported.id}`,
+                      )
+                      setRuntimeNotice('项目已导入')
+                    })
+                  }
+                >
+                  <Upload aria-hidden="true" />
+                  导入项目
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={runtimeBusy || !desktopControls.createBackup}
+                  onClick={() =>
+                    void runDesktopAction(async () => {
+                      const result = await desktopControls.createBackup?.()
+                      if (result) {
+                        setRuntimeNotice(`备份已创建：${result.name}`)
+                      }
+                    })
+                  }
+                >
+                  <HardDrive aria-hidden="true" />
+                  创建备份
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={runtimeBusy || !desktopControls.restoreBackup}
+                  onClick={() => {
+                    if (!window.confirm('恢复备份将替换当前本地数据，是否继续？')) {
+                      return
+                    }
+                    void runDesktopAction(async () => {
+                      const result = await desktopControls.restoreBackup?.()
+                      if (result) window.location.reload()
+                    })
+                  }}
+                >
+                  <RotateCcw aria-hidden="true" />
+                  恢复备份
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={runtimeBusy || !desktopControls.clearCache}
+                  onClick={() => {
+                    if (!window.confirm('清理推理缓存和未处理上传文件？')) return
+                    void runDesktopAction(async () => {
+                      const result = await desktopControls.clearCache?.()
+                      if (result) {
+                        setRuntimeNotice(
+                          `已释放 ${(result.removedBytes / 1024 / 1024).toFixed(1)} MB`,
+                        )
+                      }
+                    })
+                  }}
+                >
+                  <Trash2 aria-hidden="true" />
+                  清理缓存
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={runtimeBusy || !desktopControls.exportDiagnostics}
+                  onClick={() =>
+                    void runDesktopAction(async () => {
+                      const result =
+                        await desktopControls.exportDiagnostics?.()
+                      if (result) setRuntimeNotice('诊断信息已导出')
+                    })
+                  }
+                >
+                  <Download aria-hidden="true" />
+                  导出诊断
+                </button>
+              </div>
+            </div>
+            {runtimeNotice && (
+              <p className="runtime-notice">{runtimeNotice}</p>
+            )}
+            {runtimeError && <p className="dialog-error">{runtimeError}</p>}
           </section>
         </div>
       ) : null}

@@ -335,9 +335,13 @@ test('uses calibration before cross-account consensus and freezes a release', ()
     assert.equal(release.verification, 'owner_verified')
     assert.match(release.manifestSha256, /^[0-9a-f]{64}$/)
     const manifest = store.releaseManifest(owner, release.id)
+    assert.equal(manifest.schemaVersion, 2)
     assert.equal(manifest.records.length, 1)
     assert.equal(manifest.records[0].source.reviewQueue, 'residual-onset-v2')
     assert.equal(manifest.release.manifestSha256, release.manifestSha256)
+    assert.equal(manifest.dataCard.recordCount, 1)
+    assert.equal(manifest.dataCard.lineage.crossSplitLeakage, 0)
+    assert.deepEqual(manifest.dataCard.licenses, ['CC-BY-4.0'])
 
     const queued = store.createExperiment(left, {
       recipeId: 'community-release-audit-v1',
@@ -362,6 +366,42 @@ test('uses calibration before cross-account consensus and freezes a release', ()
           status: 'failed',
         }),
       /没有有效执行租约/,
+    )
+  })
+})
+
+test('rate limits and temporarily suspends implausibly fast submissions', () => {
+  withStore((store) => {
+    const owner = register(
+      store,
+      'owner',
+      'device-owner',
+      'bootstrap-secret',
+    ).account
+    const contributor = register(store, 'fast-player', 'device-fast').account
+    for (const name of ['fast-a', 'fast-b', 'fast-c', 'fast-d']) {
+      store.importReview(owner, reviewDocument('approved', name), 'seed')
+    }
+    const tasks = store.listAllTasks(owner)
+    for (const task of tasks.slice(0, 12)) {
+      store.submit(contributor, task.id, {
+        answer: {
+          choice: task.type === 'missing-event' ? 'no' : 'yes',
+        },
+        durationMs: 100,
+      })
+    }
+    const account = store.getAccount(contributor)
+    assert.equal(account.anomalyReason, 'rapid-submission-pattern')
+    assert.ok(account.suspendedUntil)
+    assert.throws(
+      () =>
+        store.submit(contributor, tasks[12].id, {
+          answer: { choice: 'yes' },
+          durationMs: 100,
+        }),
+      (error: unknown) =>
+        error instanceof CommunityRequestError && error.statusCode === 429,
     )
   })
 })
@@ -863,48 +903,62 @@ test('selects shadow and canary traffic deterministically and validates deployme
 })
 
 test('rejects a canary automatically when its error budget is exceeded', () => {
-  withStore((store, root) => {
-    const owner = register(
-      store,
-      'owner',
-      'device-owner',
-      'bootstrap-secret',
-    ).account
-    const promotion = createPromotionFixture(store, root, owner, 'canary')
-    advancePromotionTo(store, owner, promotion.id, 'canary')
-    store.configureInferenceDeployment(owner, {
-      canaryTrafficPercent: 50,
-      errorBudgetPercent: 49,
-      minimumObservations: 2,
-    })
+  const alerts: Array<{ promotionId: string; mode: string }> = []
+  withStore(
+    (store, root) => {
+      const owner = register(
+        store,
+        'owner',
+        'device-owner',
+        'bootstrap-secret',
+      ).account
+      const promotion = createPromotionFixture(store, root, owner, 'canary')
+      advancePromotionTo(store, owner, promotion.id, 'canary')
+      store.configureInferenceDeployment(owner, {
+        canaryTrafficPercent: 50,
+        errorBudgetPercent: 49,
+        minimumObservations: 2,
+      })
 
-    store.recordInferenceObservation({
-      promotionId: promotion.id,
-      jobId: 'canary-success',
-      mode: 'canary',
-      success: true,
-      fallbackUsed: false,
-      durationMs: 1000,
-    })
-    const status = store.recordInferenceObservation({
-      promotionId: promotion.id,
-      jobId: 'canary-fallback',
-      mode: 'canary',
-      success: false,
-      fallbackUsed: true,
-      durationMs: 1200,
-      error: 'candidate failed',
-    })
+      store.recordInferenceObservation({
+        promotionId: promotion.id,
+        jobId: 'canary-success',
+        mode: 'canary',
+        success: true,
+        fallbackUsed: false,
+        durationMs: 1000,
+      })
+      const status = store.recordInferenceObservation({
+        promotionId: promotion.id,
+        jobId: 'canary-fallback',
+        mode: 'canary',
+        success: false,
+        fallbackUsed: true,
+        durationMs: 1200,
+        error: 'candidate failed',
+      })
 
-    assert.equal(
-      store.listPromotions(owner).find((item) => item.id === promotion.id)
-        ?.status,
-      'rejected',
-    )
-    assert.equal(status.active, undefined)
-    assert.equal(status.recent.length, 2)
-    assert.equal(status.recent[0].fallbackUsed, true)
-  })
+      assert.equal(
+        store.listPromotions(owner).find((item) => item.id === promotion.id)
+          ?.status,
+        'rejected',
+      )
+      assert.equal(status.active, undefined)
+      assert.equal(status.recent.length, 2)
+      assert.equal(status.recent[0].fallbackUsed, true)
+      assert.deepEqual(alerts, [
+        { promotionId: promotion.id, mode: 'canary' },
+      ])
+    },
+    {
+      onOperationalAlert: (alert) => {
+        alerts.push({
+          promotionId: alert.promotionId,
+          mode: alert.mode,
+        })
+      },
+    },
+  )
 })
 
 test('uses the previous champion artifact and restores it after an automatic rollback', () => {

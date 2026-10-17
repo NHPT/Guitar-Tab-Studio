@@ -817,6 +817,84 @@ repeated-attack examples. Full evidence is in
 `residual-onset-manual-v1.json` and
 `independent-position-validation-v1.json`.
 
+Low-threshold Basic Pitch candidates were then evaluated as a supplemental
+channel without using the pending residual-onset review queue. The v24
+supplemental activity head uses the existing six temporal features and the
+`0.25` onset, `0.20` frame and `70 ms` minimum-length frontend. Pilot
+calibration fixed supplemental activity probability `0.85` and direct
+probability `0.70`; the primary v18 channel remains unchanged.
+
+Against v18 alone, v24 changes GuitarSet mixture validation TAB F1 by
+`+0.000872` and repeated TAB recall by `+0.008302`. Independent source TAB F1
+changes by `+0.001339`; independent residual-stem TAB F1 changes by
+`+0.000482`. These gains are valid research improvements but remain far below
+the production thresholds. Only 29 of 60 representative mixture-validation
+tracks reach per-track TAB F1 `0.75`, so the current stack does not yet satisfy
+the product goal of accurate transcription for a majority of songs.
+
+The v25 trial added candidate confidence extrema and dispersion, pitch span,
+and duration statistics for 12 temporal features. Candidate-level validation
+activity F1 improved from v24's `0.879169` to `0.883443`, but transcription did
+not materially improve. Relative to v24, mixture TAB F1 changed by `+0.000031`,
+independent source TAB F1 by `+0.000148`, and independent stem TAB F1 by
+`0.000000`; mixture onset F1 changed by `-0.000079`. v25 is rejected and its
+checkpoint is not retained. Full evidence is in
+`low-candidate-temporal-v1.json`.
+
+The v26 trial added a pitch-independent 49-pitch temporal onset head to the
+existing frame model and trained only that head on GuitarSet mixture-Demucs
+stems with CQT noise, frequency masking, contrast and spectral-tilt
+augmentation. Its best validation frame pitch-onset F1 was `0.219130`. Pilot
+calibration froze pitch onset probability `0.80`, position probability `0.70`,
+minimum onset gap `46 ms` and frontend match tolerance `50 ms`.
+
+The frozen 60-track mixture gate did not confirm the pilot gain. Relative to
+v24, onset F1 changed by `-0.000074`, TAB F1 by `-0.000071`, and repeated TAB
+recall by only `+0.005761`, below the `+0.01` promotion threshold. Tracks at or
+above TAB F1 `0.75` increased from 29 to 30, which is still not a majority.
+v26 is rejected before the clean, isolated-stem and independent gates; its
+checkpoint is removed and the research bundle remains v24. Compact evidence
+is in `pitch-onset-v26-validation.json`.
+
+The v27 decoder trials targeted the remaining same-pitch wrong-string and
+same-string wrong-fret errors without using pending review data. Candidate
+pitch snapping produced no pilot improvement. A post-merge fretboard
+continuity reranker kept onset, pitch and event counts unchanged and improved
+mixture TAB F1 by `+0.002056`, independent-source TAB F1 by `+0.000921` and
+independent-stem TAB F1 by `+0.001073`.
+
+The gain was not cross-domain safe. Clean TAB F1 changed by `-0.000194`, and
+independent-source repeated TAB F1 changed by `-0.000859`. Protecting repeated
+groups removed the latter regression but changed isolated-stem TAB F1 by
+`-0.000872`; protecting only repeated notes reduced it by `-0.001066`. v27 is
+rejected, its experimental decoder is removed, and the bundle remains v24.
+Compact evidence is in `position-decoder-v27-validation.json`.
+
+The selected v12 position model, v18 primary activity head, v24 supplemental
+head and frozen thresholds can be packed into one research-only artifact:
+
+```bash
+.venv/bin/stringtrace-build-onset-position-bundle \
+  --position-checkpoint apps/api/data/training/checkpoints/guitarset-onset-position-mixture-v12.pt \
+  --primary-activity-checkpoint apps/api/data/training/checkpoints/guitarset-candidate-activity-temporal-v18.pt \
+  --supplemental-activity-checkpoint apps/api/data/training/checkpoints/guitarset-low-candidate-activity-v24.pt \
+  --output apps/api/data/training/checkpoints/stringtrace-onset-position-research-v24.bundle.pt \
+  --version v24-research
+```
+
+The Worker accepts this artifact only through the explicit research mode:
+
+```bash
+export STRINGTRACE_TAB_MODEL=apps/api/data/training/checkpoints/stringtrace-onset-position-research-v24.bundle.pt
+export STRINGTRACE_TAB_MODEL_MODE=onset-position-research
+```
+
+The bundle is `12 MB`, has SHA-256
+`219de243395c2a21cbe822e4258210fc18d45b087340477fa1b4470d69419622`,
+and records the hashes of all three source checkpoints. A real-audio smoke test
+returned 146 events, matching the frozen v24 report for that track. It reports
+`transcription_model.kind=research`; the default Worker remains Basic Pitch.
+
 The next annotation batch is available at
 `/review?queue=residual-onset-v2`. It contains 24 balanced AG-PT-set excerpts,
 six from each of four performers, for 288 seconds of audio. Candidate-aware
@@ -846,6 +924,9 @@ research-only auxiliary data, but their transfer experiments did not improve
 the gate candidate. IDMT-SMT-GUITAR is excluded from adaptation training due to
 its CC BY-NC-ND 4.0 license. The optional GuitarSet hex-debleeded archive was
 not downloaded because local capacity is insufficient for safe download and
-extraction. Noise2Fret was not imported because its public repository did not
-provide both an explicit license and usable released weights. External paper
-metrics are not treated as local benchmark results.
+extraction. Noise2Fret now publishes its training code under MIT, but its
+repository tree and release list still contain no usable pretrained weights,
+so it cannot enter the local gate without a new full training run. MuScriptor
+code is MIT, but its published weights are gated and licensed CC BY-NC 4.0;
+they are not eligible for the product backend. External paper metrics are not
+treated as local benchmark results.

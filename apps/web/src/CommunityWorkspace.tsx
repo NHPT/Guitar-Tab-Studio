@@ -191,7 +191,7 @@ function CommunityLogin({
         <span className="community-brand-mark">
           <Guitar aria-hidden="true" strokeWidth={2.5} />
         </span>
-        <p>HackAll Tab</p>
+        <p>Guitar Tab Community</p>
         <h1 id="community-login-title">
           {mode === 'create' ? '创建贡献者身份' : '使用访问密钥'}
         </h1>
@@ -315,12 +315,17 @@ export default function CommunityWorkspace() {
   const [promotionCheck, setPromotionCheck] =
     useState<PromotionCheck>('shadow')
   const [promotionSummary, setPromotionSummary] = useState('')
+  const [clock, setClock] = useState(() => Date.now())
   const audioRef = useRef<HTMLAudioElement>(null)
   const taskStartedAt = useRef(0)
 
   const isOwner = Boolean(account?.roles.includes('owner'))
   const canMaintainModels = Boolean(
     isOwner || account?.roles.includes('model-maintainer'),
+  )
+  const contributionPaused = Boolean(
+    account?.suspendedUntil &&
+      new Date(account.suspendedUntil).getTime() > clock,
   )
   const activeTask = tasks[0]
 
@@ -402,6 +407,17 @@ export default function CommunityWorkspace() {
       document.documentElement.classList.remove('community-page')
     }
   }, [refreshAll])
+
+  useEffect(() => {
+    if (!account?.suspendedUntil) return
+    const remaining = new Date(account.suspendedUntil).getTime() - Date.now()
+    if (remaining <= 0) return
+    const timer = window.setTimeout(
+      () => setClock(Date.now()),
+      Math.min(remaining + 100, 2_147_483_647),
+    )
+    return () => window.clearTimeout(timer)
+  }, [account?.suspendedUntil])
 
   const selectedRecipe = recipes.find((recipe) => recipe.id === recipeId)
   const datasetOptions = useMemo(
@@ -522,7 +538,7 @@ export default function CommunityWorkspace() {
           </span>
           <div>
             <strong>Guitar Tab Community</strong>
-            <span>HackAll · 数据与模型协作</span>
+            <span>数据与模型协作</span>
           </div>
         </div>
         <nav aria-label="社区工作区">
@@ -546,9 +562,11 @@ export default function CommunityWorkspace() {
           <span>
             <strong>{account.alias}</strong>
             <small>
-              {account.governanceMode === 'single-maintainer'
-                ? '单人维护模式'
-                : '团队治理模式'}
+              {contributionPaused
+                ? `贡献暂停至 ${formatDate(account.suspendedUntil!)}`
+                : account.governanceMode === 'single-maintainer'
+                  ? '单人维护模式'
+                  : '团队治理模式'}
             </small>
           </span>
           <a href="/" title="返回工作台">
@@ -671,7 +689,7 @@ export default function CommunityWorkspace() {
                 <div className="community-answer-row">
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || contributionPaused}
                     onClick={() => void submitAnswer({ choice: 'yes' })}
                   >
                     <Check aria-hidden="true" />
@@ -679,7 +697,7 @@ export default function CommunityWorkspace() {
                   </button>
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || contributionPaused}
                     onClick={() => void submitAnswer({ choice: 'no' })}
                   >
                     <X aria-hidden="true" />
@@ -687,7 +705,7 @@ export default function CommunityWorkspace() {
                   </button>
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || contributionPaused}
                     onClick={() => void submitAnswer({ choice: 'unsure' })}
                   >
                     <SkipForward aria-hidden="true" />

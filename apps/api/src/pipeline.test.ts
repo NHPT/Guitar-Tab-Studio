@@ -1,21 +1,130 @@
 import assert from 'node:assert/strict'
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import test from 'node:test'
 import {
   createStudioProject,
+  describeMediaAcquisitionFailure,
+  describeWorkerFailure,
   detectPlatform,
+  executeWorker,
   normalizeSharedUrl,
+  parseWorkerProgress,
   resolveInferenceExecution,
   sourceFromLink,
   tabFromWorker,
+  transcriptionWorkerArguments,
 } from './pipeline.js'
 import type { WorkerAnalysis } from './pipeline.js'
 
-test('detects supported Chinese media platforms', () => {
+test('detects supported public media platforms', () => {
   assert.equal(detectPlatform('https://www.bilibili.com/video/BV1xx')?.id, 'bilibili')
   assert.equal(detectPlatform('https://v.douyin.com/example')?.id, 'douyin')
   assert.equal(detectPlatform('https://music.163.com/song?id=123')?.id, 'netease')
-  assert.equal(detectPlatform('https://y.qq.com/n/ryqq/songDetail/example'), null)
+  assert.equal(
+    detectPlatform('https://y.qq.com/n/ryqq/songDetail/004Ti8rT003TaZ')?.id,
+    'qqmusic',
+  )
+  assert.equal(
+    detectPlatform('https://y.qq.com/n/ryqq_v2/songDetail/004Ti8rT003TaZ')?.id,
+    'qqmusic',
+  )
+  assert.equal(detectPlatform('https://youtu.be/example')?.id, 'youtube')
+  assert.equal(detectPlatform('https://music.youtube.com/watch?v=example')?.id, 'youtube')
+  assert.equal(detectPlatform('https://vimeo.com/123456')?.id, 'vimeo')
+  assert.equal(detectPlatform('https://soundcloud.com/artist/track')?.id, 'soundcloud')
+  assert.equal(detectPlatform('https://artist.bandcamp.com/track/example')?.id, 'bandcamp')
+  assert.equal(detectPlatform('https://www.jamendo.com/track/123/example')?.id, 'jamendo')
+  assert.equal(detectPlatform('https://audius.co/artist/track')?.id, 'audius')
+  assert.equal(detectPlatform('https://archive.org/details/example')?.id, 'internet-archive')
+  assert.equal(
+    detectPlatform('https://commons.wikimedia.org/wiki/File:Example.ogg')?.id,
+    'wikimedia',
+  )
   assert.equal(detectPlatform('https://qishui.douyin.com/s/example'), null)
+})
+
+test('accepts only structured worker progress and caps incomplete jobs below 100', () => {
+  assert.deepEqual(
+    parseWorkerProgress(
+      '{"type":"gts-progress","progress":63,"status":"transcribing","stageLabel":"拍点检测完成"}',
+    ),
+    {
+      progress: 63,
+      status: 'transcribing',
+      stageLabel: '拍点检测完成',
+    },
+  )
+  assert.equal(parseWorkerProgress('Predicting MIDI...'), null)
+  assert.equal(
+    parseWorkerProgress(
+      '{"type":"gts-progress","progress":100,"status":"completed","stageLabel":"完成"}',
+    ),
+    null,
+  )
+})
+
+test('normalizes the selected transcription provider into worker arguments', () => {
+  assert.deepEqual(transcriptionWorkerArguments({}), [
+    '--transcription-provider',
+    'basic-pitch',
+  ])
+  assert.deepEqual(
+    transcriptionWorkerArguments({
+      GTS_TRANSCRIPTION_PROVIDER: 'muscriptor',
+      GTS_TRANSCRIPTION_MODEL: 'large',
+      GTS_TRANSCRIPTION_VARIANT: 'large',
+    }),
+    [
+      '--transcription-provider',
+      'muscriptor',
+      '--transcription-model',
+      'large',
+      '--transcription-variant',
+      'large',
+    ],
+  )
+  assert.deepEqual(
+    transcriptionWorkerArguments({
+      GTS_TRANSCRIPTION_PROVIDER: 'guitar-specialist',
+    }),
+    ['--transcription-provider', 'guitar-specialist'],
+  )
+  assert.deepEqual(
+    transcriptionWorkerArguments({
+      GTS_TRANSCRIPTION_PROVIDER: 'multitrack-research',
+      GTS_TRANSCRIPTION_MODEL: '/models/yourmt3.ckpt',
+    }),
+    [
+      '--transcription-provider',
+      'multitrack-research',
+      '--transcription-model',
+      '/models/yourmt3.ckpt',
+    ],
+  )
+})
+
+test('turns worker tracebacks into copyable user-facing errors', () => {
+  assert.equal(
+    describeWorkerFailure(
+      [
+        '  File "/private/runtime/demucs/audio.py", line 260, in encode_wav',
+        '    file.write(content)',
+        'OSError: [Errno 28] No space left on device',
+        'RuntimeError: Command failed (1): /private/runtime/python -m demucs.separate',
+      ].join('\n'),
+      1,
+    ),
+    '可用磁盘空间不足，无法完成音轨分离。请释放更多磁盘空间后重试。',
+  )
+  assert.equal(
+    describeWorkerFailure(
+      'RuntimeError: Command failed (1): python -m demucs.separate',
+      1,
+    ),
+    '音轨分离进程异常退出。请确认磁盘空间充足后重试。',
+  )
 })
 
 test('extracts supported URLs from app share text', () => {
@@ -25,6 +134,32 @@ test('extracts supported URLs from app share text', () => {
   assert.equal(sourceFromLink(shared).kind, 'netease')
   assert.equal(detectPlatform('https://bili2233.cn/example')?.id, 'bilibili')
   assert.equal(detectPlatform('https://163.fm/example')?.id, 'netease')
+  assert.equal(
+    normalizeSharedUrl(
+      'https://y.qq.com/n/ryqq_v2/songDetail/004Ti8rT003TaZ',
+    ),
+    'https://y.qq.com/n/ryqq/songDetail/004Ti8rT003TaZ',
+  )
+})
+
+test('reports the actual media acquisition failure category', () => {
+  const youtube = detectPlatform('https://youtu.be/example')
+  assert.ok(youtube)
+  assert.match(
+    describeMediaAcquisitionFailure(
+      youtube,
+      'ERROR: Sign in to confirm you are not a bot',
+    ),
+    /登录会话.*人机验证/u,
+  )
+  assert.match(
+    describeMediaAcquisitionFailure(youtube, 'ERROR: This video is DRM protected'),
+    /DRM/u,
+  )
+  assert.match(
+    describeMediaAcquisitionFailure(youtube, 'ERROR: Unsupported URL'),
+    /链接格式/u,
+  )
 })
 
 test('rejects unsupported or malformed URLs', () => {
@@ -33,29 +168,74 @@ test('rejects unsupported or malformed URLs', () => {
   assert.throws(() => sourceFromLink('https://example.com/song'))
 })
 
-test('demo project has playable tab timing and independent stems', () => {
+test('demo project uses the public-domain beginner recording and authored TAB', () => {
   const project = createStudioProject({
     kind: 'upload',
     label: '测试',
     filename: 'sample.wav',
   })
 
-  assert.equal(project.tab.measures.length, 8)
+  assert.equal(project.schemaVersion, 1)
+  assert.equal(project.tab.measures.length, 64)
   assert.equal(project.tracks.length, 6)
-  assert.equal(project.visualization?.length, 720)
-  assert.equal(project.techniqueModel?.version, 'demo-1')
-  assert.ok(project.duration > 0)
+  assert.equal(project.visualization, undefined)
+  assert.equal(project.title, 'Wayfaring Stranger')
+  assert.equal(
+    project.artist,
+    'American Traditional · Guitar Tab Studio 初学编配',
+  )
+  assert.equal(project.bpm, 88)
+  assert.equal(project.key, 'E minor')
+  assert.equal(project.transcriptionModel?.version, '1')
+  assert.equal(project.techniqueModel?.name, 'authored-techniques')
+  assert.ok(Math.abs(project.duration - 174.54545) < 0.001)
+  assert.equal(project.tab.capo, 0)
+  assert.deepEqual(
+    project.tab.measures.flatMap((measure) =>
+      measure.section ? [[measure.number, measure.section]] : [],
+    ),
+    [
+      [1, '前奏'],
+    ],
+  )
+  assert.deepEqual(
+    [...new Set(project.tab.measures.map((measure) => measure.chord))].sort(),
+    ['Am', 'B7', 'C', 'D', 'Em', 'G'],
+  )
+  assert.ok(
+    project.tab.measures.flatMap((measure) =>
+      measure.beats.flatMap((beat) => beat.notes),
+    ).length > 200,
+  )
+  assert.deepEqual(
+    project.tracks
+      .filter((track) => track.available)
+      .map((track) => track.id),
+    ['vocals', 'guitar'],
+  )
+  assert.equal(
+    project.tracks.find((track) => track.role === 'vocals')?.url,
+    '/media/builtin/wayfaring-stranger-guide-vocals.wav',
+  )
+  assert.equal(
+    project.tracks.find((track) => track.role === 'vocals')?.available,
+    true,
+  )
+  assert.equal(
+    project.tracks.find((track) => track.id === 'guitar')?.url,
+    '/media/builtin/wayfaring-stranger-beginner.wav',
+  )
   assert.ok(
     project.tab.measures.every((measure) =>
       measure.beats.every((beat) =>
         beat.notes.every(
           (note) =>
             note.fret >= 0 &&
+            note.fret <= 24 &&
             note.string >= 1 &&
             note.string <= 6 &&
             (note.positionConfidence ?? 0) > 0 &&
-            (note.techniqueConfidence ?? 0) > 0 &&
-            (note.techniqueCandidates?.length ?? 0) > 0,
+            note.confidence === 1,
         ),
       ),
     ),
@@ -63,22 +243,22 @@ test('demo project has playable tab timing and independent stems', () => {
   const beatStyles = new Set<string | undefined>(
     project.tab.measures.flatMap((measure) => measure.beats.map((beat) => beat.style)),
   )
-  assert.ok(
-    ['pick', 'strum', 'arpeggio', 'rasgueado', 'tremolo'].every((style) =>
-      beatStyles.has(style),
-    ),
-  )
+  assert.ok(beatStyles.has('pick'))
 
   const techniques = new Set<string>(
     project.tab.measures.flatMap((measure) =>
       measure.beats.flatMap((beat) => beat.notes.map((note) => note.technique)),
     ),
   )
-  assert.ok(
-    ['hammer-on', 'pull-off', 'slide', 'harmonic', 'palm-mute', 'dead-note', 'slap', 'tremolo'].every(
-      (technique) => techniques.has(technique),
+  assert.ok(techniques.has('pick'))
+  assert.ok(project.tab.measures.every((measure) =>
+    measure.beats.every((beat) =>
+      beat.notes.every((note) =>
+        (note.notationAt ?? note.at) >= measure.start &&
+        (note.notationAt ?? note.at) < measure.start + measure.duration,
+      ),
     ),
-  )
+  ))
 })
 
 test('maps worker technique candidates and only valid note relations', () => {
@@ -190,6 +370,43 @@ test('uses the detected beat grid instead of treating recording lead-in as a res
   assert.equal(tab.measures[0].beats[3].notes.length, 1)
   assert.equal(tab.measures[0].beats[0].notes[0].notationAt, 0.6)
   assert.equal(tab.measures[0].beats[3].notes[0].notationAt, 2.1)
+})
+
+test('builds complete measures for every supported meter family', () => {
+  const fixtures = [
+    { signature: [2, 4] as const, interval: 0.5 },
+    { signature: [3, 4] as const, interval: 0.5 },
+    { signature: [4, 4] as const, interval: 0.5 },
+    { signature: [6, 8] as const, interval: 0.25 },
+    { signature: [12, 8] as const, interval: 0.25 },
+  ]
+  for (const { signature, interval } of fixtures) {
+    const beats = Array.from(
+      { length: signature[0] * 2 + 1 },
+      (_, index) => index * interval,
+    )
+    const analysis: WorkerAnalysis = {
+      version: 9,
+      bpm: 60 / interval,
+      time_signature: [signature[0], signature[1]],
+      metadata: { duration: signature[0] * interval * 2 },
+      beats,
+      stems: {},
+      notes: [],
+      chords: [],
+      warnings: [],
+    }
+
+    const tab = tabFromWorker(analysis)
+
+    assert.deepEqual(tab.timeSignature, signature)
+    assert.ok(tab.measures.length >= 2)
+    assert.ok(
+      tab.measures.every(
+        (measure) => measure.beats.length === signature[0],
+      ),
+    )
+  }
 })
 
 test('keeps near-simultaneous chord plucks visible instead of marking a strum', () => {
@@ -317,10 +534,16 @@ test('does not label a non-directional legato phrase as an arpeggio', () => {
   assert.equal(firstBeat.direction, undefined)
 })
 
-test('does not advertise unsupported protected music platforms', () => {
+test('rejects only sources without a dedicated media adapter', () => {
+  assert.equal(
+    sourceFromLink(
+      'https://y.qq.com/n/ryqq_v2/songDetail/004Ti8rT003TaZ',
+    ).kind,
+    'qqmusic',
+  )
   assert.throws(
-    () => sourceFromLink('https://y.qq.com/n/ryqq/songDetail/example'),
-    /当前仅支持哔哩哔哩、抖音和网易云音乐/,
+    () => sourceFromLink('https://qishui.douyin.com/s/example'),
+    /QQ 音乐.*Wikimedia Commons/u,
   )
 })
 
@@ -387,4 +610,41 @@ test('resolves isolated shadow execution and candidate fallback models', () => {
     }),
     { mode: 'baseline', fallbackModelPaths: [] },
   )
+})
+
+test('terminates a worker when inference is cancelled or times out', async () => {
+  const root = resolve(process.cwd(), 'data', `.test-worker-${randomUUID()}`)
+  const command = resolve(root, 'worker.sh')
+  mkdirSync(root, { recursive: true })
+  writeFileSync(command, '#!/bin/sh\nsleep 30\n', 'utf8')
+  chmodSync(command, 0o755)
+  try {
+    const controller = new AbortController()
+    const cancelled = executeWorker(
+      command,
+      '/bin/true',
+      ['--input', 'fixture.wav'],
+      resolve(root, 'cancelled'),
+      undefined,
+      controller.signal,
+      10_000,
+    )
+    setTimeout(() => controller.abort(), 30)
+    await assert.rejects(cancelled, /任务已取消/)
+
+    await assert.rejects(
+      executeWorker(
+        command,
+        '/bin/true',
+        ['--input', 'fixture.wav'],
+        resolve(root, 'timed-out'),
+        undefined,
+        undefined,
+        20,
+      ),
+      /推理任务超时/,
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
