@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { expect, test } from '@playwright/test'
 
-test('serves the public-domain beginner recording and guide vocal', async ({
+test('serves the requested Country Roads project and generated stems', async ({
   page,
 }) => {
   const projectResponse = await page.request.get(
@@ -13,41 +13,52 @@ test('serves the public-domain beginner recording and guide vocal', async ({
     (track: { role: string }) => track.role === 'guitar',
   )
   expect(guitars.map((track: { url: string }) => track.url)).toEqual([
-    '/media/builtin/wayfaring-stranger-beginner.wav',
+    '/media/builtin/take-me-home-country-roads-guitar-1.m4a',
+    '/media/builtin/take-me-home-country-roads-guitar-2.m4a',
   ])
-  expect(guitars.map((track: { name: string }) => track.name)).toEqual(['吉他'])
-  expect(project.title).toBe('Wayfaring Stranger')
-  expect(project.artist).toBe(
-    'American Traditional · Guitar Tab Studio 初学编配',
-  )
-  expect(project.duration).toBeCloseTo(174.54545, 3)
-  expect(project.tab.measures).toHaveLength(64)
+  expect(guitars.map((track: { name: string }) => track.name)).toEqual([
+    '吉他 1',
+    '吉他 2',
+  ])
+  expect(project.title).toBe('Take Me Home, Country Roads')
+  expect(project.artist).toBe('John Denver')
+  expect(project.duration).toBeCloseTo(194.14667, 3)
+  expect(project.tab.measures).toHaveLength(132)
   expect(
     project.tab.measures.flatMap(
       (measure: { beats: Array<{ notes: unknown[] }> }) =>
         measure.beats.flatMap((beat) => beat.notes),
     ),
-  ).toHaveLength(284)
+  ).toHaveLength(1789)
   expect(project.source).toEqual({
-    kind: 'upload',
-    label: '公共领域 · 原创初学编配',
-    filename: 'wayfaring-stranger-beginner.wav',
+    kind: 'netease',
+    label: 'John Denver · Take Me Home, Country Roads',
+    url: 'https://music.163.com/#/song?id=1478037',
   })
   const vocals = project.tracks.find(
     (track: { role: string }) => track.role === 'vocals',
   )
   expect(vocals.url).toBe(
-    '/media/builtin/wayfaring-stranger-guide-vocals.wav',
+    '/media/builtin/take-me-home-country-roads-vocals.m4a',
   )
   expect(vocals.available).toBe(true)
   expect(vocals.url).not.toBe(guitars[0].url)
+  expect(project.tracks.map((track: { name: string }) => track.name)).toEqual([
+    '人声',
+    '吉他 1',
+    '吉他 2',
+    '贝斯',
+    '鼓组',
+    '键盘',
+    '其他',
+  ])
 
   const audioResponse = await page.request.get(
     `http://127.0.0.1:8787${guitars[0].url}`,
     { headers: { Range: 'bytes=0-1023' } },
   )
   expect(audioResponse.status()).toBe(206)
-  expect(audioResponse.headers()['content-type']).toContain('audio/wav')
+  expect(audioResponse.headers()['content-type']).toContain('audio/mp4')
   expect(audioResponse.headers()['content-range']).toMatch(
     /^bytes 0-1023\/\d+$/u,
   )
@@ -58,21 +69,21 @@ test('loads a playable project without layout overflow', async ({ page }, testIn
   await page.goto('/')
   await expect(
     page.getByRole('heading', {
-      name: 'Wayfaring Stranger',
+      name: 'Take Me Home, Country Roads',
     }),
   ).toBeVisible()
   await expect(page.getByRole('heading', { name: '吉他谱' })).toBeVisible()
-  await expect(page.locator('.score-measure')).toHaveCount(64)
-  await expect(page.locator('.chord-diagram')).toHaveCount(64)
-  await expect(page.locator('.tab-notation')).toHaveCount(64)
-  await expect(page.locator('.tab-string-line')).toHaveCount(384)
-  await expect(page.locator('.rhythm-beat-slot')).toHaveCount(256)
+  await expect(page.locator('.score-measure')).toHaveCount(132)
+  await expect(page.locator('.chord-diagram')).toHaveCount(132)
+  await expect(page.locator('.tab-notation')).toHaveCount(132)
+  await expect(page.locator('.tab-string-line')).toHaveCount(792)
+  await expect(page.locator('.rhythm-beat-slot')).toHaveCount(528)
   expect(await page.locator('.rhythm-stem').count()).toBeGreaterThan(150)
-  await expect(page.locator('.track-strip')).toHaveCount(2)
+  await expect(page.locator('.track-strip')).toHaveCount(7)
   await expect(page.locator('.track-title strong')).toHaveText([
-    '人声', '吉他',
+    '人声', '吉他 1', '吉他 2', '贝斯', '鼓组', '键盘', '其他',
   ])
-  await expect(page.locator('.time-readout')).toContainText('/ 2:54')
+  await expect(page.locator('.time-readout')).toContainText('/ 3:14')
   const downbeatsClearBarlines = await page
     .locator('.score-measure')
     .evaluateAll((measures) => {
@@ -109,8 +120,8 @@ test('loads a playable project without layout overflow', async ({ page }, testIn
   await expect(loopStart).toBeDisabled()
   await expect(loopEnd).toBeDisabled()
   await expect(loopStart).toHaveValue('1')
-  await expect(loopEnd).toHaveValue('64')
-  await expect(loopEnd.locator('option:checked')).toHaveText('第 64 小节')
+  await expect(loopEnd).toHaveValue('132')
+  await expect(loopEnd.locator('option:checked')).toHaveText('第 132 小节')
   const countInBars = page.getByLabel('预备小节数')
   await expect(countInBars).toHaveValue('2')
   await countInBars.selectOption('0')
@@ -150,10 +161,10 @@ test('loads a playable project without layout overflow', async ({ page }, testIn
     )
     .toBeLessThan(0)
 
-  const firstMute = page.getByRole('button', { name: '吉他静音' })
+  const firstMute = page.getByRole('button', { name: '吉他 1静音' })
   await firstMute.click()
   await expect(
-    page.getByRole('button', { name: '吉他取消静音' }),
+    page.getByRole('button', { name: '吉他 1取消静音' }),
   ).toHaveClass(/is-active/)
 
   await page.screenshot({
@@ -163,7 +174,7 @@ test('loads a playable project without layout overflow', async ({ page }, testIn
 
   await page.getByRole('button', { name: '完整曲谱' }).click()
   await expect(page.locator('.full-score')).toHaveClass(/is-expanded/)
-  await expect(page.locator('.score-measure')).toHaveCount(64)
+  await expect(page.locator('.score-measure')).toHaveCount(132)
 })
 
 test('counts in before playback and filters the rhythm library', async ({
@@ -192,16 +203,16 @@ test('counts in before playback and filters the rhythm library', async ({
   ).toHaveAttribute('disabled', '')
   await speed.fill('1.25')
   await expect(
-    rhythmSelect.locator('option[value="rock-driving"]'),
+    rhythmSelect.locator('option[value="rock-double-time"]'),
   ).not.toHaveAttribute('disabled', '')
   await expect(
     rhythmSelect.locator('option[value="pop-clean"]'),
-  ).not.toHaveAttribute('disabled', '')
+  ).toHaveAttribute('disabled', '')
   await expect(
-    page.getByText(/4\/4 · 110 BPM · \d+\/40 可用/),
+    page.getByText(/4\/4 · 199–208 BPM · \d+\/40 可用/),
   ).toBeVisible()
 
-  await rhythmSelect.selectOption('rock-driving')
+  await rhythmSelect.selectOption('rock-double-time')
   await expect(rhythmToggle).toHaveAttribute('aria-pressed', 'false')
   await expect(rhythmKit).toBeDisabled()
   await expect(rhythmVolume).toBeDisabled()
@@ -239,9 +250,9 @@ test('counts in before playback and filters the rhythm library', async ({
   await expect(rhythmToggle).toHaveAttribute('aria-pressed', 'true')
   await expect(rhythmKit).toHaveValue('electronic')
   await expect(rhythmVolume).toHaveValue('0.45')
-  await expect(rhythmSelect).toHaveValue('rock-driving')
+  await expect(rhythmSelect).toHaveValue('rock-double-time')
   await speed.fill('1.25')
-  await expect(rhythmSelect).toHaveValue('rock-driving')
+  await expect(rhythmSelect).toHaveValue('rock-double-time')
 
   await page.getByRole('button', { name: '播放', exact: true }).click()
   await page.getByRole('button', { name: '取消预备' }).click()
@@ -367,7 +378,7 @@ test('opens local chord and note inspectors only after selecting notation', asyn
 
   await page.getByRole('button', { name: /校对第 1 小节/ }).click()
   await expect(page.getByText('和弦校对')).toBeVisible()
-  await expect(page.getByLabel('实际和弦（原调）')).toHaveValue('Em')
+  await expect(page.getByLabel('实际和弦（原调）')).toHaveValue('A')
   await page.getByRole('button', { name: '关闭校谱检查器' }).click()
   await expect(page.locator('.inspector')).toHaveCount(0)
 
@@ -495,7 +506,7 @@ test('switches score parts without fabricating notation', async ({ page }) => {
   await page.getByRole('button', { name: '鼓', exact: true }).click()
   await expect(page.getByText('鼓谱尚未生成')).toBeVisible()
   await page.getByRole('button', { name: '吉他', exact: true }).click()
-  await expect(page.locator('.score-measure')).toHaveCount(64)
+  await expect(page.locator('.score-measure')).toHaveCount(132)
 })
 
 test('recognizes QQ Music as an online import source', async ({ page }) => {
@@ -515,14 +526,14 @@ test('recognizes QQ Music as an online import source', async ({ page }) => {
 test('supports recommended capo, manual position and disabling capo', async ({ page }) => {
   await page.goto('/')
   const capo = page.getByLabel('变调夹位置')
-  await expect(capo).toHaveValue('0')
-  await expect(page.locator('.chord-diagram figcaption').first()).toHaveText('Em')
-  await capo.selectOption('2')
-  await expect(page.locator('.chord-diagram figcaption').first()).toHaveText('Dm')
+  await expect(capo).toHaveValue('2')
+  await expect(page.locator('.chord-diagram figcaption').first()).toHaveText('G')
+  await capo.selectOption('4')
+  await expect(page.locator('.chord-diagram figcaption').first()).toHaveText('F')
 
   await page.getByRole('checkbox').uncheck()
   await expect(capo).toBeDisabled()
-  await expect(page.locator('.chord-diagram figcaption').first()).toHaveText('Em')
+  await expect(page.locator('.chord-diagram figcaption').first()).toHaveText('A')
 })
 
 test('creates a pitch-preserving easy layer and saves an immutable revision', async ({
@@ -547,7 +558,7 @@ test('creates a pitch-preserving easy layer and saves an immutable revision', as
   await expect(page.getByLabel('恢复项目修订')).toBeEnabled()
 })
 
-test('renders the authored beginner opening TAB positions', async ({
+test('renders the generated Country Roads opening TAB positions', async ({
   page,
 }) => {
   await page.goto('/')
@@ -555,36 +566,36 @@ test('renders the authored beginner opening TAB positions', async ({
   const firstMeasure = page.locator('.score-measure').first()
   await expect(firstMeasure.locator('.strum-mark')).toHaveCount(0)
   await expect(firstMeasure.locator('.strum-muted')).toHaveCount(0)
-  await expect(firstMeasure.locator('.tab-glyph')).toHaveCount(5)
-  await expect(firstMeasure.getByRole('button', { name: '6弦0品' })).toHaveCount(1)
-  await expect(firstMeasure.getByRole('button', { name: '5弦2品' })).toHaveCount(1)
-  await expect(firstMeasure.getByRole('button', { name: '4弦2品' })).toHaveCount(2)
-  await expect(firstMeasure.getByRole('button', { name: '2弦0品' })).toHaveCount(1)
+  await expect(firstMeasure.locator('.tab-glyph')).toHaveCount(9)
+  await expect(firstMeasure.getByRole('button', { name: '5弦0品' })).toHaveCount(1)
+  await expect(firstMeasure.getByRole('button', { name: '3弦2品' })).toHaveCount(1)
+  await expect(firstMeasure.getByRole('button', { name: '4弦2品' })).toHaveCount(3)
+  await expect(firstMeasure.getByRole('button', { name: '2弦2品' })).toHaveCount(2)
+  await expect(firstMeasure.getByRole('button', { name: '6弦0品' })).toHaveCount(2)
 })
 
-test('shows the complete authored TAB and playable positions', async ({
+test('shows the complete generated TAB and playable positions', async ({
   page,
 }) => {
   await page.goto('/')
   await expect(
     page.getByRole('heading', {
-      name: 'Wayfaring Stranger',
+      name: 'Take Me Home, Country Roads',
     }),
   ).toBeVisible()
   await page.getByRole('checkbox').uncheck()
   await page.getByRole('button', { name: '完整曲谱' }).click()
-  await expect(page.locator('.score-measure')).toHaveCount(64)
-  await expect(page.locator('.tab-glyph')).toHaveCount(284)
-  await expect(page.getByText('Em', { exact: true }).first()).toBeAttached()
-  await expect(page.getByText('Am', { exact: true }).first()).toBeAttached()
-  await expect(page.getByText('C', { exact: true }).first()).toBeAttached()
-  await expect(page.getByText('G', { exact: true }).first()).toBeAttached()
+  await expect(page.locator('.score-measure')).toHaveCount(132)
+  await expect(page.locator('.tab-glyph')).toHaveCount(1789)
+  await expect(page.getByText('A', { exact: true }).first()).toBeAttached()
+  await expect(page.getByText('A7', { exact: true }).first()).toBeAttached()
   await expect(page.getByText('D', { exact: true }).first()).toBeAttached()
+  await expect(page.getByText('E7', { exact: true }).first()).toBeAttached()
+  await expect(page.getByText('F#m', { exact: true }).first()).toBeAttached()
   await expect(page.locator('.score-review-status')).toContainText('尚未通过独立验证')
-  await expect(page.locator('.technique-connection')).toHaveCount(0)
 
   await page.locator('.score-measure').first().getByRole('button', {
-    name: '6弦0品',
+    name: '5弦0品',
   }).first().click()
   await expect(page.getByText('单音校对')).toBeVisible()
   await expect(page.locator('.inspector')).toBeVisible()

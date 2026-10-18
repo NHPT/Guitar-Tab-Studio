@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs'
 import { resolve } from 'node:path'
@@ -69,6 +70,68 @@ fi
       licenseAccepted: true,
     })
 
+    assert.equal(
+      manager.status().pipeline.find((item) => item.id === 'mr-mt3')
+        ?.selected,
+      false,
+    )
+    assert.equal(manager.workerConfiguration().verificationModel, undefined)
+  } finally {
+    state.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('allows a manual Large override when optional MR-MT3 is unavailable', {
+  skip: process.platform === 'win32' && 'requires a POSIX worker fixture',
+}, async () => {
+  const root = resolve(process.cwd(), 'data', `.test-providers-${randomUUID()}`)
+  const worker = resolve(root, 'worker.sh')
+  const source = resolve(root, 'downloaded-large.safetensors')
+  const noiseRoot = resolve(root, 'providers', 'noise2fret', '1.0.0')
+  mkdirSync(noiseRoot, { recursive: true })
+  writeFileSync(source, 'weights')
+  writeFileSync(resolve(noiseRoot, 'model.pth'), '')
+  truncateSync(resolve(noiseRoot, 'model.pth'), 60_039_447)
+  writeFileSync(
+    resolve(noiseRoot, 'manifest.json'),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      provider: 'noise2fret',
+      version: '1.0.0',
+      sizeBytes: 60_039_447,
+      sha256:
+        '1f454f75e9e6f44d80286e2c13188264b10d09c08fa8bdd791b1c809217bab95',
+      license: 'CC-BY-4.0',
+    })}\n`,
+  )
+  writeFileSync(
+    worker,
+    `#!/bin/sh
+if [ "$1" = "--hardware-probe" ]; then
+  printf '%s\\n' '{"accelerator":"cuda","acceleratorMemoryBytes":17179869184,"providers":{"basic-pitch":true,"muscriptor":true,"mr-mt3":false}}'
+fi
+`,
+  )
+  chmodSync(worker, 0o755)
+  const state = new DesktopStateStore(resolve(root, 'desktop.sqlite'))
+  try {
+    const manager = new DesktopTranscriptionManager(
+      resolve(root, 'providers'),
+      resolve(root, 'cache'),
+      state,
+      () => worker,
+    )
+    await manager.importWeights(source, 'large', true)
+
+    await manager.prepareAndSetPreference({
+      providerId: 'muscriptor',
+      selectionMode: 'manual',
+      variant: 'large',
+      licenseAccepted: true,
+    })
+
+    assert.equal(manager.status().resolvedVariant, 'large')
     assert.equal(
       manager.status().pipeline.find((item) => item.id === 'mr-mt3')
         ?.selected,

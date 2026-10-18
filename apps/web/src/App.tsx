@@ -1503,12 +1503,15 @@ function App({ application = studioApplication }: AppProps) {
   const mrMt3Component = runtimeStatus?.transcription.pipeline.find(
     (component) => component.id === 'mr-mt3',
   )
-  const mrMt3Selected =
+  const mrMt3Requested =
     selectedTranscriptionVariant !== 'small' &&
     runtimeStatus?.transcription.device.accelerator === 'cuda'
+  const mrMt3Selected =
+    mrMt3Requested && mrMt3Component?.runtimeAvailable === true
+  const mrMt3Fallback =
+    mrMt3Requested && mrMt3Component?.runtimeAvailable === false
   const highAccuracyRuntimeAvailable =
-    muscriptorComponent?.runtimeAvailable === true &&
-    (!mrMt3Selected || mrMt3Component?.runtimeAvailable === true)
+    muscriptorComponent?.runtimeAvailable === true
   const highAccuracyDownloadRequired =
     selectedTranscriptionWeightSource === 'download-required' ||
     noise2FretComponent?.ready === false ||
@@ -1539,6 +1542,12 @@ function App({ application = studioApplication }: AppProps) {
     activeHighAccuracyVariant === selectedTranscriptionVariant &&
     highAccuracyRuntimeAvailable &&
     !highAccuracyDownloadRequired
+  const selectedVariantExceedsMemory =
+    transcriptionChoice !== 'auto' &&
+    selectedTranscriptionDescriptor !== undefined &&
+    runtimeStatus !== null &&
+    runtimeStatus.transcription.device.totalMemoryBytes <
+      selectedTranscriptionDescriptor.minimumMemoryBytes
   const guitarSpecialistComponent =
     runtimeStatus?.transcription.pipeline.find(
       (component) => component.id === 'stringtrace',
@@ -3535,10 +3544,7 @@ function App({ application = studioApplication }: AppProps) {
                           '自动档位'
                         }`
                       : !highAccuracyRuntimeAvailable
-                      ? mrMt3Selected &&
-                        mrMt3Component?.runtimeAvailable === false
-                        ? '当前 Worker 未包含 MR-MT3 复核组件'
-                        : '当前 Worker 未包含 MuScriptor 运行组件'
+                      ? '当前 Worker 未包含 MuScriptor 运行组件'
                       : highAccuracyDownloadRequired
                         ? `尚未准备，启用时将从官方模型源下载并校验${
                             highAccuracyDownloadBytes > 0
@@ -3555,6 +3561,16 @@ function App({ application = studioApplication }: AppProps) {
                           ? '推荐档位权重已缓存'
                           : '高精度模型已准备'}
                   </p>
+                  {selectedVariantExceedsMemory ? (
+                    <p className="runtime-warning">
+                      所选档位高于当前硬件建议，仍可手动下载并启用，但分析可能明显变慢或因内存不足失败。
+                    </p>
+                  ) : null}
+                  {mrMt3Fallback ? (
+                    <p className="runtime-warning">
+                      当前 Worker 未包含 MR-MT3，将使用 MuScriptor、Basic Pitch 与 Noise2Fret 完成分析。
+                    </p>
+                  ) : null}
                   {transcriptionProgress &&
                   transcriptionProgress.phase !== 'ready' ? (
                     <div className="runtime-model-progress" aria-live="polite">

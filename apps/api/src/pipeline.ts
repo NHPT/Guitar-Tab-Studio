@@ -11,6 +11,7 @@ import {
   sep,
 } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { StringDecoder } from 'node:string_decoder'
 import {
   guitarGestures,
   detectStandardAudioSignature,
@@ -377,7 +378,9 @@ export function getCapabilities(): CapabilityState {
 
 export function createStudioProject(
   source: SourceDescriptor,
-  title = builtinDemoAnalysis.metadata?.title ?? 'Wayfaring Stranger',
+  title =
+    builtinDemoAnalysis.metadata?.title ??
+    'Take Me Home, Country Roads',
 ): StudioProject {
   const analysis = builtinDemoAnalysis
   const tab = tabFromWorker(analysis)
@@ -821,6 +824,8 @@ export async function executeWorker(
   await new Promise<void>((resolvePromise, rejectPromise) => {
     const environment: NodeJS.ProcessEnv = {
       ...process.env,
+      PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8',
       FFMPEG_BINARY: ffmpegCommand,
       PATH: `${dirname(ffmpegCommand)}${delimiter}${process.env.PATH ?? ''}`,
       XDG_CACHE_HOME:
@@ -873,8 +878,9 @@ export async function executeWorker(
       signal?.removeEventListener('abort', abortHandler)
     }
     let stdout = ''
+    const stdoutDecoder = new StringDecoder('utf8')
     processHandle.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString()
+      stdout += stdoutDecoder.write(chunk)
       const lines = stdout.split(/\r?\n/u)
       stdout = lines.pop() ?? ''
       for (const line of lines) {
@@ -883,8 +889,9 @@ export async function executeWorker(
       }
     })
     let stderr = ''
+    const stderrDecoder = new StringDecoder('utf8')
     processHandle.stderr.on('data', (chunk: Buffer) => {
-      stderr = `${stderr}${chunk.toString()}`.slice(-1200)
+      stderr = `${stderr}${stderrDecoder.write(chunk)}`.slice(-1200)
     })
     processHandle.on('error', (error) => {
       cleanup()
@@ -892,6 +899,12 @@ export async function executeWorker(
     })
     processHandle.on('close', (code) => {
       cleanup()
+      stdout += stdoutDecoder.end()
+      stderr = `${stderr}${stderrDecoder.end()}`.slice(-1200)
+      if (stdout) {
+        const progress = parseWorkerProgress(stdout)
+        if (progress) onProgress?.(progress)
+      }
       if (code === 0) {
         resolvePromise()
       } else {

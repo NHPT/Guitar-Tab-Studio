@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
+import { StringDecoder } from 'node:string_decoder'
 import {
   migrateStudioProject,
   type AnalysisJob,
@@ -132,6 +133,8 @@ export class LocalApiService implements StudioApiTransport {
       env: {
         ...process.env,
         ELECTRON_RUN_AS_NODE: '1',
+        PYTHONUTF8: '1',
+        PYTHONIOENCODING: 'utf-8',
         PORT: String(port),
         GTS_DATA_ROOT: this.options.dataRoot,
         GTS_DESKTOP_LOCAL: '1',
@@ -187,11 +190,19 @@ export class LocalApiService implements StudioApiTransport {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     this.child = child
+    const stdoutDecoder = new StringDecoder('utf8')
+    const stderrDecoder = new StringDecoder('utf8')
     child.stdout?.on('data', (chunk: Buffer) => {
-      process.stdout.write(`[local-api] ${chunk.toString()}`)
+      process.stdout.write(`[local-api] ${stdoutDecoder.write(chunk)}`)
     })
     child.stderr?.on('data', (chunk: Buffer) => {
-      process.stderr.write(`[local-api] ${chunk.toString()}`)
+      process.stderr.write(`[local-api] ${stderrDecoder.write(chunk)}`)
+    })
+    child.once('close', () => {
+      const finalStdout = stdoutDecoder.end()
+      const finalStderr = stderrDecoder.end()
+      if (finalStdout) process.stdout.write(`[local-api] ${finalStdout}`)
+      if (finalStderr) process.stderr.write(`[local-api] ${finalStderr}`)
     })
     await this.waitUntilReady()
   }

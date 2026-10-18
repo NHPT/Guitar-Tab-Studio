@@ -9,34 +9,27 @@ import {
   builtinDemoStemFilenames,
 } from './builtin-demo.js'
 
-test('bundles the deterministic public-domain beginner recording', () => {
+test('bundles the requested NetEase default recording', () => {
   const audio = readFileSync(builtinDemoAudioPath)
-  assert.equal(audio.subarray(0, 4).toString('ascii'), 'RIFF')
-  assert.equal(audio.subarray(8, 12).toString('ascii'), 'WAVE')
-  assert.equal(audio.byteLength, 15_394_954)
+  assert.equal(audio.subarray(0, 3).toString('ascii'), 'ID3')
+  assert.equal(audio.byteLength, 3_107_570)
   assert.equal(
     createHash('sha256').update(audio).digest('hex'),
-    '37e75840946e3bcdece68c1df7dd8f164a53ccd2942e650411f32704a928483e',
+    '0fb7faa72934b35b7f5a3adb65b1ac7cbb49b128692da6fe42c4cc8b90624608',
   )
 })
 
-test('builds the authored beginner TAB analysis', () => {
+test('loads the generated Country Roads TAB analysis', () => {
   const analysis = builtinDemoAnalysis
-  assert.equal(analysis.metadata?.title, 'Wayfaring Stranger')
-  assert.equal(
-    analysis.metadata?.artist,
-    'American Traditional · Guitar Tab Studio 初学编配',
-  )
-  assert.ok(Math.abs(analysis.metadata!.duration! - 174.54545) < 0.001)
-  assert.equal(analysis.bpm, 88)
-  assert.equal(analysis.key, 'E minor')
+  assert.equal(analysis.metadata?.title, 'Take Me Home, Country Roads')
+  assert.equal(analysis.metadata?.artist, 'John Denver')
+  assert.ok(Math.abs(analysis.metadata!.duration! - 194.14667) < 0.001)
+  assert.equal(analysis.bpm, 161.5)
+  assert.equal(analysis.key, 'A major')
   assert.equal(analysis.capo, 0)
-  assert.equal(analysis.chords.length, 64)
-  assert.ok(analysis.notes.length > 200)
-  assert.equal(
-    analysis.transcription_model?.name,
-    'authored-beginner-arrangement',
-  )
+  assert.equal(analysis.chords.length, 130)
+  assert.equal(analysis.notes.length, 1789)
+  assert.equal(analysis.transcription_model?.name, 'spotify-basic-pitch')
   assert.ok(
     analysis.notes.every(
       (note) =>
@@ -44,7 +37,8 @@ test('builds the authored beginner TAB analysis', () => {
         note.string <= 6 &&
         note.fret >= 0 &&
         note.fret <= 24 &&
-        note.confidence === 1 &&
+        note.confidence >= 0 &&
+        note.confidence <= 1 &&
         note.pitch ===
           ({ 1: 64, 2: 59, 3: 55, 4: 50, 5: 45, 6: 40 } as const)[
             note.string
@@ -54,7 +48,7 @@ test('builds the authored beginner TAB analysis', () => {
   )
 })
 
-test('publishes independent authored guitar and guide-vocal tracks', () => {
+test('publishes independent M4A stems and separated guitar parts', () => {
   const guitar = readFileSync(
     builtinDemoMediaPaths.get(builtinDemoStemFilenames.guitar)!,
   )
@@ -67,11 +61,13 @@ test('publishes independent authored guitar and guide-vocal tracks', () => {
   )
   assert.equal(
     createHash('sha256').update(vocals).digest('hex'),
-    '8bc008b2badbad083b46ab95977ab51466049ee6abf0a479fc0a48a0cec627be',
+    '05a349e17268dafc12e1b780542bb2e930fcdc29f9c53493c37475f37d880c75',
   )
-  for (const media of [guitar, vocals]) {
-    assert.equal(media.subarray(0, 4).toString('ascii'), 'RIFF')
-    assert.equal(media.subarray(8, 12).toString('ascii'), 'WAVE')
+  for (const media of builtinDemoMediaPaths.values()) {
+    const contents = readFileSync(media)
+    if (contents.subarray(0, 3).toString('ascii') === 'ID3') continue
+    assert.equal(contents.subarray(4, 8).toString('ascii'), 'ftyp')
   }
-  assert.equal(builtinDemoAnalysis.stem_tracks, undefined)
+  assert.equal(builtinDemoAnalysis.stem_tracks?.length, 2)
+  assert.equal(builtinDemoMediaPaths.size, 9)
 })

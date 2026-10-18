@@ -278,6 +278,12 @@ export async function importScoreImages(
       [script, ...argumentsList, '--name', filename],
       {
         cwd: repositoryRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PYTHONUTF8: '1',
+          PYTHONIOENCODING: 'utf-8',
+        },
         timeout: 2 * 60_000,
         maxBuffer: 8 * 1024 * 1024,
       },

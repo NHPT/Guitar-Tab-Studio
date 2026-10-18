@@ -238,24 +238,17 @@ def release_torch_accelerator_cache() -> None:
         pass
 
 
+def configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def hardware_probe() -> dict[str, object]:
     def available(module: str) -> bool:
         try:
-            parts = module.split(".")
-            root_spec = importlib.util.find_spec(parts[0])
-            if root_spec is None:
-                return False
-            if len(parts) == 1:
-                return True
-            locations = root_spec.submodule_search_locations
-            if locations is None:
-                return False
-            relative = Path(*parts[1:])
-            return any(
-                (Path(location) / relative).is_dir()
-                or (Path(location) / relative).with_suffix(".py").is_file()
-                for location in locations
-            )
+            return importlib.util.find_spec(module) is not None
         except (ImportError, ModuleNotFoundError):
             return False
 
@@ -497,9 +490,11 @@ def prepare_transcription_provider(
         if model_variant in {"small", "medium", "large"}
         else model if model in {"small", "medium", "large"} else "medium"
     )
+    probe = hardware_probe()
     if (
         selected_variant != "small"
-        and hardware_probe()["accelerator"] == "cuda"
+        and probe["accelerator"] == "cuda"
+        and bool(probe["providers"].get("mr-mt3"))
     ):
         prepare_mr_mt3_model()
     emit_model_event(
@@ -3780,6 +3775,7 @@ def json_default(value: object) -> object:
 
 
 def main() -> None:
+    configure_utf8_stdio()
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--hardware-probe",

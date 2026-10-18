@@ -172,7 +172,10 @@ class RuntimeGuardTest(unittest.TestCase):
                 patch("worker.prepare_mr_mt3_model") as prepare_mr_mt3,
                 patch(
                     "worker.hardware_probe",
-                    return_value={"accelerator": "mps"},
+                    return_value={
+                        "accelerator": "mps",
+                        "providers": {"mr-mt3": True},
+                    },
                 ),
                 patch("sys.stdout", new_callable=StringIO),
             ):
@@ -188,7 +191,10 @@ class RuntimeGuardTest(unittest.TestCase):
                 patch("worker.prepare_mr_mt3_model") as prepare_mr_mt3,
                 patch(
                     "worker.hardware_probe",
-                    return_value={"accelerator": "cuda"},
+                    return_value={
+                        "accelerator": "cuda",
+                        "providers": {"mr-mt3": True},
+                    },
                 ),
                 patch("sys.stdout", new_callable=StringIO),
             ):
@@ -198,6 +204,25 @@ class RuntimeGuardTest(unittest.TestCase):
                     "medium",
                 )
             prepare_mr_mt3.assert_called_once_with()
+
+            with (
+                patch("worker.prepare_noise2fret_model"),
+                patch("worker.prepare_mr_mt3_model") as prepare_mr_mt3,
+                patch(
+                    "worker.hardware_probe",
+                    return_value={
+                        "accelerator": "cuda",
+                        "providers": {"mr-mt3": False},
+                    },
+                ),
+                patch("sys.stdout", new_callable=StringIO),
+            ):
+                prepare_transcription_provider(
+                    "muscriptor",
+                    str(weight),
+                    "large",
+                )
+            prepare_mr_mt3.assert_not_called()
 
     def test_prepares_remote_muscriptor_weights_before_activation(self) -> None:
         with (

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import test from 'node:test'
@@ -63,6 +63,77 @@ test('accepts only structured worker progress and caps incomplete jobs below 100
     ),
     null,
   )
+})
+
+test('preserves UTF-8 progress text split across worker output chunks', {
+  skip: process.platform === 'win32' && 'requires an executable script fixture',
+}, async () => {
+  const root = resolve(process.cwd(), 'data', `.test-worker-${randomUUID()}`)
+  const worker = resolve(root, 'worker.mjs')
+  mkdirSync(root, { recursive: true })
+  writeFileSync(
+    worker,
+    `#!/usr/bin/env node
+const line = Buffer.from('{"type":"gts-progress","progress":65,"status":"transcribing","stageLabel":"正在分析中文曲名"}\\n')
+const marker = line.indexOf(Buffer.from('正在'))
+process.stdout.write(line.subarray(0, marker + 1))
+setTimeout(() => process.stdout.write(line.subarray(marker + 1)), 20)
+`,
+  )
+  chmodSync(worker, 0o755)
+  const progress: Array<{ stageLabel: string }> = []
+  try {
+    await executeWorker(
+      worker,
+      process.execPath,
+      [],
+      resolve(root, 'output'),
+      undefined,
+      undefined,
+      5_000,
+      (event) => progress.push(event),
+    )
+    assert.equal(progress[0]?.stageLabel, '正在分析中文曲名')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('preserves UTF-8 worker errors split across stderr chunks', {
+  skip: process.platform === 'win32' && 'requires an executable script fixture',
+}, async () => {
+  const root = resolve(process.cwd(), 'data', `.test-worker-${randomUUID()}`)
+  const worker = resolve(root, 'worker.mjs')
+  mkdirSync(root, { recursive: true })
+  writeFileSync(
+    worker,
+    `#!/usr/bin/env node
+const line = Buffer.from('RuntimeError: 模型加载失败\\n')
+const marker = line.indexOf(Buffer.from('模型'))
+process.stderr.write(line.subarray(0, marker + 1))
+setTimeout(() => {
+  process.stderr.write(line.subarray(marker + 1))
+  process.exitCode = 1
+}, 20)
+`,
+  )
+  chmodSync(worker, 0o755)
+  try {
+    await assert.rejects(
+      executeWorker(
+        worker,
+        process.execPath,
+        [],
+        resolve(root, 'output'),
+        undefined,
+        undefined,
+        5_000,
+      ),
+      /模型加载失败/u,
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('normalizes the selected transcription provider into worker arguments', () => {
@@ -168,27 +239,27 @@ test('rejects unsupported or malformed URLs', () => {
   assert.throws(() => sourceFromLink('https://example.com/song'))
 })
 
-test('demo project uses the public-domain beginner recording and authored TAB', () => {
+test('demo project uses the requested Country Roads recording and generated TAB', () => {
   const project = createStudioProject({
-    kind: 'upload',
-    label: '测试',
-    filename: 'sample.wav',
+    kind: 'netease',
+    label: 'John Denver · Take Me Home, Country Roads',
+    url: 'https://music.163.com/#/song?id=1478037',
   })
 
   assert.equal(project.schemaVersion, 1)
-  assert.equal(project.tab.measures.length, 64)
-  assert.equal(project.tracks.length, 6)
-  assert.equal(project.visualization, undefined)
-  assert.equal(project.title, 'Wayfaring Stranger')
+  assert.ok(project.tab.measures.length > 100)
+  assert.equal(project.tracks.length, 7)
+  assert.ok(project.visualization)
+  assert.equal(project.title, 'Take Me Home, Country Roads')
+  assert.equal(project.artist, 'John Denver')
+  assert.equal(project.bpm, 161.5)
+  assert.equal(project.key, 'A major')
+  assert.equal(project.transcriptionModel?.version, '0.4')
   assert.equal(
-    project.artist,
-    'American Traditional · Guitar Tab Studio 初学编配',
+    project.techniqueModel?.name,
+    'unreviewed-technique-candidates',
   )
-  assert.equal(project.bpm, 88)
-  assert.equal(project.key, 'E minor')
-  assert.equal(project.transcriptionModel?.version, '1')
-  assert.equal(project.techniqueModel?.name, 'authored-techniques')
-  assert.ok(Math.abs(project.duration - 174.54545) < 0.001)
+  assert.ok(Math.abs(project.duration - 194.14667) < 0.001)
   assert.equal(project.tab.capo, 0)
   assert.deepEqual(
     project.tab.measures.flatMap((measure) =>
@@ -200,7 +271,7 @@ test('demo project uses the public-domain beginner recording and authored TAB', 
   )
   assert.deepEqual(
     [...new Set(project.tab.measures.map((measure) => measure.chord))].sort(),
-    ['Am', 'B7', 'C', 'D', 'Em', 'G'],
+    ['A', 'A7', 'B7', 'C#m', 'D', 'D7', 'E', 'E7', 'F#7', 'F#m', 'N.C.'],
   )
   assert.ok(
     project.tab.measures.flatMap((measure) =>
@@ -211,19 +282,19 @@ test('demo project uses the public-domain beginner recording and authored TAB', 
     project.tracks
       .filter((track) => track.available)
       .map((track) => track.id),
-    ['vocals', 'guitar'],
+    ['vocals', 'guitar-1', 'guitar-2', 'bass', 'drums', 'piano', 'other'],
   )
   assert.equal(
     project.tracks.find((track) => track.role === 'vocals')?.url,
-    '/media/builtin/wayfaring-stranger-guide-vocals.wav',
+    '/media/builtin/take-me-home-country-roads-vocals.m4a',
   )
   assert.equal(
     project.tracks.find((track) => track.role === 'vocals')?.available,
     true,
   )
   assert.equal(
-    project.tracks.find((track) => track.id === 'guitar')?.url,
-    '/media/builtin/wayfaring-stranger-beginner.wav',
+    project.tracks.find((track) => track.id === 'guitar-1')?.url,
+    '/media/builtin/take-me-home-country-roads-guitar-1.m4a',
   )
   assert.ok(
     project.tab.measures.every((measure) =>
@@ -235,7 +306,8 @@ test('demo project uses the public-domain beginner recording and authored TAB', 
             note.string >= 1 &&
             note.string <= 6 &&
             (note.positionConfidence ?? 0) > 0 &&
-            note.confidence === 1,
+            note.confidence >= 0 &&
+            note.confidence <= 1,
         ),
       ),
     ),
@@ -250,7 +322,7 @@ test('demo project uses the public-domain beginner recording and authored TAB', 
       measure.beats.flatMap((beat) => beat.notes.map((note) => note.technique)),
     ),
   )
-  assert.ok(techniques.has('pick'))
+  assert.ok(techniques.has('unknown'))
   assert.ok(project.tab.measures.every((measure) =>
     measure.beats.every((beat) =>
       beat.notes.every((note) =>

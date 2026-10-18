@@ -18,6 +18,7 @@ import { basename, dirname, resolve } from 'node:path'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { StringDecoder } from 'node:string_decoder'
 import {
   filterTranscriptionProviders,
   recommendTranscriptionVariant,
@@ -122,6 +123,11 @@ function safeProbe(workerCommand?: string): WorkerHardwareProbe {
   if (!workerCommand || !existsSync(workerCommand)) return {}
   const result = spawnSync(workerCommand, ['--hardware-probe'], {
     encoding: 'utf8',
+    env: {
+      ...process.env,
+      PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8',
+    },
     timeout: 30_000,
     maxBuffer: 1024 * 1024,
   })
@@ -232,10 +238,11 @@ export class DesktopTranscriptionManager {
         : undefined
     const pipelineVariant =
       resolvedVariant ?? recommendation.variant
-    const verificationSelected = shouldUseMrMt3(
-      pipelineVariant,
-      probe.device.accelerator,
-    )
+    const verificationSelected =
+      shouldUseMrMt3(
+        pipelineVariant,
+        probe.device.accelerator,
+      ) && probe.mrMt3Available
     const weightSource =
       preference.providerId === 'guitar-specialist'
         ? this.guitarModelPath()
@@ -431,13 +438,11 @@ export class DesktopTranscriptionManager {
         : status.recommendation.variant
     if (!variants.has(variant)) throw new Error('未知的模型档位')
     const probe = this.probe()
-    const verificationSelected = shouldUseMrMt3(
-      variant,
-      probe.device.accelerator,
-    )
-    if (verificationSelected && !probe.mrMt3Available) {
-      throw new Error('当前 Worker 未包含 MR-MT3 复核组件')
-    }
+    const verificationSelected =
+      shouldUseMrMt3(
+        variant,
+        probe.device.accelerator,
+      ) && probe.mrMt3Available
     if (
       this.weightSource(input.providerId, variant) === 'download-required' ||
       !this.noise2FretWeightPath() ||
@@ -745,10 +750,12 @@ export class DesktopTranscriptionManager {
     })
     const disk = statfsSync(this.cacheRoot)
     const availableBytes = disk.bavail * disk.bsize
-    const verificationSelected = shouldUseMrMt3(
-      variant,
-      this.probe().device.accelerator,
-    )
+    const probe = this.probe()
+    const verificationSelected =
+      shouldUseMrMt3(
+        variant,
+        probe.device.accelerator,
+      ) && probe.mrMt3Available
     const requiredDownloadBytes =
       (this.weightSource('muscriptor', variant) === 'download-required'
         ? descriptor.weightSizeBytes
@@ -855,6 +862,8 @@ export class DesktopTranscriptionManager {
         {
           env: {
             ...process.env,
+            PYTHONUTF8: '1',
+            PYTHONIOENCODING: 'utf-8',
             HF_HOME: dirname(this.cacheRoot),
             HF_HUB_CACHE: this.cacheRoot,
             GTS_MODEL_PROVIDER_ROOT: this.root,
@@ -870,6 +879,8 @@ export class DesktopTranscriptionManager {
       this.activePreparation = activePreparation
       let stderr = ''
       let stdout = ''
+      const stdoutDecoder = new StringDecoder('utf8')
+      const stderrDecoder = new StringDecoder('utf8')
       const handleLine = (line: string) => {
         if (!line.trim()) return
         try {
@@ -915,7 +926,7 @@ export class DesktopTranscriptionManager {
         }
       }
       child.stdout.on('data', (chunk: Buffer) => {
-        stdout += chunk.toString()
+        stdout += stdoutDecoder.write(chunk)
         const lines = stdout.split(/\r?\n/u)
         stdout = lines.pop() ?? ''
         for (const line of lines) handleLine(line)
@@ -927,7 +938,7 @@ export class DesktopTranscriptionManager {
         )
       }, 2 * 60 * 60 * 1000)
       child.stderr.on('data', (chunk: Buffer) => {
-        stderr = `${stderr}${chunk.toString()}`.slice(-8000)
+        stderr = `${stderr}${stderrDecoder.write(chunk)}`.slice(-8000)
       })
       child.on('error', (error) => {
         clearTimeout(timeout)
@@ -941,6 +952,8 @@ export class DesktopTranscriptionManager {
         if (this.activePreparation === activePreparation) {
           this.activePreparation = undefined
         }
+        stdout += stdoutDecoder.end()
+        stderr = `${stderr}${stderrDecoder.end()}`.slice(-8000)
         handleLine(stdout)
         if (activePreparation.cancelled) {
           rejectPromise(
@@ -959,7 +972,9 @@ export class DesktopTranscriptionManager {
               (!shouldUseMrMt3(
                 muscriptorVariant,
                 this.probe().device.accelerator,
-              ) || this.mrMt3WeightPath())
+              ) ||
+                !this.probe().mrMt3Available ||
+                this.mrMt3WeightPath())
             : Boolean(
                 this.yourMt3WeightPath() &&
                   this.noise2FretWeightPath(),

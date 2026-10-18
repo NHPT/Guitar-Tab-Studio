@@ -21,8 +21,7 @@ extraResources:
   - from: ../api/assets
     to: api/assets
     filter:
-      - "wayfaring-stranger-beginner*"
-      - "wayfaring-stranger-guide-vocals.wav"
+      - "take-me-home-country-roads*"
   - from: build-resources/sidecar
     to: sidecar
     filter:

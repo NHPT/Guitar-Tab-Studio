@@ -17,7 +17,6 @@ import {
   type ProjectRevisionKind,
   type RevisionRepository,
 } from '@gts/core'
-import { builtinDemoAudioFilename } from './builtin-demo.js'
 import { PipelineInferenceProvider } from './inference.js'
 import { createStudioProject } from './pipeline.js'
 import { runtimeDataRoot } from './runtime.js'
@@ -169,9 +168,9 @@ const defaultInferenceProvider = new PipelineInferenceProvider()
 
 const demo = createStudioProject(
   {
-    kind: 'upload',
-    label: '公共领域 · 原创初学编配',
-    filename: builtinDemoAudioFilename,
+    kind: 'netease',
+    label: 'John Denver · Take Me Home, Country Roads',
+    url: 'https://music.163.com/#/song?id=1478037',
   },
 )
 

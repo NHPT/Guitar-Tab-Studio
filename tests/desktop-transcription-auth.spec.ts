@@ -63,11 +63,25 @@ test('recovers from a closed transcription authorization page', async ({
           bundled: false,
           variants: [
             {
+              id: 'small',
+              label: 'Small',
+              parameterCount: '103M',
+              weightSizeBytes: 440_000_000,
+              minimumMemoryBytes: 8 * 1024 ** 3,
+            },
+            {
               id: 'medium',
               label: 'Medium',
               parameterCount: '307M',
               weightSizeBytes: 1_320_000_000,
               minimumMemoryBytes: 16 * 1024 ** 3,
+            },
+            {
+              id: 'large',
+              label: 'Large',
+              parameterCount: '1.4B',
+              weightSizeBytes: 5_870_000_000,
+              minimumMemoryBytes: 32 * 1024 ** 3,
             },
           ],
         },
@@ -95,15 +109,16 @@ test('recovers from a closed transcription authorization page', async ({
         selectionMode: 'auto',
       },
       recommendation: {
-        variant: 'medium',
-        reason: 'Test hardware',
+        variant: 'small',
+        reason: '当前可用内存更适合 Small',
       },
       device: {
-        platform: 'darwin',
-        arch: 'arm64',
-        totalMemoryBytes: 32 * 1024 ** 3,
+        platform: 'win32',
+        arch: 'x64',
+        totalMemoryBytes: 16 * 1024 ** 3,
         logicalCpuCount: 8,
-        accelerator: 'mps',
+        accelerator: 'cuda',
+        acceleratorMemoryBytes: 8 * 1024 ** 3,
       },
       variantWeights: {
         small: 'download-required',
@@ -132,8 +147,8 @@ test('recovers from a closed transcription authorization page', async ({
           id: 'mr-mt3',
           label: 'MR-MT3',
           role: 'event-verification',
-          selected: true,
-          runtimeAvailable: true,
+          selected: false,
+          runtimeAvailable: false,
           ready: false,
           weightSizeBytes: 183_672_643,
         },
@@ -284,12 +299,11 @@ test('recovers from a closed transcription authorization page', async ({
                   licenseAcceptedAt: '2026-10-17T00:00:00.000Z',
                   licenseAcceptedVersion: 'CC-BY-NC-4.0',
                 }
-                transcription.variantWeights.medium = 'managed-cache'
+                transcription.variantWeights.small = 'managed-cache'
                 transcription.weightSource = 'managed-cache'
                 transcription.pipeline.forEach((component) => {
                   if (
                     component.id === 'muscriptor' ||
-                    component.id === 'mr-mt3' ||
                     component.id === 'noise2fret'
                   ) {
                     component.ready = true
@@ -429,21 +443,26 @@ test('recovers from a closed transcription authorization page', async ({
   ).toBeEnabled()
 
   await dialog.getByRole('button', { name: '下载并启用' }).click()
-  await expect(dialog.getByText('已启用高精度 · MEDIUM')).toBeVisible()
+  await expect(dialog.getByText('已启用高精度 · SMALL')).toBeVisible()
   await expect(
     dialog.getByRole('button', { name: '高精度已启用' }),
   ).toBeDisabled()
 
   await dialog.getByLabel('模型档位').selectOption('medium')
-  await expect(dialog.getByText('已启用高精度 · MEDIUM')).toBeVisible()
   await expect(
-    dialog.getByRole('button', { name: '高精度已启用' }),
-  ).toBeDisabled()
+    dialog.getByRole('button', { name: '下载并启用' }),
+  ).toBeEnabled()
+  await expect(
+    dialog.getByText(/当前 Worker 未包含 MR-MT3/u),
+  ).toBeVisible()
 
   await dialog.getByLabel('模型档位').selectOption('large')
   await expect(
     dialog.getByRole('button', { name: '下载并启用' }),
   ).toBeEnabled()
+  await expect(
+    dialog.getByText(/所选档位高于当前硬件建议/u),
+  ).toBeVisible()
 
   await dialog.getByLabel('转录方案').selectOption('guitar-specialist')
   await expect(
