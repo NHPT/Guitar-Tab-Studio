@@ -1,4 +1,4 @@
-# Guitar Tab Studio v0.1.0-preview.7
+# Guitar Tab Studio v0.1.0-preview.8
 
 This is the first public desktop preview for macOS Apple Silicon and Windows
 x64. It is intended for functional testing and early feedback, not production
@@ -20,6 +20,11 @@ model evaluation.
   the Basic Pitch and string/fret review stages instead of appearing stalled.
 - Worker progress, score-import output and analysis errors now use explicit
   UTF-8 decoding on Windows, including messages split across process chunks.
+- Packaged desktop workers now launch the bundled Demucs and yt-dlp modules
+  through internal entry points, fixing immediate process exits during audio
+  separation and URL acquisition.
+- Audio separation errors now distinguish disk-space, memory, model-network
+  and missing-runtime failures instead of returning only a generic exit error.
 - Preview builds now follow the GitHub prerelease update channel instead of
   incorrectly reporting that no preview update is available.
 - The Help menu now shows the exact installed application version.

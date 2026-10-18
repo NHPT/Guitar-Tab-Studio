@@ -26,6 +26,7 @@ from worker import (
     natural_harmonic_positions,
     normalize_audio,
     parse_timed_lyric_text,
+    python_module_command,
     prepare_mr_mt3_model,
     prepare_noise2fret_model,
     prepare_transcription_provider,
@@ -66,6 +67,20 @@ def note(
 
 
 class RuntimeGuardTest(unittest.TestCase):
+    def test_packaged_module_commands_reenter_the_frozen_worker(self) -> None:
+        with (
+            patch("worker.sys.frozen", True, create=True),
+            patch("worker.sys.executable", "guitar-tab-worker.exe"),
+        ):
+            self.assertEqual(
+                python_module_command("demucs.separate"),
+                ["guitar-tab-worker.exe", "--internal-demucs"],
+            )
+            self.assertEqual(
+                python_module_command("yt_dlp"),
+                ["guitar-tab-worker.exe", "--internal-yt-dlp"],
+            )
+
     def test_downloads_and_verifies_mr_mt3_checkpoint_atomically(
         self,
     ) -> None:
@@ -569,6 +584,29 @@ class RuntimeGuardTest(unittest.TestCase):
             ):
                 run_with_percent_progress(
                     ["python", "-m", "demucs.separate"],
+                    start=22,
+                    end=50,
+                    status="separating",
+                    stage_label="正在分离人声与乐器",
+                )
+
+    def test_packaged_demucs_reports_a_missing_runtime_component(self) -> None:
+        process = SimpleNamespace(
+            stderr=StringIO(
+                "ModuleNotFoundError: No module named 'demucs.audio'\n"
+            ),
+            wait=lambda: 1,
+        )
+        with (
+            patch("worker.subprocess.Popen", return_value=process),
+            patch("sys.stderr"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "音轨分离组件缺失或损坏",
+            ):
+                run_with_percent_progress(
+                    ["guitar-tab-worker.exe", "--internal-demucs"],
                     start=22,
                     end=50,
                     status="separating",

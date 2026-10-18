@@ -789,14 +789,45 @@ def run_with_percent_progress(
         )
     return_code = process.wait()
     if return_code != 0:
+        error_text = "".join(error_tail)
         if return_code in {28, 228} or re.search(
             r"no space left on device|errno\s*28",
-            "".join(error_tail),
+            error_text,
             re.IGNORECASE,
         ):
             raise RuntimeError("可用磁盘空间不足，外部媒体处理命令未能完成")
-        if "demucs.separate" in command:
-            raise RuntimeError("音轨分离进程异常退出")
+        if any(
+            entry in command
+            for entry in ("demucs.separate", "--internal-demucs")
+        ):
+            if return_code in {-9, 137, 3221225495} or re.search(
+                r"out of memory|cannot allocate memory|bad_alloc|killed",
+                error_text,
+                re.IGNORECASE,
+            ):
+                raise RuntimeError(
+                    "音轨分离内存不足，请关闭其他大型程序后重试"
+                )
+            if re.search(
+                r"http error|url error|connection|timed out|ssl|download",
+                error_text,
+                re.IGNORECASE,
+            ):
+                raise RuntimeError(
+                    "Demucs 模型下载或加载失败，请检查网络和系统代理后重试"
+                )
+            if re.search(
+                r"no module named|modulenotfounderror|dll load failed|"
+                r"winerror\s*126",
+                error_text,
+                re.IGNORECASE,
+            ):
+                raise RuntimeError(
+                    "音轨分离组件缺失或损坏，请重新安装当前版本"
+                )
+            raise RuntimeError(
+                f"音轨分离进程异常退出（代码 {return_code}）"
+            )
         raise RuntimeError(
             f"Command failed ({return_code}): {' '.join(command)}"
         )
@@ -807,6 +838,35 @@ def require_command(command: str) -> str:
     if not resolved:
         raise RuntimeError(f"Required executable is unavailable: {command}")
     return resolved
+
+
+def python_module_command(module: str) -> list[str]:
+    if not getattr(sys, "frozen", False):
+        return [sys.executable, "-m", module]
+    internal_entrypoints = {
+        "demucs.separate": "--internal-demucs",
+        "yt_dlp": "--internal-yt-dlp",
+    }
+    entrypoint = internal_entrypoints.get(module)
+    if not entrypoint:
+        raise RuntimeError(f"Packaged module entrypoint is unavailable: {module}")
+    return [sys.executable, entrypoint]
+
+
+def run_internal_module() -> bool:
+    if len(sys.argv) < 2:
+        return False
+    if sys.argv[1] == "--internal-demucs":
+        from demucs.separate import main as demucs_main
+
+        demucs_main(sys.argv[2:])
+        return True
+    if sys.argv[1] == "--internal-yt-dlp":
+        import yt_dlp
+
+        yt_dlp.main(sys.argv[2:])
+        return True
+    return False
 
 
 def ffmpeg_command() -> str:
@@ -839,9 +899,7 @@ def acquire_url(url: str, destination: Path) -> tuple[Path, dict[str, object]]:
         session_options.extend(["--user-agent", user_agent])
     run(
         [
-            sys.executable,
-            "-m",
-            "yt_dlp",
+            *python_module_command("yt_dlp"),
             "--no-config",
             "--no-playlist",
             "--no-cache-dir",
@@ -1193,9 +1251,7 @@ def separate_audio(source: Path, destination: Path) -> dict[str, Path]:
             "可用磁盘空间不足，无法安全完成六轨音频分离"
         )
     command = [
-        sys.executable,
-        "-m",
-        "demucs.separate",
+        *python_module_command("demucs.separate"),
         "-n",
         "htdemucs_6s",
         "--out",
@@ -3776,6 +3832,8 @@ def json_default(value: object) -> object:
 
 def main() -> None:
     configure_utf8_stdio()
+    if run_internal_module():
+        return
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--hardware-probe",
