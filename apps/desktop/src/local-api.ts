@@ -425,7 +425,14 @@ export class LocalApiService implements StudioApiTransport {
     init?: RequestInit,
   ): Promise<T> {
     if (!this.root) throw new Error('Local API is not running')
-    const response = await fetch(`${this.root}${path}`, init)
+    let response: Response
+    try {
+      response = await fetch(`${this.root}${path}`, init)
+    } catch {
+      throw new Error(
+        '本地分析服务未响应。请完全退出应用后重新打开；若仍失败，请导出诊断信息。',
+      )
+    }
     const body = (await response.json()) as T & { error?: string }
     if (!response.ok) {
       throw new Error(body.error ?? `Local API request failed (${response.status})`)

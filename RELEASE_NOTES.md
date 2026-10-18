@@ -1,4 +1,4 @@
-# Guitar Tab Studio v0.1.0-preview.6
+# Guitar Tab Studio v0.1.0-preview.7
 
 This is the first public desktop preview for macOS Apple Silicon and Windows
 x64. It is intended for functional testing and early feedback, not production
@@ -23,6 +23,10 @@ model evaluation.
 - Preview builds now follow the GitHub prerelease update channel instead of
   incorrectly reporting that no preview update is available.
 - The Help menu now shows the exact installed application version.
+- Hugging Face OAuth token exchange now uses Electron's system network stack,
+  and model download workers inherit the resolved Windows/macOS system proxy.
+- OAuth connectivity and local API restart failures now report distinct,
+  actionable errors instead of the opaque `TypeError: fetch failed`.
 - Hugging Face public OAuth with PKCE for gated model access. No client secret
   is stored in the application.
 - The built-in project is now John Denver's `Take Me Home, Country Roads` from
@@ -41,9 +45,9 @@ model evaluation.
   package and may take several minutes.
 - The built-in TAB and technique candidates are generated analysis results and
   have not been manually verified against the production quality gate.
-- Preview.5 and earlier must install Preview.6 manually once. Their updater
-  excluded prerelease releases; automatic preview updates work after this
-  upgrade.
+- Preview.5 and earlier must install Preview.6 or newer manually once. Their
+  updater excluded prerelease releases; automatic preview updates work after
+  that upgrade.
 
 ## Downloads
 

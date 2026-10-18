@@ -1,7 +1,7 @@
 {
   "name": "@gts/core",
   "private": true,
-  "version": "0.1.0-preview.6",
+  "version": "0.1.0-preview.7",
   "type": "module",
   "exports": {
     ".": {

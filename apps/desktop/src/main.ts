@@ -8,6 +8,7 @@ import {
   dialog,
   ipcMain,
   Menu,
+  net,
   safeStorage,
   screen,
   session,
@@ -46,6 +47,7 @@ import { DesktopMaintenance } from './maintenance.js'
 import { HuggingFaceOAuth } from './huggingface-oauth.js'
 import { ModelPackageManager } from './model-packages.js'
 import { DesktopTranscriptionManager } from './model-providers.js'
+import { proxyEnvironmentFromRule } from './network-proxy.js'
 import { RemoteApiService } from './remote-api.js'
 import { DesktopStateStore, type WindowState } from './state.js'
 import { DesktopUpdater } from './updater.js'
@@ -138,6 +140,20 @@ function runtimePaths() {
     webEntry: resolve(process.resourcesPath, 'web/index.html'),
     workerCommand: existsSync(packagedWorker) ? packagedWorker : undefined,
     ffmpegBinary: existsSync(packagedFfmpeg) ? packagedFfmpeg : undefined,
+  }
+}
+
+async function modelDownloadNetworkEnvironment(): Promise<NodeJS.ProcessEnv> {
+  try {
+    const rule = await session.defaultSession.resolveProxy(
+      'https://huggingface.co',
+    )
+    return proxyEnvironmentFromRule(
+      rule,
+      process.env.NO_PROXY ?? process.env.no_proxy,
+    )
+  } catch {
+    return {}
   }
 }
 
@@ -1205,6 +1221,8 @@ async function startDesktop(): Promise<void> {
       encrypt: (value) => safeStorage.encryptString(value),
       decrypt: (value) => safeStorage.decryptString(value),
     },
+    (input, init) =>
+      net.fetch(input instanceof URL ? input.toString() : input, init),
   )
   transcriptionManager = new DesktopTranscriptionManager(
     resolve(app.getPath('userData'), 'transcription-providers'),
@@ -1224,6 +1242,7 @@ async function startDesktop(): Promise<void> {
     () =>
       stateStore?.huggingFaceOAuthClientId() ??
       process.env.GTS_HF_OAUTH_CLIENT_ID,
+    modelDownloadNetworkEnvironment,
   )
   const cloudApiRoot =
     stateStore.cloudApiRoot() ?? process.env.GTS_CLOUD_API_ROOT

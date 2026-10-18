@@ -207,6 +207,8 @@ export class DesktopTranscriptionManager {
     ) => Promise<string>,
     private readonly oauthClientId: () => string | undefined = () =>
       undefined,
+    private readonly networkEnvironment: () => Promise<NodeJS.ProcessEnv> =
+      async () => ({}),
   ) {
     mkdirSync(root, { recursive: true })
     mkdirSync(cacheRoot, { recursive: true })
@@ -855,6 +857,7 @@ export class DesktopTranscriptionManager {
     if (!command || !existsSync(command)) {
       throw new Error('本地推理 Worker 不可用，无法准备模型')
     }
+    const networkEnvironment = await this.networkEnvironment()
     await new Promise<void>((resolvePromise, rejectPromise) => {
       const child = spawn(
         command,
@@ -862,6 +865,7 @@ export class DesktopTranscriptionManager {
         {
           env: {
             ...process.env,
+            ...networkEnvironment,
             PYTHONUTF8: '1',
             PYTHONIOENCODING: 'utf-8',
             HF_HOME: dirname(this.cacheRoot),

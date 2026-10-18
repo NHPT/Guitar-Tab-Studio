@@ -276,6 +276,7 @@ if [ "$1" = "--hardware-probe" ]; then
   printf '%s\\n' '{"accelerator":"mps","providers":{"basic-pitch":true,"muscriptor":true,"mr-mt3":true}}'
   exit 0
 fi
+[ "$HTTPS_PROXY" = "http://127.0.0.1:7890" ] || exit 2
 mkdir -p "$GTS_MODEL_PROVIDER_ROOT/noise2fret/1.0.0"
 dd if=/dev/zero of="$GTS_MODEL_PROVIDER_ROOT/noise2fret/1.0.0/model.pth" bs=1 count=0 seek=60039447 2>/dev/null
 printf '%s\\n' '{"schemaVersion":1,"provider":"noise2fret","version":"1.0.0","sizeBytes":60039447,"sha256":"1f454f75e9e6f44d80286e2c13188264b10d09c08fa8bdd791b1c809217bab95","license":"CC-BY-4.0"}' > "$GTS_MODEL_PROVIDER_ROOT/noise2fret/1.0.0/manifest.json"
@@ -289,6 +290,13 @@ printf '%s\\n' '{"schemaVersion":1,"provider":"noise2fret","version":"1.0.0","si
       cache,
       state,
       () => worker,
+      () => undefined,
+      () => undefined,
+      undefined,
+      () => undefined,
+      async () => ({
+        HTTPS_PROXY: 'http://127.0.0.1:7890',
+      }),
     )
     await manager.importWeights(source, 'small', true)
 

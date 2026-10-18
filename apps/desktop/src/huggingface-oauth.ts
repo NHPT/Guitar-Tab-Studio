@@ -36,6 +36,18 @@ const tokenEndpoint = 'https://huggingface.co/oauth/token'
 const callbackPath = '/oauth/callback'
 const authorizationTimeoutMs = 10 * 60_000
 
+function networkErrorCode(error: unknown): string | undefined {
+  let current = error
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (!current || typeof current !== 'object') return undefined
+    if ('code' in current && typeof current.code === 'string') {
+      return current.code
+    }
+    current = 'cause' in current ? current.cause : undefined
+  }
+  return undefined
+}
+
 function base64Url(value: Buffer): string {
   return value.toString('base64url')
 }
@@ -72,6 +84,7 @@ export class HuggingFaceOAuth {
       progress: TranscriptionSetupProgress,
     ) => void,
     private readonly encryption?: OAuthTokenEncryption,
+    private readonly request: typeof fetch = globalThis.fetch,
   ) {}
 
   configured(): boolean {
@@ -238,12 +251,22 @@ export class HuggingFaceOAuth {
   private async exchange(
     parameters: Record<string, string>,
   ): Promise<OAuthTokenResponse> {
-    const response = await fetch(tokenEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams(parameters),
-      signal: AbortSignal.timeout(30_000),
-    })
+    let response: Response
+    try {
+      response = await this.request(tokenEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(parameters),
+        signal: AbortSignal.timeout(30_000),
+      })
+    } catch (error) {
+      const code = networkErrorCode(error)
+      throw new Error(
+        `无法连接 Hugging Face OAuth 服务${
+          code ? `（${code}）` : ''
+        }。请检查系统代理、DNS、防火墙或证书后重试。`,
+      )
+    }
     const result = (await response.json()) as OAuthTokenResponse
     if (!response.ok || !result.access_token) {
       throw new Error(

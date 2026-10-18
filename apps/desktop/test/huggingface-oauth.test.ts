@@ -107,3 +107,47 @@ test('cancels a pending PKCE callback wait', async () => {
     /已取消 Hugging Face 浏览器授权/,
   )
 })
+
+test('reports a system-network failure during OAuth token exchange', async () => {
+  const root = resolve(
+    process.cwd(),
+    'data',
+    `.test-hf-oauth-${randomUUID()}`,
+  )
+  const request = (async () => {
+    const cause = Object.assign(new Error('DNS lookup failed'), {
+      code: 'ENOTFOUND',
+    })
+    throw new TypeError('fetch failed', { cause })
+  }) as typeof fetch
+  try {
+    const oauth = new HuggingFaceOAuth(
+      resolve(root, 'token.bin'),
+      () => 'desktop-client',
+      (progress) => {
+        if (!progress.authorizationUrl) return
+        const authorization = new URL(progress.authorizationUrl)
+        const callback = new URL(
+          authorization.searchParams.get('redirect_uri')!,
+        )
+        callback.searchParams.set(
+          'state',
+          authorization.searchParams.get('state')!,
+        )
+        callback.searchParams.set('code', 'authorization-code')
+        queueMicrotask(() => {
+          get(callback, (response) => response.resume())
+        })
+      },
+      undefined,
+      request,
+    )
+
+    await assert.rejects(
+      oauth.accessToken(),
+      /无法连接 Hugging Face OAuth 服务（ENOTFOUND）.*系统代理/u,
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
