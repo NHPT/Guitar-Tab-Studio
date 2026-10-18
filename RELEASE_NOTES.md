@@ -1,4 +1,4 @@
-# Guitar Tab Studio v0.1.0-preview.5
+# Guitar Tab Studio v0.1.0-preview.6
 
 This is the first public desktop preview for macOS Apple Silicon and Windows
 x64. It is intended for functional testing and early feedback, not production
@@ -20,6 +20,9 @@ model evaluation.
   the Basic Pitch and string/fret review stages instead of appearing stalled.
 - Worker progress, score-import output and analysis errors now use explicit
   UTF-8 decoding on Windows, including messages split across process chunks.
+- Preview builds now follow the GitHub prerelease update channel instead of
+  incorrectly reporting that no preview update is available.
+- The Help menu now shows the exact installed application version.
 - Hugging Face public OAuth with PKCE for gated model access. No client secret
   is stored in the application.
 - The built-in project is now John Denver's `Take Me Home, Country Roads` from
@@ -38,6 +41,9 @@ model evaluation.
   package and may take several minutes.
 - The built-in TAB and technique candidates are generated analysis results and
   have not been manually verified against the production quality gate.
+- Preview.5 and earlier must install Preview.6 manually once. Their updater
+  excluded prerelease releases; automatic preview updates work after this
+  upgrade.
 
 ## Downloads
 

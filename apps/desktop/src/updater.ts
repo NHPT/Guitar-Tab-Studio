@@ -1,5 +1,6 @@
 import { app, dialog, type BrowserWindow } from 'electron'
 import { autoUpdater } from 'electron-updater'
+import { acceptsPrereleaseUpdates } from './update-channel.js'
 
 const updateIntervalMs = 6 * 60 * 60 * 1000
 
@@ -10,7 +11,7 @@ export class DesktopUpdater {
   constructor(private readonly windowProvider: () => BrowserWindow | undefined) {
     autoUpdater.autoDownload = false
     autoUpdater.autoInstallOnAppQuit = true
-    autoUpdater.allowPrerelease = false
+    autoUpdater.allowPrerelease = acceptsPrereleaseUpdates(app.getVersion())
     autoUpdater.on('update-available', (info) => {
       const window = this.windowProvider()
       if (!window) return

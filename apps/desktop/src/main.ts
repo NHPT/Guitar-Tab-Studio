@@ -1104,6 +1104,11 @@ function installMenu(): void {
           label: '检查更新',
           click: () => updater?.checkManually(),
         },
+        { type: 'separator' },
+        {
+          label: `当前版本 ${app.getVersion()}`,
+          enabled: false,
+        },
       ],
     },
   ]
