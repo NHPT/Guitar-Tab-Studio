@@ -50,12 +50,31 @@ function legacyProject() {
   }
 }
 
-test('migrates an unversioned project to schema version 1', () => {
+test('migrates an unversioned project to schema version 2', () => {
   const project = migrateStudioProject(legacyProject())
-  assert.equal(project.schemaVersion, 1)
+  assert.equal(project.schemaVersion, 2)
   assert.equal(project.source.kind, 'upload')
   assert.deepEqual(project.tab.tuning, ['E4', 'B3', 'G3', 'D3', 'A2', 'E2'])
   assert.deepEqual(project.tab.timeSignature, [4, 4])
+  assert.equal(project.guitarParts.length, 1)
+  assert.equal(project.primaryGuitarPartId, project.guitarParts[0].id)
+  assert.equal(project.guitarParts[0].tab, project.tab)
+})
+
+test('keeps the top-level TAB authoritative for the primary guitar part', () => {
+  const project = migrateStudioProject(legacyProject())
+  const parsed = migrateStudioProject({
+    ...project,
+    tab: { ...project.tab, capo: 5 },
+    guitarParts: project.guitarParts.map((part) => ({
+      ...part,
+      tab: { ...part.tab, capo: 1 },
+    })),
+  })
+
+  assert.equal(parsed.tab.capo, 5)
+  assert.equal(parsed.guitarParts[0].tab.capo, 5)
+  assert.equal(parsed.guitarParts[0].tab, parsed.tab)
 })
 
 test('deduplicates legacy tracks and withholds ungated technique labels', () => {
@@ -346,7 +365,7 @@ test('supports count-in and rhythm downbeats for common time signatures', () => 
 
 test('rejects unsupported project versions and malformed project fields', () => {
   assert.throws(
-    () => migrateStudioProject({ ...legacyProject(), schemaVersion: 2 }),
+    () => migrateStudioProject({ ...legacyProject(), schemaVersion: 3 }),
     (error: unknown) =>
       error instanceof CoreValidationError &&
       error.path === 'project.schemaVersion',
@@ -364,7 +383,7 @@ test('rejects unsupported project versions and malformed project fields', () => 
 test('provides an in-memory project repository for non-HTTP clients', () => {
   const repository = new MemoryProjectRepository([legacyProject()])
   const project = repository.getProject('project-1')
-  assert.equal(project?.schemaVersion, 1)
+  assert.equal(project?.schemaVersion, 2)
   assert.equal(repository.listProjects().length, 1)
   if (!project) assert.fail('project was not seeded')
   repository.saveProject({ ...project, title: 'Updated project' })
@@ -434,7 +453,7 @@ test('validates immutable project revision snapshots', () => {
   )
 })
 
-test('normalizes supported legacy analysis documents to schema version 9', () => {
+test('normalizes supported legacy analysis documents to schema version 10', () => {
   const analysis = parseAnalysisDocument({
     version: 8,
     bpm: 120,
@@ -461,6 +480,28 @@ test('normalizes supported legacy analysis documents to schema version 9', () =>
         separation_method: 'stereo-spatial-mask-v1',
       },
     ],
+    guitar_parts: [
+      {
+        id: 'guitar-1',
+        track_id: 'guitar-1',
+        name: '主音吉他',
+        role: 'lead',
+        role_confidence: 0.84,
+        notes: [
+          {
+            start: 0.1,
+            end: 0.4,
+            pitch: 64,
+            velocity: 84,
+            string: 1,
+            fret: 0,
+            technique: 'pick',
+            confidence: 0.88,
+          },
+        ],
+        chords: [{ start: 0, duration: 2, chord: 'E' }],
+      },
+    ],
     notes: [
       {
         start: 0.1,
@@ -483,6 +524,9 @@ test('normalizes supported legacy analysis documents to schema version 9', () =>
   assert.equal(analysis.notes[0].string, 3)
   assert.equal(analysis.stem_tracks?.[0].id, 'guitar-1')
   assert.equal(analysis.stem_tracks?.[0].separation_confidence, 0.82)
+  assert.equal(analysis.guitar_parts?.[0].role, 'lead')
+  assert.equal(analysis.guitar_parts?.[0].notes[0].fret, 0)
+  assert.equal(analysis.guitar_parts?.[0].chords[0].chord, 'E')
   assert.deepEqual(analysis.chords, [])
   assert.deepEqual(analysis.warnings, [])
 })
@@ -599,7 +643,7 @@ test('rejects model package traversal and unsupported analysis schemas', () => {
     runtime: {
       platform: 'darwin',
       arch: 'arm64',
-      analysisSchemaVersion: 9,
+      analysisSchemaVersion: 10,
     },
     files: [
       {
@@ -613,7 +657,7 @@ test('rejects model package traversal and unsupported analysis schemas', () => {
   }
   assert.throws(() => parseModelPackageManifest(manifest), /stay in package/)
   manifest.files[0].path = 'model.bin'
-  manifest.runtime.analysisSchemaVersion = 10
+  manifest.runtime.analysisSchemaVersion = 11
   assert.throws(
     () => parseModelPackageManifest(manifest),
     /analysisSchemaVersion/,

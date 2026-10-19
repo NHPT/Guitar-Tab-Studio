@@ -113,9 +113,9 @@ export const transcriptionProviders: readonly TranscriptionProviderDescriptor[] 
     },
     {
       id: 'muscriptor',
-      label: '高精度融合',
+      label: 'MuScriptor 研究融合',
       description:
-        'MuScriptor 主转录，MT3/Basic Pitch 复核，Noise2Fret 优化弦品。',
+        '通用音符转录研究链路，不代表已通过吉他 TAB 准确率门禁。',
       licenseClass: 'noncommercial',
       licenseName: 'CC BY-NC 4.0 weights',
       licenseUrl: 'https://creativecommons.org/licenses/by-nc/4.0/',
@@ -147,7 +147,7 @@ export const transcriptionProviders: readonly TranscriptionProviderDescriptor[] 
     },
     {
       id: 'guitar-specialist',
-      label: '吉他专用',
+      label: '吉他专用研究',
       description:
         'StringTrace 起音与弦品联合模型，结合可演奏性约束生成吉他 TAB。',
       licenseClass: 'noncommercial',

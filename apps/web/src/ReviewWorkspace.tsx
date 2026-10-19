@@ -7,7 +7,6 @@ import {
   ChevronRight,
   CircleAlert,
   Clock3,
-  Guitar,
   LocateFixed,
   Pause,
   Play,
@@ -36,6 +35,7 @@ import {
   reopenReview,
   saveReview,
 } from './api'
+import { BrandMark } from './BrandMark'
 import './ReviewWorkspace.css'
 import type {
   ReviewChecks,
@@ -773,7 +773,7 @@ export default function ReviewWorkspace() {
       <header className="review-header">
         <div className="review-brand">
           <span className="review-brand-mark">
-            <Guitar aria-hidden="true" strokeWidth={2.5} />
+            <BrandMark />
           </span>
           <div>
             <strong>Guitar Tab Review</strong>

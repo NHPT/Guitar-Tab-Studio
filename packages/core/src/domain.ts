@@ -1,6 +1,6 @@
 import type { AuthorizedMediaProvider } from './media.js'
 
-export const STUDIO_PROJECT_SCHEMA_VERSION = 1 as const
+export const STUDIO_PROJECT_SCHEMA_VERSION = 2 as const
 
 export type PlatformId =
   | 'upload'
@@ -202,6 +202,18 @@ export interface TabDocument {
   measures: TabMeasure[]
 }
 
+export type GuitarPartRole = 'lead' | 'rhythm' | 'mixed' | 'unknown'
+
+export interface GuitarPart {
+  id: string
+  trackId: string
+  name: string
+  role: GuitarPartRole
+  roleConfidence?: number
+  tab: TabDocument
+  transcriptionModel?: TranscriptionModelInfo
+}
+
 export interface EasyArrangement {
   kind: 'easy'
   strategyVersion: 'pitch-preserving-v1'
@@ -234,6 +246,8 @@ export interface StudioProject {
   tracks: StemTrack[]
   visualization?: VisualizationPoint[]
   tab: TabDocument
+  guitarParts: GuitarPart[]
+  primaryGuitarPartId: string
   easyArrangement?: EasyArrangement
   provenance?: ProjectProvenance
   warnings: string[]

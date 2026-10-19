@@ -81,6 +81,7 @@ import type {
   VisualizerMode,
 } from './types'
 import { AudioVisualizer } from './AudioVisualizer'
+import { BrandMark } from './BrandMark'
 import { recommendCapo, transposeChordForCapo } from './capo'
 import { ChordDiagram, FullScore } from './FullScore'
 import { inferBeatStyle } from './rhythm'
@@ -88,15 +89,23 @@ import { usePracticeAudio } from './usePracticeAudio'
 
 const themePresets = [
   { id: 'vermilion', label: '朱砂', accent: '#b43c30', surface: '#ffffff' },
-  { id: 'graphite', label: '石墨', accent: '#34383d', surface: '#ffffff' },
+  { id: 'graphite', label: '石墨', accent: '#F59E0B', surface: '#30343D' },
   { id: 'cobalt', label: '钴蓝', accent: '#235aa6', surface: '#ffffff' },
-  { id: 'amber', label: '琥珀', accent: '#a65f16', surface: '#fffefa' },
-  { id: 'jade', label: '青玉', accent: '#18766d', surface: '#fbfffe' },
+  { id: 'amber', label: '琥珀', accent: '#F59E0B', surface: '#ffffff' },
+  { id: 'jade', label: '青玉', accent: '#0F766E', surface: '#F2FBF8' },
   { id: 'cherry', label: '樱桃', accent: '#a52f4d', surface: '#fffdfd' },
   { id: 'wisteria', label: '藤紫', accent: '#6a4c93', surface: '#fefeff' },
   { id: 'indigo', label: '靛青', accent: '#3f517e', surface: '#ffffff' },
-  { id: 'patina', label: '铜绿', accent: '#35726d', surface: '#fcfffe' },
-  { id: 'night', label: '夜谱', accent: '#e26150', surface: '#202326' },
+  { id: 'patina', label: '铜绿', accent: '#3e625d', surface: '#fffefa' },
+  { id: 'moss', label: '苔庭', accent: '#53662e', surface: '#fcfdfb' },
+  { id: 'glacier', label: '冰川', accent: '#38BDF8', surface: '#F4FAFF' },
+  { id: 'ember', label: '余烬', accent: '#C65D3A', surface: '#FFF8F4' },
+  { id: 'night', label: '夜谱', accent: '#A78BFA', surface: '#1D212B' },
+  { id: 'deepsea', label: '深海', accent: '#2DD4BF', surface: '#1B2C31' },
+  { id: 'pine', label: '松夜', accent: '#A3E635', surface: '#202C22' },
+  { id: 'wine', label: '酒红', accent: '#FB7185', surface: '#30212A' },
+  { id: 'moonstone', label: '月岩', accent: '#60A5FA', surface: '#242B36' },
+  { id: 'scarlet-night', label: '赤夜', accent: '#EC4141', surface: '#242424' },
 ] as const
 
 type ThemeId = (typeof themePresets)[number]['id']
@@ -212,7 +221,7 @@ function initialProjectListHeight(): number {
 
 function initialTheme(): ThemeId {
   const stored = window.localStorage.getItem('gts-theme')
-  return themePresets.some((theme) => theme.id === stored) ? (stored as ThemeId) : 'vermilion'
+  return themePresets.some((theme) => theme.id === stored) ? (stored as ThemeId) : 'amber'
 }
 
 function initialVisualizer(): VisualizerMode {
@@ -443,6 +452,7 @@ function App({ application = studioApplication }: AppProps) {
   const [loopStartMeasure, setLoopStartMeasure] = useState(1)
   const [loopEndMeasure, setLoopEndMeasure] = useState(1)
   const [scorePart, setScorePart] = useState<'guitar' | 'bass' | 'drums'>('guitar')
+  const [scoreGuitarPartId, setScoreGuitarPartId] = useState('overview')
   const [scoreExpanded, setScoreExpanded] = useState(false)
   const [capoEnabled, setCapoEnabled] = useState(true)
   const [capoFret, setCapoFret] = useState(0)
@@ -539,6 +549,11 @@ function App({ application = studioApplication }: AppProps) {
     setLoopStartMeasure(1)
     setLoopEndMeasure(finalMeasure)
     setScorePart('guitar')
+    setScoreGuitarPartId(
+      nextProject.guitarParts.length > 1
+        ? 'overview'
+        : nextProject.primaryGuitarPartId,
+    )
     setScoreExpanded(false)
     setCapoEnabled(true)
     setCapoFret(nextProject.tab.capo || recommendedCapoForProject(nextProject))
@@ -810,11 +825,35 @@ function App({ application = studioApplication }: AppProps) {
   }, [rhythmEnabled, rhythmId, rhythmKit, rhythmVolume])
 
   const scoreProject = useMemo(() => {
-    if (!project || scoreLayer !== 'easy' || !project.easyArrangement) {
-      return project
+    if (!project) return project
+    const selectedPart =
+      project.guitarParts.find(
+        (part) => part.id === scoreGuitarPartId,
+      ) ??
+      project.guitarParts.find(
+        (part) => part.id === project.primaryGuitarPartId,
+      )
+    if (
+      scoreLayer === 'easy' &&
+      project.easyArrangement &&
+      selectedPart?.id === project.primaryGuitarPartId
+    ) {
+      return { ...project, tab: project.easyArrangement.tab }
     }
-    return { ...project, tab: project.easyArrangement.tab }
-  }, [project, scoreLayer])
+    const selectedTab =
+      selectedPart?.id === project.primaryGuitarPartId
+        ? project.tab
+        : selectedPart?.tab
+    return selectedPart
+      ? {
+          ...project,
+          tab: selectedTab ?? project.tab,
+          transcriptionModel:
+            selectedPart.transcriptionModel ??
+            project.transcriptionModel,
+        }
+      : project
+  }, [project, scoreGuitarPartId, scoreLayer])
 
   const loopRange = useMemo(() => {
     if (!scoreProject) {
@@ -1026,7 +1065,15 @@ function App({ application = studioApplication }: AppProps) {
   ) => {
     setProject((current) => {
       if (!current) return current
-      if (scoreLayer === 'easy' && current.easyArrangement) {
+      const activePartId =
+        scoreGuitarPartId === 'overview'
+          ? current.primaryGuitarPartId
+          : scoreGuitarPartId
+      if (
+        scoreLayer === 'easy' &&
+        current.easyArrangement &&
+        activePartId === current.primaryGuitarPartId
+      ) {
         return {
           ...current,
           easyArrangement: {
@@ -1035,7 +1082,20 @@ function App({ application = studioApplication }: AppProps) {
           },
         }
       }
-      return { ...current, tab: update(current.tab) }
+      let updatedPrimaryTab = current.tab
+      const guitarParts = current.guitarParts.map((part) => {
+        if (part.id !== activePartId) return part
+        const tab = update(part.tab)
+        if (part.id === current.primaryGuitarPartId) {
+          updatedPrimaryTab = tab
+        }
+        return { ...part, tab }
+      })
+      return {
+        ...current,
+        tab: updatedPrimaryTab,
+        guitarParts,
+      }
     })
     setRevisionNotice('有未保存的谱面修改')
   }
@@ -1530,6 +1590,10 @@ function App({ application = studioApplication }: AppProps) {
     runtimeStatus?.transcription.providers.some(
       (provider) => provider.id === 'muscriptor',
     ) === true
+  const hasResearchTranscriptionOptions =
+    runtimeStatus?.transcription.providers.some(
+      (provider) => provider.id !== 'basic-pitch',
+    ) === true
   const activeHighAccuracyVariant =
     runtimeStatus?.transcription.resolvedVariant ??
     (runtimeStatus?.transcription.preference.providerId === 'muscriptor'
@@ -1628,7 +1692,7 @@ function App({ application = studioApplication }: AppProps) {
       <header className="app-header">
         <div className="brand">
           <span className="brand-mark">
-            <Guitar aria-hidden="true" strokeWidth={2.5} />
+            <BrandMark />
           </span>
           <div>
             <strong>Guitar Tab Studio</strong>
@@ -2388,6 +2452,60 @@ function App({ application = studioApplication }: AppProps) {
                   </button>
                 ))}
               </div>
+              {scorePart === 'guitar' && project.guitarParts.length > 1 ? (
+                <div
+                  className="guitar-part-selector"
+                  aria-label="选择吉他声部"
+                >
+                  <button
+                    type="button"
+                    className={
+                      scoreGuitarPartId === 'overview' ? 'is-active' : ''
+                    }
+                    onClick={() => {
+                      setScoreGuitarPartId('overview')
+                      setScoreLayer('original')
+                      setSelectedNoteId(undefined)
+                      setSelectedMeasureNumber(undefined)
+                      setSelectedBeatIndex(undefined)
+                    }}
+                  >
+                    总谱
+                  </button>
+                  {project.guitarParts.map((part, index) => {
+                    const roleLabel =
+                      (part.roleConfidence ?? 0) >= 0.6
+                        ? part.role === 'lead'
+                          ? '主音吉他'
+                          : part.role === 'rhythm'
+                            ? '节奏吉他'
+                            : part.name
+                        : `Guitar ${index + 1}`
+                    return (
+                      <button
+                        type="button"
+                        key={part.id}
+                        className={
+                          scoreGuitarPartId === part.id
+                            ? 'is-active'
+                            : ''
+                        }
+                        onClick={() => {
+                          setScoreGuitarPartId(part.id)
+                          if (part.id !== project.primaryGuitarPartId) {
+                            setScoreLayer('original')
+                          }
+                          setSelectedNoteId(undefined)
+                          setSelectedMeasureNumber(undefined)
+                          setSelectedBeatIndex(undefined)
+                        }}
+                      >
+                        {roleLabel}
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : null}
               <button
                 className="score-expand-button"
                 type="button"
@@ -2400,20 +2518,74 @@ function App({ application = studioApplication }: AppProps) {
           </header>
 
           {scorePart === 'guitar' ? (
-            <FullScore
-              project={displayedProject}
-              positionSnapshot={position}
-              playbackPositionRef={playbackPositionRef}
-              playing={playing}
-              speed={speed}
-              expanded={scoreExpanded}
-              capo={activeCapo}
-              selectedMeasureNumber={selectedMeasureNumber}
-              selectedNoteId={selectedNoteId}
-              onSelectChord={selectChord}
-              onSelectBeat={selectBeat}
-              onSelectNote={selectNote}
-            />
+            scoreGuitarPartId === 'overview' &&
+            project.guitarParts.length > 1 ? (
+              <div className="multi-guitar-score">
+                <p className="multi-guitar-score-note">
+                  每路吉他保持独立弦品与演奏关系；总谱不合并为一把六弦琴。
+                </p>
+                {project.guitarParts.map((part, index) => {
+                  const roleLabel =
+                    (part.roleConfidence ?? 0) >= 0.6
+                      ? part.role === 'lead'
+                        ? '主音吉他'
+                        : part.role === 'rhythm'
+                          ? '节奏吉他'
+                          : part.name
+                      : `Guitar ${index + 1}`
+                  return (
+                    <section className="guitar-part-score" key={part.id}>
+                      <header>
+                        <strong>{roleLabel}</strong>
+                        <span>
+                          {part.role === 'unknown'
+                            ? '角色待校订'
+                            : `角色置信度 ${Math.round(
+                                (part.roleConfidence ?? 0) * 100,
+                              )}%`}
+                        </span>
+                      </header>
+                      <FullScore
+                        project={{
+                          ...displayedProject,
+                          tab:
+                            part.id === project.primaryGuitarPartId
+                              ? project.tab
+                              : part.tab,
+                          transcriptionModel:
+                            part.transcriptionModel ??
+                            project.transcriptionModel,
+                        }}
+                        positionSnapshot={position}
+                        playbackPositionRef={playbackPositionRef}
+                        playing={playing}
+                        speed={speed}
+                        expanded={scoreExpanded}
+                        capo={activeCapo}
+                        onSelectChord={() => undefined}
+                        onSelectBeat={() => undefined}
+                        onSelectNote={() => undefined}
+                      />
+                    </section>
+                  )
+                })}
+              </div>
+            ) : (
+              <FullScore
+                project={displayedProject}
+                positionSnapshot={position}
+                playbackPositionRef={playbackPositionRef}
+                playing={playing}
+                speed={speed}
+                expanded={scoreExpanded}
+                capo={activeCapo}
+                selectedMeasureNumber={selectedMeasureNumber}
+                selectedNoteId={selectedNoteId}
+                onSelectChord={selectChord}
+                onSelectBeat={selectBeat}
+                onSelectNote={selectNote}
+              />
+            )
           ) : (
             <div className="part-empty-state">
               <Music2 aria-hidden="true" />
@@ -3331,68 +3503,78 @@ function App({ application = studioApplication }: AppProps) {
               </div>
               {runtimeLocation === 'local' ? (
                 <>
-                  <label className="runtime-control">
-                    <span>转录方案</span>
-                    <select
-                      aria-label="转录方案"
-                      value={transcriptionScheme}
-                      disabled={
-                        runtimeBusy ||
-                        !runtimeStatus ||
-                        !desktopControls.setTranscriptionProvider
-                      }
-                      onChange={(event) => {
-                        const providerId =
-                          event.target.value as TranscriptionProviderId
-                        setTranscriptionScheme(providerId)
-                        setTranscriptionProgress(null)
-                        setTranscriptionSetupError('')
-                        if (providerId !== 'basic-pitch') {
-                          return
-                        }
-                        void runDesktopAction(() =>
-                          desktopControls.setTranscriptionProvider!({
-                            providerId: 'basic-pitch',
-                          }),
-                        )
-                      }}
-                    >
-                      {runtimeStatus?.transcription.providers.map((provider) => (
-                        <option value={provider.id} key={provider.id}>
-                          {provider.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="runtime-control">
-                    <span>模型档位</span>
-                    <select
-                      aria-label="模型档位"
-                      value={transcriptionChoice}
-                      disabled={
-                        runtimeBusy || transcriptionScheme !== 'muscriptor'
-                      }
-                      onChange={(event) =>
-                        {
-                          setTranscriptionChoice(
-                            event.target.value as
-                              | 'auto'
-                              | TranscriptionModelVariant,
-                          )
-                          setTranscriptionSetupError('')
-                        }
-                      }
-                    >
-                      <option value="auto">
-                        自动 ·{' '}
-                        {runtimeStatus?.transcription.recommendation.variant.toUpperCase() ??
-                          '检测中'}
-                      </option>
-                      <option value="small">Small · 103M</option>
-                      <option value="medium">Medium · 307M</option>
-                      <option value="large">Large · 1.4B</option>
-                    </select>
-                  </label>
+                  {hasResearchTranscriptionOptions ? (
+                    <>
+                      <label className="runtime-control">
+                        <span>转录方案</span>
+                        <select
+                          aria-label="转录方案"
+                          value={transcriptionScheme}
+                          disabled={
+                            runtimeBusy ||
+                            !runtimeStatus ||
+                            !desktopControls.setTranscriptionProvider
+                          }
+                          onChange={(event) => {
+                            const providerId =
+                              event.target.value as TranscriptionProviderId
+                            setTranscriptionScheme(providerId)
+                            setTranscriptionProgress(null)
+                            setTranscriptionSetupError('')
+                            if (providerId !== 'basic-pitch') {
+                              return
+                            }
+                            void runDesktopAction(() =>
+                              desktopControls.setTranscriptionProvider!({
+                                providerId: 'basic-pitch',
+                              }),
+                            )
+                          }}
+                        >
+                          {runtimeStatus?.transcription.providers.map(
+                            (provider) => (
+                              <option value={provider.id} key={provider.id}>
+                                {provider.label}
+                              </option>
+                            ),
+                          )}
+                        </select>
+                      </label>
+                      <label className="runtime-control">
+                        <span>模型档位</span>
+                        <select
+                          aria-label="模型档位"
+                          value={transcriptionChoice}
+                          disabled={
+                            runtimeBusy || transcriptionScheme !== 'muscriptor'
+                          }
+                          onChange={(event) => {
+                            setTranscriptionChoice(
+                              event.target.value as
+                                | 'auto'
+                                | TranscriptionModelVariant,
+                            )
+                            setTranscriptionSetupError('')
+                          }}
+                        >
+                          <option value="auto">
+                            自动 ·{' '}
+                            {runtimeStatus?.transcription.recommendation.variant.toUpperCase() ??
+                              '检测中'}
+                          </option>
+                          <option value="small">Small · 103M</option>
+                          <option value="medium">Medium · 307M</option>
+                          <option value="large">Large · 1.4B</option>
+                        </select>
+                      </label>
+                    </>
+                  ) : (
+                    <div className="runtime-mode-summary runtime-engine-summary">
+                      <span>转录引擎</span>
+                      <strong>Basic Pitch</strong>
+                      <small>生产默认 · 内置运行 · 无需额外权重</small>
+                    </div>
+                  )}
                   <p>
                     {runtimeStatus
                       ? `${runtimeStatus.resourceNote} · 预计 ${Math.ceil(runtimeStatus.estimatedSeconds.minimum / 60)}–${Math.ceil(runtimeStatus.estimatedSeconds.maximum / 60)} 分钟`
@@ -3539,7 +3721,7 @@ function App({ application = studioApplication }: AppProps) {
                   </div>
                   <p className="runtime-model-state">
                     {highAccuracySelectionActive
-                      ? `已启用高精度 · ${
+                      ? `已启用研究融合 · ${
                           selectedTranscriptionVariant?.toUpperCase() ??
                           '自动档位'
                         }`
@@ -3559,7 +3741,7 @@ function App({ application = studioApplication }: AppProps) {
                         : selectedTranscriptionWeightSource ===
                             'managed-cache'
                           ? '推荐档位权重已缓存'
-                          : '高精度模型已准备'}
+                          : '研究模型已准备'}
                   </p>
                   {selectedVariantExceedsMemory ? (
                     <p className="runtime-warning">
@@ -3862,12 +4044,12 @@ function App({ application = studioApplication }: AppProps) {
                               setTranscriptionProgress({
                                 phase: 'checking',
                                 progress: 1,
-                                stageLabel: '正在检查高精度模型和登录状态',
+                                stageLabel: '正在检查研究模型和登录状态',
                               })
                               setRuntimeNotice(
                                 highAccuracyDownloadRequired
-                                  ? '正在检查并下载高精度模型，完成前不会切换转录策略'
-                                  : '正在检查高精度模型完整性',
+                                  ? '正在检查并下载研究模型，完成前不会切换转录策略'
+                                  : '正在检查研究模型完整性',
                               )
                               await desktopControls.setTranscriptionProvider?.({
                                 providerId: 'muscriptor',
@@ -3882,7 +4064,7 @@ function App({ application = studioApplication }: AppProps) {
                                   transcriptionLicenseAccepted,
                               })
                               setRuntimeNotice(
-                                `高精度模型已启用，当前使用 ${
+                                `研究融合已启用，当前使用 ${
                                   transcriptionChoice === 'auto'
                                     ? `自动推荐的 ${runtimeStatus.transcription.recommendation.variant.toUpperCase()}`
                                     : transcriptionChoice.toUpperCase()
@@ -3897,10 +4079,10 @@ function App({ application = studioApplication }: AppProps) {
                         {runtimeBusy
                           ? '正在准备模型'
                           : highAccuracySelectionActive
-                            ? '高精度已启用'
+                            ? '研究融合已启用'
                           : highAccuracyDownloadRequired
                             ? '下载并启用'
-                            : '启用高精度'}
+                            : '启用研究融合'}
                       </button>
                     )}
                   </div>

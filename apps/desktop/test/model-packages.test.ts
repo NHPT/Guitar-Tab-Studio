@@ -26,7 +26,7 @@ function fixturePackage(
     runtime: {
       platform: process.platform as 'darwin' | 'win32' | 'linux',
       arch: process.arch as 'arm64' | 'x64',
-      analysisSchemaVersion: 9,
+      analysisSchemaVersion: 10,
     },
     files: [
       {
@@ -181,7 +181,7 @@ test('installs all files from a same-origin HTTPS manifest', async () => {
       runtime: {
         platform: process.platform as 'darwin' | 'win32' | 'linux',
         arch: process.arch as 'arm64' | 'x64',
-        analysisSchemaVersion: 9,
+        analysisSchemaVersion: 10,
       },
       files: [
         {

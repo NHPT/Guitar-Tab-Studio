@@ -1,4 +1,5 @@
 import type {
+  GuitarPartRole,
   Technique,
   TechniqueModelInfo,
   TimeSignature,
@@ -18,7 +19,7 @@ import {
   stringsAt,
 } from './validation.js'
 
-export const ANALYSIS_SCHEMA_VERSION = 9 as const
+export const ANALYSIS_SCHEMA_VERSION = 10 as const
 export const MINIMUM_ANALYSIS_SCHEMA_VERSION = 1 as const
 
 const trackRoles = [
@@ -29,6 +30,12 @@ const trackRoles = [
   'piano',
   'other',
 ] as const satisfies readonly TrackRole[]
+const guitarPartRoles = [
+  'lead',
+  'rhythm',
+  'mixed',
+  'unknown',
+] as const satisfies readonly GuitarPartRole[]
 const techniques = [
   'unknown',
   'pick',
@@ -85,6 +92,17 @@ export interface AnalysisStemTrack {
   separation_method?: string
 }
 
+export interface AnalysisGuitarPart {
+  id: string
+  track_id: string
+  name: string
+  role: GuitarPartRole
+  role_confidence?: number
+  transcription_model?: TranscriptionModelInfo
+  notes: AnalysisNote[]
+  chords: Array<{ start: number; duration: number; chord: string }>
+}
+
 export interface AnalysisVocalMelodyNote {
   start: number
   end: number
@@ -117,6 +135,7 @@ export interface AnalysisDocument {
   lyrics?: AnalysisTimedLyric[]
   stems: Partial<Record<TrackRole, string>>
   stem_tracks?: AnalysisStemTrack[]
+  guitar_parts?: AnalysisGuitarPart[]
   levels?: Partial<Record<TrackRole, number>>
   waveforms?: Partial<Record<TrackRole, number[]>>
   visualization?: VisualizationPoint[]
@@ -144,6 +163,33 @@ function stemTrackAt(value: unknown, path: string): AnalysisStemTrack {
     separation_method: optionalStringAt(
       track.separation_method,
       `${path}.separation_method`,
+    ),
+  }
+}
+
+function guitarPartAt(value: unknown, path: string): AnalysisGuitarPart {
+  const part = recordAt(value, path)
+  return {
+    id: stringAt(part.id, `${path}.id`),
+    track_id: stringAt(part.track_id, `${path}.track_id`),
+    name: stringAt(part.name, `${path}.name`),
+    role: enumAt(part.role, guitarPartRoles, `${path}.role`),
+    role_confidence: optionalNumberAt(
+      part.role_confidence,
+      `${path}.role_confidence`,
+    ),
+    transcription_model:
+      part.transcription_model === undefined
+        ? undefined
+        : transcriptionModelAt(
+            part.transcription_model,
+            `${path}.transcription_model`,
+          ),
+    notes: arrayAt(part.notes ?? [], `${path}.notes`).map((note, index) =>
+      noteAt(note, `${path}.notes[${index}]`),
+    ),
+    chords: arrayAt(part.chords ?? [], `${path}.chords`).map(
+      (chord, index) => chordAt(chord, `${path}.chords[${index}]`),
     ),
   }
 }
@@ -478,6 +524,13 @@ export function parseAnalysisDocument(value: unknown): AnalysisDocument {
         : arrayAt(analysis.stem_tracks, 'analysis.stem_tracks').map(
             (track, index) =>
               stemTrackAt(track, `analysis.stem_tracks[${index}]`),
+          ),
+    guitar_parts:
+      analysis.guitar_parts === undefined
+        ? undefined
+        : arrayAt(analysis.guitar_parts, 'analysis.guitar_parts').map(
+            (part, index) =>
+              guitarPartAt(part, `analysis.guitar_parts[${index}]`),
           ),
     levels:
       analysis.levels === undefined

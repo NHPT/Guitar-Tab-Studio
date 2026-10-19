@@ -7,7 +7,6 @@ import {
   Database,
   FlaskConical,
   Gauge,
-  Guitar,
   KeyRound,
   LogOut,
   Pause,
@@ -47,6 +46,7 @@ import {
   updateInferenceDeployment,
   withdrawCommunityContribution,
 } from './api'
+import { BrandMark } from './BrandMark'
 import './CommunityWorkspace.css'
 import type {
   CommunityAccount,
@@ -189,7 +189,7 @@ function CommunityLogin({
       </a>
       <section aria-labelledby="community-login-title">
         <span className="community-brand-mark">
-          <Guitar aria-hidden="true" strokeWidth={2.5} />
+          <BrandMark />
         </span>
         <p>Guitar Tab Community</p>
         <h1 id="community-login-title">
@@ -534,7 +534,7 @@ export default function CommunityWorkspace() {
       <header className="community-header">
         <div className="community-brand">
           <span className="community-brand-mark">
-            <Guitar aria-hidden="true" strokeWidth={2.5} />
+            <BrandMark />
           </span>
           <div>
             <strong>Guitar Tab Community</strong>

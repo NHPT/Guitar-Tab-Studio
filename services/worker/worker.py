@@ -18,6 +18,7 @@ import sys
 import time
 import urllib.request
 import zipfile
+from bisect import bisect_left
 from collections import deque
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -3749,6 +3750,46 @@ def annotate_with_technique_bundle(
     return events, model_info
 
 
+def finalize_techniques(
+    path: Path,
+    notes: list[NoteEvent],
+    technique_model_path: Path | None = None,
+    technique_gate_path: Path | None = None,
+    technique_bundle_path: Path | None = None,
+) -> tuple[list[NoteEvent], dict[str, object]]:
+    if technique_bundle_path is not None:
+        return annotate_with_technique_bundle(
+            path,
+            notes,
+            technique_bundle_path,
+        )
+    if technique_model_path is not None and technique_gate_path is not None:
+        return annotate_with_technique_model(
+            path,
+            notes,
+            technique_model_path,
+            technique_gate_path,
+        )
+
+    for note in notes:
+        if note.harmonic_type is not None:
+            note.string, note.fret = select_fingering(note.pitch, None)
+            note.position_source = "pitch-preserving-fallback-v1"
+        note.technique = "unknown"
+        note.technique_confidence = 0.0
+        note.technique_source = "unreviewed-heuristic"
+        note.technique_evidence = ["heuristic-candidate-withheld"]
+        note.related_note_index = None
+        note.harmonic_type = None
+        note.harmonic_touch_fret = None
+    return notes, {
+        "name": "unreviewed-technique-candidates",
+        "version": "v1",
+        "kind": "heuristic",
+        "labels": ["unknown"],
+    }
+
+
 def chord_score(pitch_classes: set[int], root: int, intervals: tuple[int, ...]) -> float:
     chord = {(root + interval) % 12 for interval in intervals}
     matched = len(chord & pitch_classes)
@@ -3794,6 +3835,125 @@ def infer_chords(notes: Iterable[NoteEvent], bpm: float) -> list[dict[str, objec
         result.append({"start": round(start, 4), "duration": round(window, 4), "chord": best_name})
         start += window
     return result
+
+
+def classify_guitar_part_roles(
+    parts: list[tuple[str, list[NoteEvent]]],
+) -> dict[str, tuple[str, float]]:
+    if len(parts) <= 1:
+        return {
+            part_id: ("unknown", 0.5)
+            for part_id, _events in parts
+        }
+
+    def profile(events: list[NoteEvent]) -> tuple[float, float]:
+        if not events:
+            return 0.5, 0.0
+        ordered = sorted(events, key=lambda event: (event.start, event.pitch))
+        groups: list[list[NoteEvent]] = []
+        for event in ordered:
+            if not groups or event.start - groups[-1][0].start > 0.055:
+                groups.append([event])
+            else:
+                groups[-1].append(event)
+        monophonic_ratio = sum(len(group) == 1 for group in groups) / len(groups)
+        chord_ratio = sum(len(group) >= 3 for group in groups) / len(groups)
+        pitches = sorted(event.pitch for event in ordered)
+        median_pitch = pitches[len(pitches) // 2]
+        duration = max(event.end for event in ordered)
+        note_rate = len(ordered) / max(1.0, duration)
+        high_register = max(0.0, min(1.0, (median_pitch - 52) / 20))
+        sparse_motion = 1.0 - max(0.0, min(1.0, note_rate / 14))
+        lead_signal = (
+            monophonic_ratio * 0.48
+            + high_register * 0.34
+            + sparse_motion * 0.18
+            - chord_ratio * 0.2
+        )
+        return lead_signal, chord_ratio
+
+    profiles = {
+        part_id: profile(events)
+        for part_id, events in parts
+    }
+    ordered_ids = sorted(
+        profiles,
+        key=lambda part_id: profiles[part_id][0],
+        reverse=True,
+    )
+    lead_id = ordered_ids[0]
+    rhythm_id = ordered_ids[-1]
+    contrast = profiles[lead_id][0] - profiles[rhythm_id][0]
+    if contrast < 0.12:
+        return {
+            part_id: ("unknown", round(0.5 + contrast, 4))
+            for part_id, _events in parts
+        }
+
+    confidence = round(min(0.94, 0.6 + contrast * 0.55), 4)
+    roles: dict[str, tuple[str, float]] = {
+        part_id: ("mixed", round(max(0.5, confidence - 0.12), 4))
+        for part_id, _events in parts
+    }
+    roles[lead_id] = ("lead", confidence)
+    roles[rhythm_id] = ("rhythm", confidence)
+    return roles
+
+
+def confirm_independent_guitar_parts(
+    parts: list[tuple[str, list[NoteEvent]]],
+    roles: dict[str, tuple[str, float]],
+    separation_confidences: dict[str, float],
+) -> bool:
+    """Require musical evidence before exposing spatial splits as instruments."""
+    if len(parts) != 2:
+        return False
+    part_ids = [part_id for part_id, _events in parts]
+    if {
+        roles.get(part_id, ("unknown", 0.0))[0]
+        for part_id in part_ids
+    } != {"lead", "rhythm"}:
+        return False
+    if any(
+        roles.get(part_id, ("unknown", 0.0))[1] < 0.66
+        or separation_confidences.get(part_id, 0.0) < 0.72
+        for part_id in part_ids
+    ):
+        return False
+
+    event_sets = [events for _part_id, events in parts]
+    if any(len(events) < 8 for events in event_sets):
+        return False
+    if any(
+        max(event.end for event in events)
+        - min(event.start for event in events)
+        < 3.0
+        for events in event_sets
+    ):
+        return False
+
+    smaller, larger = sorted(event_sets, key=len)
+    starts_by_pitch: dict[int, list[float]] = {}
+    for event in larger:
+        starts_by_pitch.setdefault(event.pitch, []).append(event.start)
+    for starts in starts_by_pitch.values():
+        starts.sort()
+
+    matched = 0
+    consumed: dict[int, set[int]] = {}
+    for event in sorted(smaller, key=lambda item: (item.pitch, item.start)):
+        starts = starts_by_pitch.get(event.pitch, [])
+        index = bisect_left(starts, event.start - 0.07)
+        used = consumed.setdefault(event.pitch, set())
+        while index < len(starts) and starts[index] <= event.start + 0.07:
+            if index not in used:
+                used.add(index)
+                matched += 1
+                break
+            index += 1
+
+    duplicate_ratio = matched / max(1, len(smaller))
+    return duplicate_ratio <= 0.4
 
 
 def estimate_key(notes: Iterable[NoteEvent]) -> str:
@@ -4011,16 +4171,141 @@ def main() -> None:
         if os.environ.get("MR_MT3_MODEL")
         else None
     )
-    emit_progress(65, "transcribing", "正在识别吉他音符")
-    notes, dropped_note_count, transcription_model = transcribe_guitar(
-        note_source,
-        configured_model,
-        model_mode=arguments.tab_model_mode,
-        transcription_provider=arguments.transcription_provider,
-        transcription_model=arguments.transcription_model,
-        position_model=configured_position_model,
-        verification_model=configured_verification_model,
+    transcription_targets = (
+        guitar_parts
+        if len(guitar_parts) > 1
+        else [
+            {
+                "id": "guitar-1",
+                "track_id": "guitar",
+                "name": "吉他",
+                "path": note_source,
+                "separation_confidence": 1.0,
+                "separation_method": "aggregate-guitar-stem",
+            }
+        ]
     )
+    guitar_part_candidates_rejected = False
+    part_transcriptions: list[dict[str, object]] = []
+    for index, part in enumerate(transcription_targets):
+        part_path = Path(str(part["path"]))
+        emit_progress(
+            65 + 16 * index / len(transcription_targets),
+            "transcribing",
+            (
+                f"正在识别{part['name']}音符"
+                if len(transcription_targets) > 1
+                else "正在识别吉他音符"
+            ),
+        )
+        part_notes, part_dropped, part_model = transcribe_guitar(
+            part_path,
+            configured_model,
+            model_mode=arguments.tab_model_mode,
+            transcription_provider=arguments.transcription_provider,
+            transcription_model=arguments.transcription_model,
+            position_model=configured_position_model,
+            verification_model=configured_verification_model,
+        )
+        part_transcriptions.append(
+            {
+                "id": str(part["id"]),
+                "track_id": str(part.get("track_id", part["id"])),
+                "name": str(part["name"]),
+                "path": part_path,
+                "notes": part_notes,
+                "dropped": part_dropped,
+                "model": part_model,
+                "level": audio_rms(part_path),
+            }
+        )
+        release_torch_accelerator_cache()
+    part_roles = classify_guitar_part_roles(
+        [
+            (str(part["id"]), part["notes"])
+            for part in part_transcriptions
+        ]
+    )
+    if len(part_transcriptions) > 1 and not confirm_independent_guitar_parts(
+        [
+            (str(part["id"]), part["notes"])
+            for part in part_transcriptions
+        ],
+        part_roles,
+        {
+            str(part["id"]): float(part.get("separation_confidence", 0.0))
+            for part in guitar_parts
+        },
+    ):
+        guitar_part_candidates_rejected = True
+        emit_progress(
+            79,
+            "transcribing",
+            "多吉他证据不足，正在按单吉他重新识别",
+        )
+        aggregate_notes, aggregate_dropped, aggregate_model = transcribe_guitar(
+            note_source,
+            configured_model,
+            model_mode=arguments.tab_model_mode,
+            transcription_provider=arguments.transcription_provider,
+            transcription_model=arguments.transcription_model,
+            position_model=configured_position_model,
+            verification_model=configured_verification_model,
+        )
+        release_torch_accelerator_cache()
+        guitar_parts = []
+        vocal_leakage_reports = []
+        part_transcriptions = [
+            {
+                "id": "guitar-1",
+                "track_id": "guitar",
+                "name": "吉他",
+                "path": note_source,
+                "notes": aggregate_notes,
+                "dropped": aggregate_dropped,
+                "model": aggregate_model,
+                "level": audio_rms(note_source),
+            }
+        ]
+        part_roles = classify_guitar_part_roles(
+            [("guitar-1", aggregate_notes)]
+        )
+    for part in part_transcriptions:
+        role, role_confidence = part_roles[str(part["id"])]
+        part["role"] = role
+        part["role_confidence"] = role_confidence
+        if role_confidence >= 0.6 and role in {"lead", "rhythm"}:
+            part["name"] = "主音吉他" if role == "lead" else "节奏吉他"
+        source_part = next(
+            (
+                candidate
+                for candidate in guitar_parts
+                if str(candidate["id"]) == str(part["id"])
+            ),
+            None,
+        )
+        if source_part is not None:
+            source_part["name"] = part["name"]
+            source_part["performance_role"] = role
+            source_part["role_confidence"] = role_confidence
+    primary_transcription = next(
+        (
+            part
+            for part in part_transcriptions
+            if part["role"] == "lead"
+            and float(part["role_confidence"]) >= 0.6
+        ),
+        max(
+            part_transcriptions,
+            key=lambda part: float(part["level"]),
+        ),
+    )
+    notes = primary_transcription["notes"]
+    dropped_note_count = sum(
+        int(part["dropped"])
+        for part in part_transcriptions
+    )
+    transcription_model = primary_transcription["model"]
     emit_progress(82, "transcribing", "吉他音符识别完成")
     configured_technique_model = arguments.technique_model
     configured_technique_gate = arguments.technique_gate
@@ -4059,47 +4344,31 @@ def main() -> None:
         raise ValueError(
             "Technique model and gate must be configured together"
         )
-    emit_progress(84, "transcribing", "正在分析演奏技法")
     if configured_technique_bundle is not None:
         configured_technique_bundle = configured_technique_bundle.resolve()
         if not configured_technique_bundle.is_file():
             raise FileNotFoundError(configured_technique_bundle)
-        notes, technique_model = annotate_with_technique_bundle(
-            note_source,
-            notes,
-            configured_technique_bundle,
-        )
-    elif configured_technique_model is not None:
+    if configured_technique_model is not None:
         configured_technique_model = configured_technique_model.resolve()
+        assert configured_technique_gate is not None
         configured_technique_gate = configured_technique_gate.resolve()
         if not configured_technique_model.is_file():
             raise FileNotFoundError(configured_technique_model)
         if not configured_technique_gate.is_file():
             raise FileNotFoundError(configured_technique_gate)
-        notes, technique_model = annotate_with_technique_model(
-            note_source,
-            notes,
+    emit_progress(84, "transcribing", "正在分析演奏技法")
+    for part in part_transcriptions:
+        part_notes, part_technique_model = finalize_techniques(
+            Path(str(part["path"])),
+            part["notes"],
             configured_technique_model,
             configured_technique_gate,
+            configured_technique_bundle,
         )
-    else:
-        technique_model = {
-            "name": "unreviewed-technique-candidates",
-            "version": "v1",
-            "kind": "heuristic",
-            "labels": ["unknown"],
-        }
-        for note in notes:
-            if note.harmonic_type is not None:
-                note.string, note.fret = select_fingering(note.pitch, None)
-                note.position_source = "pitch-preserving-fallback-v1"
-            note.technique = "unknown"
-            note.technique_confidence = 0.0
-            note.technique_source = "unreviewed-heuristic"
-            note.technique_evidence = ["heuristic-candidate-withheld"]
-            note.related_note_index = None
-            note.harmonic_type = None
-            note.harmonic_touch_fret = None
+        part["notes"] = part_notes
+        part["technique_model"] = part_technique_model
+    notes = primary_transcription["notes"]
+    technique_model = primary_transcription["technique_model"]
     emit_progress(89, "transcribing", "演奏技法分析完成")
     emit_progress(91, "mapping", "正在提取人声旋律与歌词")
     vocal_melody = extract_vocal_melody(stems["vocals"])
@@ -4173,8 +4442,8 @@ def main() -> None:
         warnings.append(preview_warning)
     if len(guitar_parts) > 1:
         warnings.append(
-            "Multiple spatially distinct guitar parts were separated; "
-            "centered or mono guitar layers can still remain combined."
+            "Spatially distinct guitars were transcribed into independent "
+            "parts; centered or mono layers can still remain combined."
         )
         if vocal_leakage_reports:
             median_reduction = sum(
@@ -4190,6 +4459,11 @@ def main() -> None:
             "No independently separable guitar layers were found; "
             "centered or mono multiple guitars remain in the aggregate guitar track."
         )
+        if guitar_part_candidates_rejected:
+            warnings.append(
+                "Stereo spatial candidates did not pass the independent-part "
+                "gate, so the song was kept as one aggregate guitar part."
+            )
     warnings.append(
         "Coherent leakage shared with non-guitar stems was suppressed before "
         f"guitar-part separation ({guitar_leakage_report['removed_energy_ratio']:.1%} "
@@ -4200,7 +4474,7 @@ def main() -> None:
             f"{dropped_note_count} note events outside the 24-fret guitar range were discarded."
         )
     result = {
-        "version": 9,
+        "version": 10,
         "transcription_model": transcription_model,
         "technique_model": technique_model,
         "metadata": metadata,
@@ -4220,6 +4494,22 @@ def main() -> None:
             }
             for part in guitar_parts
         ],
+        "guitar_parts": [
+            {
+                "id": str(part["id"]),
+                "track_id": str(part["track_id"]),
+                "name": str(part["name"]),
+                "role": str(part["role"]),
+                "role_confidence": float(part["role_confidence"]),
+                "transcription_model": part["model"],
+                "notes": [
+                    asdict(note)
+                    for note in part["notes"]
+                ],
+                "chords": infer_chords(part["notes"], bpm),
+            }
+            for part in part_transcriptions
+        ],
         "levels": levels,
         "waveforms": waveforms,
         "visualization": visualization,
@@ -4236,4 +4526,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if getattr(sys, "frozen", False):
+        import multiprocessing
+
+        multiprocessing.freeze_support()
     main()

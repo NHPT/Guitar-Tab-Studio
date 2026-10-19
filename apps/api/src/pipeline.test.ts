@@ -246,7 +246,9 @@ test('demo project uses the requested Country Roads recording and generated TAB'
     url: 'https://music.163.com/#/song?id=1478037',
   })
 
-  assert.equal(project.schemaVersion, 1)
+  assert.equal(project.schemaVersion, 2)
+  assert.equal(project.guitarParts.length, 1)
+  assert.equal(project.primaryGuitarPartId, project.guitarParts[0].id)
   assert.ok(project.tab.measures.length > 100)
   assert.equal(project.tracks.length, 7)
   assert.ok(project.visualization)
@@ -331,6 +333,47 @@ test('demo project uses the requested Country Roads recording and generated TAB'
       ),
     ),
   ))
+})
+
+test('builds independently namespaced TAB documents for guitar parts', () => {
+  const analysis: WorkerAnalysis = {
+    version: 10,
+    bpm: 120,
+    stems: {},
+    notes: [],
+    chords: [],
+    warnings: [],
+    guitar_parts: [
+      {
+        id: 'guitar-2',
+        track_id: 'guitar-2',
+        name: '节奏吉他',
+        role: 'rhythm',
+        role_confidence: 0.86,
+        notes: [
+          {
+            start: 0,
+            end: 0.4,
+            pitch: 45,
+            velocity: 84,
+            string: 5,
+            fret: 0,
+            technique: 'pick',
+            confidence: 0.9,
+          },
+        ],
+        chords: [{ start: 0, duration: 2, chord: 'A' }],
+      },
+    ],
+  }
+
+  const tab = tabFromWorker(analysis, analysis.guitar_parts![0])
+  const notes = tab.measures.flatMap((measure) =>
+    measure.beats.flatMap((beat) => beat.notes),
+  )
+
+  assert.equal(notes[0].id, 'guitar-2-1')
+  assert.equal(tab.measures[0].chord, 'A')
 })
 
 test('maps worker technique candidates and only valid note relations', () => {

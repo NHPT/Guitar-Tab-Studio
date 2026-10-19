@@ -2,6 +2,7 @@ import hashlib
 import tempfile
 import unittest
 import zipfile
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,8 @@ from worker import (
     align_lyrics_to_melody,
     annotate_techniques,
     assign_fingering_group,
+    classify_guitar_part_roles,
+    confirm_independent_guitar_parts,
     collapse_harmonic_stacks,
     collapse_note_fragments,
     complete_vocal_melody_for_lyrics,
@@ -1416,6 +1419,98 @@ class TechniqueInferenceTest(unittest.TestCase):
             ("harmonic", 4, 4, "artificial", 16),
         )
         self.assertEqual(annotated[1].position_source, "harmonic-optimizer-v1")
+
+    def test_classifies_distinct_lead_and_rhythm_guitar_parts(self) -> None:
+        lead = [
+            NoteEvent(
+                index * 0.8,
+                index * 0.8 + 0.45,
+                67 + index % 5,
+                82,
+                2,
+                8 + index % 5,
+                "pick",
+                0.88,
+            )
+            for index in range(10)
+        ]
+        rhythm = [
+            NoteEvent(
+                group * 0.45,
+                group * 0.45 + 0.32,
+                pitch,
+                88,
+                string,
+                2,
+                "pick",
+                0.86,
+            )
+            for group in range(12)
+            for pitch, string in ((45, 5), (52, 4), (57, 3), (61, 2))
+        ]
+
+        roles = classify_guitar_part_roles(
+            [("guitar-1", lead), ("guitar-2", rhythm)]
+        )
+
+        self.assertEqual(roles["guitar-1"][0], "lead")
+        self.assertEqual(roles["guitar-2"][0], "rhythm")
+        self.assertGreaterEqual(roles["guitar-1"][1], 0.6)
+        self.assertTrue(
+            confirm_independent_guitar_parts(
+                [("guitar-1", lead), ("guitar-2", rhythm)],
+                roles,
+                {"guitar-1": 0.9, "guitar-2": 0.9},
+            )
+        )
+
+    def test_leaves_similar_guitar_parts_unclassified(self) -> None:
+        first = [note(index * 0.5, index * 0.5 + 0.25, 2) for index in range(8)]
+        second = [note(index * 0.5, index * 0.5 + 0.25, 3) for index in range(8)]
+
+        roles = classify_guitar_part_roles(
+            [("guitar-1", first), ("guitar-2", second)]
+        )
+
+        self.assertEqual(roles["guitar-1"][0], "unknown")
+        self.assertEqual(roles["guitar-2"][0], "unknown")
+        self.assertFalse(
+            confirm_independent_guitar_parts(
+                [("guitar-1", first), ("guitar-2", second)],
+                roles,
+                {"guitar-1": 0.9, "guitar-2": 0.9},
+            )
+        )
+
+    def test_rejects_spatial_splits_that_duplicate_the_same_notes(self) -> None:
+        first = [
+            NoteEvent(
+                index * 0.4,
+                index * 0.4 + 0.25,
+                60 + index % 3,
+                80,
+                3,
+                5 + index % 3,
+                "pick",
+                0.86,
+            )
+            for index in range(12)
+        ]
+        duplicate = [
+            replace(event, start=event.start + 0.02, end=event.end + 0.02)
+            for event in first
+        ]
+
+        self.assertFalse(
+            confirm_independent_guitar_parts(
+                [("guitar-1", first), ("guitar-2", duplicate)],
+                {
+                    "guitar-1": ("lead", 0.82),
+                    "guitar-2": ("rhythm", 0.82),
+                },
+                {"guitar-1": 0.9, "guitar-2": 0.9},
+            )
+        )
 
 
 if __name__ == "__main__":

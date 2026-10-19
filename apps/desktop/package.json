@@ -1,7 +1,7 @@
 {
   "name": "@gts/desktop",
   "private": true,
-  "version": "0.1.0-preview.8",
+  "version": "0.1.0-preview.9",
   "description": "Offline-capable guitar transcription and practice workspace",
   "author": "Guitar Tab Studio",
   "type": "module",
@@ -11,9 +11,9 @@
     "build:runtime": "npm run build -w @gts/core && npm run build -w @gts/api && npm run build -w web",
     "bundle:main": "node scripts/bundle-main.mjs",
     "bundle:api": "esbuild ../api/src/index.ts --bundle --platform=node --format=esm --target=node22 --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=build-resources/api/index.mjs",
-    "dev": "npm run build:runtime && npm run build && electron dist/main.cjs",
+    "dev": "cross-env-shell GTS_DESKTOP_DATA_ROOT=./data/preview-user-data \"npm run build:runtime && npm run build && electron dist/main.cjs\"",
     "test": "npm run build && tsx --test test/*.test.ts",
-    "smoke": "npm run build:runtime && npm run build && cross-env GTS_DESKTOP_SMOKE=1 GTS_DESKTOP_DATA_ROOT=./data/smoke-user-data electron dist/main.cjs",
+    "smoke": "npm run build:runtime && npm run build && cross-env GTS_DESKTOP_SMOKE=1 GTS_ENABLE_RESEARCH_MODELS=1 GTS_DESKTOP_DATA_ROOT=./data/smoke-user-data electron dist/main.cjs",
     "smoke:binary": "electron --version",
     "package:dir": "npm run bundle:api && electron-builder --dir --config electron-builder.yml",
     "package": "npm run bundle:api && electron-builder --config electron-builder.yml --publish never"

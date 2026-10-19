@@ -39,17 +39,12 @@ html.community-page {
   height: 34px;
   display: inline-grid;
   place-items: center;
-  border-radius: 7px;
-  color: #fff;
-  background: #b54134;
 }
 
 .community-brand-mark svg {
-  width: 20px;
-  height: 20px;
-  color: #fff;
-  stroke: #fff;
-  opacity: 1;
+  width: 34px;
+  height: 34px;
+  display: block;
 }
 
 .community-brand > div,

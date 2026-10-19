@@ -388,6 +388,13 @@ export function createStudioProject(
   tab.measures.forEach((measure, index) => {
     measure.section = index === 0 ? '前奏' : undefined
   })
+  const guitarArrangement = guitarPartsFromWorker(analysis, tab)
+  for (const part of guitarArrangement.guitarParts) {
+    part.tab.capo = analysis.capo ?? 0
+    part.tab.measures.forEach((measure, index) => {
+      measure.section = index === 0 ? '前奏' : undefined
+    })
+  }
   const duration =
     analysis.metadata?.duration ??
     tab.measures.reduce(
@@ -461,20 +468,28 @@ export function createStudioProject(
         available: Boolean(filename),
       }]
     }),
-    tab,
+    tab: guitarArrangement.primaryTab,
+    guitarParts: guitarArrangement.guitarParts,
+    primaryGuitarPartId: guitarArrangement.primaryGuitarPartId,
     warnings: analysis.warnings,
   }
 }
 
-export function tabFromWorker(analysis: WorkerAnalysis): StudioProject['tab'] {
+export function tabFromWorker(
+  analysis: WorkerAnalysis,
+  guitarPart?: NonNullable<WorkerAnalysis['guitar_parts']>[number],
+): StudioProject['tab'] {
+  const sourceNotes = guitarPart?.notes ?? analysis.notes
+  const sourceChords = guitarPart?.chords ?? analysis.chords
+  const noteIdPrefix = guitarPart?.id ?? 'worker'
   const bpm = analysis.bpm > 0 ? analysis.bpm : 120
   const timeSignature: StudioProject['tab']['timeSignature'] =
     analysis.time_signature ?? [4, 4]
   const beatsPerMeasure = timeSignature[0]
   const beatDuration = 60 / bpm
   const measureDuration = beatDuration * beatsPerMeasure
-  const noteDuration = analysis.notes.reduce((maximum, note) => Math.max(maximum, note.end), 0)
-  const chordDuration = analysis.chords.reduce(
+  const noteDuration = sourceNotes.reduce((maximum, note) => Math.max(maximum, note.end), 0)
+  const chordDuration = sourceChords.reduce(
     (maximum, chord) => Math.max(maximum, chord.start + chord.duration),
     0,
   )
@@ -522,7 +537,7 @@ export function tabFromWorker(analysis: WorkerAnalysis): StudioProject['tab'] {
     const start = beatStarts[firstBeatIndex]
     const end = beatStarts[firstBeatIndex + beatsPerMeasure]
     const chord =
-      analysis.chords.find(
+      sourceChords.find(
         (candidate) => candidate.start <= start && candidate.start + candidate.duration > start,
       )?.chord ?? 'N.C.'
 
@@ -568,7 +583,7 @@ export function tabFromWorker(analysis: WorkerAnalysis): StudioProject['tab'] {
     const index = beatIndexAt(at)
     return beatStarts[index + 1] - beatStarts[index]
   }
-  const notes: TabBeat['notes'] = analysis.notes.map((workerNote, index) => {
+  const notes: TabBeat['notes'] = sourceNotes.map((workerNote, index) => {
     const techniqueCandidates: TechniqueCandidate[] =
       workerNote.technique_candidates?.map((candidate) => ({
         technique: candidate.technique,
@@ -576,7 +591,7 @@ export function tabFromWorker(analysis: WorkerAnalysis): StudioProject['tab'] {
         evidence: candidate.evidence,
       })) ?? []
     return {
-      id: `worker-${index + 1}`,
+      id: `${noteIdPrefix}-${index + 1}`,
       string: workerNote.string,
       fret: workerNote.fret,
       at: workerNote.start,
@@ -603,7 +618,7 @@ export function tabFromWorker(analysis: WorkerAnalysis): StudioProject['tab'] {
       techniqueCandidates,
       relatedNoteId:
         typeof workerNote.related_note_index === 'number'
-          ? `worker-${workerNote.related_note_index + 1}`
+          ? `${noteIdPrefix}-${workerNote.related_note_index + 1}`
           : undefined,
     }
   })
@@ -680,6 +695,78 @@ export function tabFromWorker(analysis: WorkerAnalysis): StudioProject['tab'] {
   }
 }
 
+function guitarPartsFromWorker(
+  analysis: WorkerAnalysis,
+  fallbackTab: StudioProject['tab'],
+): {
+  guitarParts: StudioProject['guitarParts']
+  primaryGuitarPartId: string
+  primaryTab: StudioProject['tab']
+} {
+  const guitarParts =
+    analysis.guitar_parts?.map((part) => ({
+      id: part.id,
+      trackId: part.track_id,
+      name: part.name,
+      role: part.role,
+      ...(part.role_confidence === undefined
+        ? {}
+        : { roleConfidence: part.role_confidence }),
+      tab: tabFromWorker(analysis, part),
+      transcriptionModel:
+        part.transcription_model ?? analysis.transcription_model,
+    })) ?? []
+  if (guitarParts.length === 0) {
+    const track =
+      analysis.stem_tracks?.find((candidate) => candidate.role === 'guitar')
+    const id = track?.id ?? 'guitar-1'
+    guitarParts.push({
+      id,
+      trackId: id,
+      name: track?.name ?? '吉他',
+      role: 'unknown',
+      tab: fallbackTab,
+      transcriptionModel: analysis.transcription_model,
+    })
+  }
+  const primary =
+    guitarParts
+      .filter(
+        (part) =>
+          part.role === 'lead' && (part.roleConfidence ?? 0) >= 0.6,
+      )
+      .sort(
+        (left, right) =>
+          (right.roleConfidence ?? 0) - (left.roleConfidence ?? 0),
+      )[0] ??
+    guitarParts.reduce((best, part) => {
+      const noteCount = part.tab.measures.reduce(
+        (total, measure) =>
+          total +
+          measure.beats.reduce(
+            (beatTotal, beat) => beatTotal + beat.notes.length,
+            0,
+          ),
+        0,
+      )
+      const bestCount = best.tab.measures.reduce(
+        (total, measure) =>
+          total +
+          measure.beats.reduce(
+            (beatTotal, beat) => beatTotal + beat.notes.length,
+            0,
+          ),
+        0,
+      )
+      return noteCount > bestCount ? part : best
+    }, guitarParts[0])
+  return {
+    guitarParts,
+    primaryGuitarPartId: primary.id,
+    primaryTab: primary.tab,
+  }
+}
+
 export function workerProject(
   analysis: WorkerAnalysis,
   source: SourceDescriptor,
@@ -691,6 +778,7 @@ export function workerProject(
       (source.kind === 'upload' ? '未命名录音' : `${source.label} 导入`),
   )
   const tab = tabFromWorker(analysis)
+  const guitarArrangement = guitarPartsFromWorker(analysis, tab)
   const duration =
     analysis.metadata?.duration ??
     tab.measures.reduce(
@@ -755,7 +843,9 @@ export function workerProject(
         available: Boolean(url),
       }]
     }),
-    tab,
+    tab: guitarArrangement.primaryTab,
+    guitarParts: guitarArrangement.guitarParts,
+    primaryGuitarPartId: guitarArrangement.primaryGuitarPartId,
     warnings: analysis.warnings,
     source: {
       ...source,

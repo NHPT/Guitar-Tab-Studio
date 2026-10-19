@@ -1,7 +1,7 @@
 {
   "name": "guitar-tab-studio",
   "private": true,
-  "version": "0.1.0-preview.8",
+  "version": "0.1.0-preview.9",
   "license": "Apache-2.0",
   "workspaces": [
     "apps/*",
@@ -10,8 +10,10 @@
   "scripts": {
     "dev": "npm run build -w @gts/core && concurrently -n api,web -c cyan,green \"npm run dev -w @gts/api\" \"npm run dev -w web\"",
     "desktop:dev": "npm run dev -w @gts/desktop",
+    "desktop:preview": "npm run build && npm run package:dir -w @gts/desktop && node scripts/launch-desktop-preview.mjs",
     "desktop:smoke": "npm run smoke -w @gts/desktop",
     "desktop:sidecar": "node scripts/build-desktop-sidecar.mjs",
+    "desktop:icons": ".venv/bin/python scripts/generate-app-icons.py",
     "demo:audio": "node scripts/validate-builtin-recording.mjs",
     "demo:audio:check": "node scripts/validate-builtin-recording.mjs",
     "build": "npm run build -w @gts/core && npm run build -w @gts/api && npm run build -w web && npm run build -w @gts/desktop",

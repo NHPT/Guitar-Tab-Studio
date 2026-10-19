@@ -43,17 +43,12 @@ button {
   height: 34px;
   display: grid;
   place-items: center;
-  border-radius: 8px;
-  color: #ffffff;
-  background: var(--accent-strong);
 }
 
 .brand-mark svg {
-  width: 21px;
-  height: 21px;
-  color: #fff;
-  stroke: #fff;
-  opacity: 1;
+  width: 34px;
+  height: 34px;
+  display: block;
 }
 
 .brand div {
@@ -113,10 +108,12 @@ button {
 
 .theme-menu {
   width: 224px;
+  max-height: min(420px, calc(100vh - 72px));
   position: absolute;
   top: 42px;
   right: 0;
   z-index: 30;
+  overflow-y: auto;
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1636,6 +1633,71 @@ input[type="range"]::-webkit-slider-thumb {
   box-shadow: 0 1px 3px rgba(23, 26, 29, 0.1);
 }
 
+.guitar-part-selector {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 7px;
+  background: var(--surface-muted);
+}
+
+.guitar-part-selector button {
+  min-width: 58px;
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: transparent;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.guitar-part-selector button.is-active {
+  color: var(--text);
+  background: var(--surface-strong);
+  box-shadow: 0 1px 3px rgba(23, 26, 29, 0.1);
+}
+
+.multi-guitar-score {
+  display: grid;
+  gap: 18px;
+  margin-bottom: 22px;
+}
+
+.multi-guitar-score-note {
+  margin: 0;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.guitar-part-score > header {
+  min-height: 34px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px 8px;
+}
+
+.guitar-part-score > header strong {
+  font-size: 13px;
+}
+
+.guitar-part-score > header span {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.guitar-part-score .full-score {
+  margin-bottom: 0;
+}
+
 .score-expand-button {
   height: 34px;
   display: inline-flex;
@@ -2847,6 +2909,10 @@ input[type="range"]::-webkit-slider-thumb {
   line-height: 15px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.runtime-engine-summary {
+  grid-column: 2 / -1;
 }
 
 .runtime-cloud-panel {
@@ -4386,6 +4452,21 @@ input[type="range"]::-webkit-slider-thumb {
   .part-selector {
     grid-template-columns: repeat(3, minmax(48px, 1fr));
     flex: 1;
+  }
+
+  .guitar-part-selector {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .guitar-part-selector button {
+    flex: 1 1 88px;
+  }
+
+  .guitar-part-score > header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
   }
 
   .full-score.is-expanded .score-track {

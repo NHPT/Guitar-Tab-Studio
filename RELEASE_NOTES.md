@@ -1,42 +1,36 @@
-# Guitar Tab Studio v0.1.0-preview.8
+# Guitar Tab Studio v0.1.0-preview.9
 
-This is the first public desktop preview for macOS Apple Silicon and Windows
-x64. It is intended for functional testing and early feedback, not production
-model evaluation.
+This desktop preview focuses on a production-oriented Basic Pitch workflow,
+multi-guitar project structure, durable local data, and a more coherent visual
+system. It remains intended for functional testing and early feedback, not
+production model evaluation.
 
 ## Highlights
 
-- Offline desktop workspace with local projects, revision history, score import,
-  playback, looping, count-in, rhythm accompaniment and synchronized stems.
-- Local analysis sidecar with Basic Pitch, Demucs, MuScriptor and the optional
-  MR-MT3 verification runtime. Model weights are downloaded separately.
-- High Precision mode uses MuScriptor as the primary transcription provider.
-  MR-MT3 verification is limited to CUDA Medium/Large profiles; CPU and Apple
-  Silicon run a single transcription provider to avoid redundant processing.
-- Manual Medium and Large selections now remain available when the optional
-  MR-MT3 runtime is absent. The app clearly reports the reduced provider set
-  and continues with MuScriptor, Basic Pitch and Noise2Fret.
-- Analysis now reports MuScriptor chunk progress from 65% to 80%, then exposes
-  the Basic Pitch and string/fret review stages instead of appearing stalled.
-- Worker progress, score-import output and analysis errors now use explicit
-  UTF-8 decoding on Windows, including messages split across process chunks.
-- Packaged desktop workers now launch the bundled Demucs and yt-dlp modules
-  through internal entry points, fixing immediate process exits during audio
-  separation and URL acquisition.
-- Audio separation errors now distinguish disk-space, memory, model-network
-  and missing-runtime failures instead of returning only a generic exit error.
-- Preview builds now follow the GitHub prerelease update channel instead of
-  incorrectly reporting that no preview update is available.
-- The Help menu now shows the exact installed application version.
-- Hugging Face OAuth token exchange now uses Electron's system network stack,
-  and model download workers inherit the resolved Windows/macOS system proxy.
-- OAuth connectivity and local API restart failures now report distinct,
-  actionable errors instead of the opaque `TypeError: fetch failed`.
-- Hugging Face public OAuth with PKCE for gated model access. No client secret
-  is stored in the application.
-- The built-in project is now John Denver's `Take Me Home, Country Roads` from
-  <https://music.163.com/#/song?id=1478037>, with generated TAB and seven
-  independently controllable stems.
+- Basic Pitch is now the only provider exposed by default. MuScriptor,
+  MR-MT3, YourMT3+, Noise2Fret and StringTrace remain available only through
+  explicit research-mode configuration.
+- Research adapters and previously downloaded local model caches are retained
+  across upgrades. Preview.9 does not silently remove model data or OAuth
+  configuration.
+- Projects now support a full score plus independent guitar parts with
+  lead/rhythm/mixed/unknown roles. Legacy projects migrate to schema version 2.
+- Stereo separation now creates guitar-part candidates rather than assuming
+  every song contains two guitars. Candidates must pass spatial confidence,
+  musical-role contrast, event-count and duplicate-note gates; otherwise the
+  aggregate guitar stem is transcribed again as one part.
+- The renderer can switch between the full score and each confirmed guitar
+  part without merging multiple parts into an unplayable six-string TAB.
+- The application and in-app brand marks now share the same six-string pick
+  design. The in-app mark follows the selected theme.
+- The theme library now contains 18 presets, including seven dark themes and
+  the new red-and-black Scarlet Night preset. Amber is the first-run default.
+- Desktop preview and packaged builds now use a stable user-data identity, so
+  settings, OAuth state and downloaded weights survive rebuilds and upgrades.
+- Frozen workers correctly re-enter bundled Demucs and yt-dlp entry points and
+  initialize multiprocessing before argument parsing.
+- Documentation now records the research-model retention and future removal
+  criteria explicitly.
 
 ## Preview Limitations
 
@@ -46,8 +40,12 @@ model evaluation.
   SmartScreen may display warnings.
 - macOS builds currently support Apple Silicon only. Windows builds support x64
   only.
-- First use of High Precision mode requires downloading the selected model
-  package and may take several minutes.
+- Research providers remain experimental, non-default and subject to their
+  individual model licenses.
+- Conservative multi-guitar confirmation can leave centered or highly
+  correlated guitar layers combined in one aggregate part.
+- Existing projects retain their previous analysis until they are analyzed
+  again with Preview.9.
 - The built-in TAB and technique candidates are generated analysis results and
   have not been manually verified against the production quality gate.
 - Preview.5 and earlier must install Preview.6 or newer manually once. Their

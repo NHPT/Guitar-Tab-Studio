@@ -10,6 +10,12 @@
 The React renderer and bundled Node API are shared across both targets. Model
 weights are distributed separately from the application installer.
 
+The desktop user-data identity is pinned independently of the package version,
+product display name and installation directory. Settings, OAuth state,
+projects and downloaded model weights remain outside the application bundle;
+an in-place update replaces binaries only. Windows uninstallers also preserve
+application data unless a future explicit deletion flow is selected.
+
 ## Build Inputs
 
 - Node.js 24 and `npm ci`.
@@ -37,7 +43,10 @@ npm run package -w @gts/desktop
 Generated sidecar files and installers are ignored by Git. The release workflow
 repeats these steps independently on macOS arm64 and Windows x64.
 
-The open-source sidecar may include the MIT-licensed MuScriptor runtime, but it
+The default desktop surface exposes only the Basic Pitch production baseline.
+Research providers remain in the source tree but require
+`GTS_ENABLE_RESEARCH_MODELS=1` or an explicit provider allowlist. The
+open-source sidecar may include the MIT-licensed MuScriptor runtime, but it
 never includes MuScriptor model weights. Those gated weights remain a separate
 CC BY-NC 4.0 download accepted by the user. Browser authorization uses an
 OAuth public client with Authorization Code + PKCE and a loopback callback.
@@ -58,7 +67,7 @@ consent. Production distributions should ship the publisher-owned public
 Client ID so end users only perform browser login; the manual Client ID field
 is retained for development and self-hosted builds.
 
-The high-accuracy preparation command also downloads the CC BY 4.0
+The MuScriptor research preparation command also downloads the CC BY 4.0
 Noise2Fret checkpoint and, for Medium/Large, the MIT-licensed MR-MT3
 checkpoint. The guitar-specialist strategy uses an installed StringTrace
 onset-position research bundle. The multitrack-research strategy downloads a

@@ -37,6 +37,7 @@ import {
   type DesktopUpload,
   type StudioApiTransport,
 } from './local-api.js'
+import { desktopDataRoot } from './data-root.js'
 import {
   desktopMediaSourceLabels,
   desktopMediaSources,
@@ -69,9 +70,10 @@ const maximumUploadBytes = 500 * 1024 * 1024
 const maximumMediaKeyDatabaseBytes = 128 * 1024 * 1024
 const configuredDataRoot = process.env.GTS_DESKTOP_DATA_ROOT
 
-if (configuredDataRoot) {
-  app.setPath('userData', resolve(configuredDataRoot))
-}
+app.setPath(
+  'userData',
+  desktopDataRoot(app.getPath('appData'), configuredDataRoot),
+)
 
 let mainWindow: BrowserWindow | undefined
 let stateStore: DesktopStateStore | undefined
@@ -1384,7 +1386,7 @@ async function startDesktop(): Promise<void> {
           transcriptionState.actions.includes(label),
         ) ||
         !transcriptionState.actions.some((label: string) =>
-          ['下载并启用', '启用高精度'].includes(label),
+          ['下载并启用', '启用研究融合'].includes(label),
         )
       ) {
         throw new Error('High-accuracy model setup did not load')

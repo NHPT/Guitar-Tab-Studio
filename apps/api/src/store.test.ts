@@ -29,7 +29,7 @@ test('loads legacy project JSON through the shared schema migrator', () => {
 
     const repository = new JsonProjectRepository(root)
     const restored = repository.getProject(legacy.id)
-    assert.equal(restored?.schemaVersion, 1)
+    assert.equal(restored?.schemaVersion, 2)
     assert.equal(restored?.title, legacy.title)
 
     if (!restored) assert.fail('project was not restored')
@@ -37,7 +37,7 @@ test('loads legacy project JSON through the shared schema migrator', () => {
     const persisted = JSON.parse(
       readFileSync(resolve(root, `${legacy.id}.json`), 'utf8'),
     ) as { schemaVersion?: number }
-    assert.equal(persisted.schemaVersion, 1)
+    assert.equal(persisted.schemaVersion, 2)
 
     repository.removeProject(legacy.id)
     assert.equal(repository.getProject(legacy.id), undefined)

@@ -105,12 +105,14 @@ function distributionProviders(): TranscriptionProviderId[] {
   return process.env.GTS_DISTRIBUTION_CHANNEL === 'commercial' ||
     process.env.GTS_COMMERCIAL_BUILD === '1'
     ? ['basic-pitch']
-    : [
+    : process.env.GTS_ENABLE_RESEARCH_MODELS === '1'
+      ? [
         'basic-pitch',
         'muscriptor',
         'guitar-specialist',
         'multitrack-research',
       ]
+      : ['basic-pitch']
 }
 
 function parseAccelerator(value: unknown): TranscriptionAccelerator {
@@ -735,11 +737,11 @@ export class DesktopTranscriptionManager {
     variant: TranscriptionModelVariant,
   ): Promise<void> {
     if (this.activePreparation || this.activeAuthorization) {
-      throw new Error('高精度模型正在准备，请等待完成或先取消当前任务')
+      throw new Error('研究模型正在准备，请等待完成或先取消当前任务')
     }
     const command = this.workerCommand()
     if (!command || !existsSync(command)) {
-      throw new Error('本地推理 Worker 不可用，无法准备高精度模型')
+      throw new Error('本地推理 Worker 不可用，无法准备研究模型')
     }
     const descriptor = transcriptionProvider('muscriptor').variants.find(
       (item) => item.id === variant,
@@ -748,7 +750,7 @@ export class DesktopTranscriptionManager {
     this.onProgress({
       phase: 'checking',
       progress: 1,
-      stageLabel: '正在检查高精度模型和登录状态',
+      stageLabel: '正在检查研究模型和登录状态',
     })
     const disk = statfsSync(this.cacheRoot)
     const availableBytes = disk.bavail * disk.bsize
@@ -771,7 +773,7 @@ export class DesktopTranscriptionManager {
       requiredDownloadBytes * 1.25 +
         512 * 1024 * 1024
     ) {
-      throw new Error('磁盘空间不足，无法下载所选高精度模型')
+      throw new Error('磁盘空间不足，无法下载所选研究模型')
     }
 
     const authorization = new AbortController()
@@ -790,7 +792,7 @@ export class DesktopTranscriptionManager {
     } catch (error) {
       if (authorization.signal.aborted) {
         throw new Error(
-          '已取消高精度模型准备，可以重新点击“下载并启用”',
+          '已取消研究模型准备，可以重新点击“下载并启用”',
         )
       }
       throw error
@@ -812,7 +814,7 @@ export class DesktopTranscriptionManager {
       ],
       accessToken,
       variant,
-      '高精度模型',
+      '研究模型',
     )
   }
 
@@ -894,7 +896,7 @@ export class DesktopTranscriptionManager {
           const stageLabel =
             typeof event.stageLabel === 'string'
               ? event.stageLabel
-              : '正在准备高精度模型'
+              : '正在准备研究模型'
           if (
             event.type === 'gts-auth-required' ||
             event.type === 'gts-license-required'

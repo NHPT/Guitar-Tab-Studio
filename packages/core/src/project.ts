@@ -1,6 +1,7 @@
 import {
   STUDIO_PROJECT_SCHEMA_VERSION,
   type EasyArrangement,
+  type GuitarPart,
   type ProjectProvenance,
   type SourceDescriptor,
   type StemTrack,
@@ -61,6 +62,12 @@ const trackRoles = [
   'drums',
   'piano',
   'other',
+] as const
+const guitarPartRoles = [
+  'lead',
+  'rhythm',
+  'mixed',
+  'unknown',
 ] as const
 const techniques = [
   'unknown',
@@ -385,6 +392,28 @@ function easyArrangementAt(
   }
 }
 
+function guitarPartAt(value: unknown, path: string): GuitarPart {
+  const part = recordAt(value, path)
+  return {
+    id: stringAt(part.id, `${path}.id`),
+    trackId: stringAt(part.trackId, `${path}.trackId`),
+    name: stringAt(part.name, `${path}.name`),
+    role: enumAt(part.role, guitarPartRoles, `${path}.role`),
+    roleConfidence: optionalNumberAt(
+      part.roleConfidence,
+      `${path}.roleConfidence`,
+    ),
+    tab: tabDocumentAt(part.tab, `${path}.tab`),
+    transcriptionModel:
+      part.transcriptionModel === undefined
+        ? undefined
+        : transcriptionModelAt(
+            part.transcriptionModel,
+            `${path}.transcriptionModel`,
+          ),
+  }
+}
+
 function stemTrackAt(value: unknown, path: string): StemTrack {
   const track = recordAt(value, path)
   const url =
@@ -511,13 +540,63 @@ export function migrateStudioProject(value: unknown): StudioProject {
   const project = recordAt(value, 'project')
   const schemaVersion =
     project.schemaVersion === undefined
-      ? STUDIO_PROJECT_SCHEMA_VERSION
+      ? 1
       : numberAt(project.schemaVersion, 'project.schemaVersion')
-  if (schemaVersion !== STUDIO_PROJECT_SCHEMA_VERSION) {
+  if (![1, STUDIO_PROJECT_SCHEMA_VERSION].includes(schemaVersion)) {
     throw new CoreValidationError(
       'project.schemaVersion',
       `unsupported version ${schemaVersion}`,
     )
+  }
+  const tracks = arrayAt(project.tracks, 'project.tracks').map(
+    (track, index) => stemTrackAt(track, `project.tracks[${index}]`),
+  )
+  const tab = tabDocumentAt(project.tab, 'project.tab')
+  const transcriptionModel =
+    project.transcriptionModel === undefined
+      ? undefined
+      : transcriptionModelAt(
+          project.transcriptionModel,
+          'project.transcriptionModel',
+        )
+  const parsedGuitarParts =
+    project.guitarParts === undefined
+      ? []
+      : arrayAt(project.guitarParts, 'project.guitarParts').map(
+          (part, index) =>
+            guitarPartAt(part, `project.guitarParts[${index}]`),
+        )
+  const guitarParts = parsedGuitarParts
+    .filter(
+      (part, index, parts) =>
+        parts.findIndex((candidate) => candidate.id === part.id) === index,
+    )
+  if (guitarParts.length === 0) {
+    const guitarTrack = tracks.find((track) => track.role === 'guitar')
+    guitarParts.push({
+      id: guitarTrack?.id ?? 'guitar-1',
+      trackId: guitarTrack?.id ?? 'guitar',
+      name: guitarTrack?.name ?? '吉他 1',
+      role: 'unknown',
+      tab,
+      ...(transcriptionModel ? { transcriptionModel } : {}),
+    })
+  }
+  const requestedPrimaryPartId = optionalStringAt(
+    project.primaryGuitarPartId,
+    'project.primaryGuitarPartId',
+  )
+  const primaryGuitarPartId = guitarParts.some(
+    (part) => part.id === requestedPrimaryPartId,
+  )
+    ? requestedPrimaryPartId!
+    : guitarParts[0].id
+  const primaryPartIndex = guitarParts.findIndex(
+    (part) => part.id === primaryGuitarPartId,
+  )
+  guitarParts[primaryPartIndex] = {
+    ...guitarParts[primaryPartIndex],
+    tab,
   }
   const migrated: StudioProject = {
     schemaVersion: STUDIO_PROJECT_SCHEMA_VERSION,
@@ -534,20 +613,12 @@ export function migrateStudioProject(value: unknown): StudioProject {
       ['demo', 'inference'] as const,
       'project.analysisMode',
     ),
-    transcriptionModel:
-      project.transcriptionModel === undefined
-        ? undefined
-        : transcriptionModelAt(
-            project.transcriptionModel,
-            'project.transcriptionModel',
-          ),
+    transcriptionModel,
     techniqueModel:
       project.techniqueModel === undefined
         ? undefined
         : techniqueModelAt(project.techniqueModel, 'project.techniqueModel'),
-    tracks: arrayAt(project.tracks, 'project.tracks').map((track, index) =>
-      stemTrackAt(track, `project.tracks[${index}]`),
-    ),
+    tracks,
     visualization:
       project.visualization === undefined
         ? undefined
@@ -555,7 +626,9 @@ export function migrateStudioProject(value: unknown): StudioProject {
             (point, index) =>
               visualizationPointAt(point, `project.visualization[${index}]`),
           ),
-    tab: tabDocumentAt(project.tab, 'project.tab'),
+    tab,
+    guitarParts,
+    primaryGuitarPartId,
     easyArrangement:
       project.easyArrangement === undefined
         ? undefined
@@ -578,6 +651,9 @@ export function migrateStudioProject(value: unknown): StudioProject {
   applyTechniqueGate(migrated.tab, migrated.techniqueModel)
   if (migrated.easyArrangement) {
     applyTechniqueGate(migrated.easyArrangement.tab, migrated.techniqueModel)
+  }
+  for (const part of migrated.guitarParts) {
+    applyTechniqueGate(part.tab, migrated.techniqueModel)
   }
   return migrated
 }

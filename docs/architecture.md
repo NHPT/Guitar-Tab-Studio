@@ -92,11 +92,20 @@ Cloud and local inference must implement the same provider contract:
 - Fail closed when a required worker or model is unavailable.
 
 Transcription engines are selected through a second, narrower provider
-registry. Basic Pitch is the bundled commercial-compatible fallback. The
-high-accuracy strategy runs MuScriptor as the primary event model and Basic
-Pitch as a corroborating/residual detector, then fuses same-pitch events within
-a bounded onset tolerance. MuScriptor Small, Medium and Large weights are
-selected automatically from a versioned device profile or fixed by the user.
+registry. Basic Pitch is the bundled commercial-compatible production
+baseline. Stereo spatial separation produces guitar-part candidates, not an
+instrument count. Candidates are exposed as independent `guitarParts[]` only
+after they pass separation-confidence, event-independence and distinct
+lead/rhythm-profile gates. Failed candidates are discarded and the aggregate
+guitar stem is transcribed again as one part. The top-level `tab` remains an
+alias of the primary part for legacy clients.
+
+Research providers are hidden unless `GTS_ENABLE_RESEARCH_MODELS=1` or an
+explicit provider allowlist is configured. The MuScriptor research strategy
+runs MuScriptor as the primary event model and Basic Pitch as a
+corroborating/residual detector, then fuses same-pitch events within a bounded
+onset tolerance. MuScriptor Small, Medium and Large weights are selected
+automatically from a versioned device profile or fixed by the user.
 The guitar-specialist strategy runs an installed StringTrace onset-position
 research bundle with the playability decoder. The multitrack-research strategy
 runs YourMT3+, Basic Pitch and Noise2Fret.

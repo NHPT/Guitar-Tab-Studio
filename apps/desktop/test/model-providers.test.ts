@@ -13,6 +13,31 @@ import test from 'node:test'
 import { DesktopTranscriptionManager } from '../src/model-providers.js'
 import { DesktopStateStore } from '../src/state.js'
 
+process.env.GTS_ENABLE_RESEARCH_MODELS = '1'
+
+test('keeps research providers out of the default production surface', () => {
+  const root = resolve(process.cwd(), 'data', `.test-providers-${randomUUID()}`)
+  mkdirSync(root, { recursive: true })
+  const state = new DesktopStateStore(resolve(root, 'desktop.sqlite'))
+  delete process.env.GTS_ENABLE_RESEARCH_MODELS
+  try {
+    const manager = new DesktopTranscriptionManager(
+      resolve(root, 'providers'),
+      resolve(root, 'cache'),
+      state,
+      () => undefined,
+    )
+    assert.deepEqual(
+      manager.status().providers.map((provider) => provider.id),
+      ['basic-pitch'],
+    )
+  } finally {
+    process.env.GTS_ENABLE_RESEARCH_MODELS = '1'
+    state.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('manual variant overrides the automatic hardware recommendation', () => {
   const root = resolve(process.cwd(), 'data', `.test-providers-${randomUUID()}`)
   mkdirSync(root, { recursive: true })
@@ -404,7 +429,7 @@ while :; do sleep 1; done
     await authorization
 
     assert.equal(manager.cancelPreparation(), true)
-    await assert.rejects(preparation, /已取消高精度模型准备/)
+    await assert.rejects(preparation, /已取消研究模型准备/)
     assert.equal(manager.cancelPreparation(), false)
     assert.equal(state.transcriptionPreference().providerId, 'basic-pitch')
   } finally {

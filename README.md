@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-`v0.1.0` 提供：
+`v0.1.0-preview.9` 提供：
 
 - 本地音频/视频上传与异步分析任务。
 - 图片或 PDF 吉他谱导入：PDF 在客户端逐页解析，服务端识别六线谱、小节、
@@ -20,10 +20,10 @@
   反应堆控制杆 7 种实时播放可视化；左侧保留已播放历史，当前位置显示
   音频特征，右侧不预绘。
 - 实验性推断扫弦、琶音、轮扫、击弦、勾弦、滑音、泛音、拍弦、切音、
-  闷音、打板和轮指。Worker v9 会输出独立技法置信度、前三候选、声学证据及
+  闷音、打板和轮指。Worker v10 会输出独立技法置信度、前三候选、声学证据及
   击勾滑关联音符；技法结果尚不是训练模型结论，必须人工校对。
 - 默认启用智能变调夹建议，也可关闭或手动选择 `0–12` 品。
-- 内置 10 套可持久化界面配色。
+- 内置 18 套可持久化界面配色，其中 7 套为夜间主题，默认使用琥珀。
 - 吉他、贝斯和鼓声部切换；未生成的声部明确显示为空，不复用其他声部伪装。
 - 仅显示检测到的有效音轨，并提供静音、独奏和音量控制；当前模型支持人声、
   吉他、贝斯、鼓组、钢琴/键盘及其他乐器聚合轨。
@@ -35,13 +35,15 @@
   7 条可独立静音、独奏和调节音量的分轨。
 - 不可变项目修订、显式恢复记录，以及逐音保持绝对音高的原始谱 / 易弹版双层编辑。
 - `@gts/core` 共享应用核心，统一 Web/API 的项目类型、媒体策略、版本化
-  `analysis.json` 解析以及推理和仓储接口；旧项目读取时迁移到 schema v1。
+  `analysis.json` 解析以及推理和仓储接口；旧项目读取时迁移到 schema v2。
 - Electron 桌面壳层复用同一工作台，提供 SQLite、最近项目、拖放、备份恢复、
   诊断导出、本地/云端推理选择和经哈希校验的模型包回滚。
 - 默认启用磁盘自动清理；运行中任务、项目分轨、修订、训练数据和模型包受保护，
   管理员可调整阈值、保留时间、手动执行或关闭自动清理。
-- 独立 Python 推理 Worker，实现 Demucs 分轨、Basic Pitch 基线、
-  可选 MuScriptor 高精度转录、指板映射、基础和弦及连奏技法推断。
+- 独立 Python 推理 Worker，实现 Demucs 分轨、Basic Pitch 生产基线、
+  通过空间、角色和事件独立性门禁确认的多吉他独立转录、指板映射、基础和弦及
+  连奏技法推断；证据不足时保留单吉他总轨。MuScriptor、MT3 与 Noise2Fret
+  仅保留为显式启用的研究适配器。
 - 社区协作控制面，支持隐藏校准、盲审共识、贡献撤回、数据版本、带认证租约的
   受控训练实验、模型门禁、灰度与运营指标；人工复核异步运行，不阻塞其他开发。
 
@@ -110,11 +112,26 @@ STRINGTRACE_TAB_MODEL=/absolute/path/to/string-fret.pt \
 `transcription_model` 中明确标记。数据导入、训练和评估流程见
 [模型训练与数据规范](docs/model-training.md)。
 
-桌面版可在“运行模型与存储 > 转录方案”中选择基础、高精度融合、吉他专用
-或多轨研究方案。应用根据
+桌面版默认只提供 Basic Pitch 生产基线。设置
+`GTS_ENABLE_RESEARCH_MODELS=1` 后，才会在“运行模型与存储 > 转录方案”
+中显示 MuScriptor 研究融合、吉他专用研究或多轨研究方案。研究模式根据
 系统内存、CPU 和 MPS/CUDA 能力自动推荐 Small、Medium 或 Large，用户可直接
 接受推荐，也可手动固定档位。官方权重不会随安装包分发：用户必须先确认
 CC BY-NC 4.0 非商用许可并在 Hugging Face 完成授权。
+
+### 研究模型保留决策
+
+> 当前决定：暂时保留 MuScriptor、MR-MT3、YourMT3+、Noise2Fret 和
+> StringTrace 的研究适配代码及用户已经下载的本地模型缓存，不自动删除。
+
+- 普通发行界面只显示 Basic Pitch；研究入口继续由
+  `GTS_ENABLE_RESEARCH_MODELS=1` 或显式 provider allowlist 控制。
+- 应用升级、重新打包和切换生产模型时必须保留现有研究权重、OAuth 配置及模型
+  缓存，避免未经用户确认重复下载或破坏研究复现能力。
+- 这些代码和缓存只用于对照实验、影子评估与后续迁移，不代表相关模型已通过
+  TAB F1、重复音召回或商业许可门禁。
+- 后续剥离前必须先完成资产清单、兼容迁移和可显示占用空间的显式清理功能，
+  并确认新的 Basic Pitch 衍生流水线已通过生产门禁；不得通过版本升级静默删除。
 
 ### Hugging Face OAuth 配置
 
@@ -148,7 +165,8 @@ Hugging Face 允许回环地址在运行时使用随机端口。应用注册时�
    或浏览器回调中的 Authorization Code。之后如需找回，依次进入
    **头像 > Settings > Connected Apps > Developer Applications**，再打开
    `Guitar Tab Studio`。
-3. 打开“运行模型与存储”，保持“本地”，将“转录方案”切换为“高精度融合”。
+3. 使用 `GTS_ENABLE_RESEARCH_MODELS=1` 启动应用，在“运行模型与存储”中将
+   “转录方案”切换为“MuScriptor 研究融合”。
 4. 点击“创建 OAuth 应用”也可重新打开官方创建页；将 Client ID 粘贴到
    “OAuth 客户端 ID”，然后点击“保存 OAuth 配置”。
 5. 点击程序中的“官方授权页”，在当前模型仓库接受许可或申请 gated access；
@@ -177,7 +195,7 @@ Hugging Face 允许回环地址在运行时使用随机端口。应用注册时�
 桌面端会先检查并下载权重到应用管理的模型缓存，只有校验成功后才切换转录策略。
 也可导入已下载的 `.safetensors` 权重。OAuth 令牌由 Electron `safeStorage`
 加密后保存在应用私有数据目录；系统加密能力不可用时仅保存在当前进程内存。
-高精度模式使用 MuScriptor 主转录，同时运行 Basic Pitch 做同音起点复核和
+MuScriptor 研究模式使用 MuScriptor 主转录，同时运行 Basic Pitch 做同音起点复核和
 高置信度漏音补充；CUDA 环境下的 Medium/Large 档位再加入 MIT 许可的
 MR-MT3 作为独立事件候选，最后由 Noise2Fret 对音高一致的候选执行弦品优化。
 MR-MT3 当前不支持 MPS 加速，因此 Apple 芯片组合不会启用其 CPU 回退路径。
@@ -357,9 +375,13 @@ npm run build
 npm run test:e2e
 npm run desktop:smoke
 npm run package:dir -w @gts/desktop
+npm run desktop:preview
 .venv/bin/python -m unittest discover -s services/worker -p 'test_*.py'
 .venv/bin/python -m py_compile services/worker/worker.py services/worker/stringtrace_ml/*.py
 ```
+
+`desktop:dev` and `desktop:preview` share a stable preview data directory so
+local package rebuilds reuse OAuth settings and downloaded model weights.
 
 ## 文档
 

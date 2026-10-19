@@ -30,7 +30,7 @@ extraResources:
 extraMetadata:
   main: dist/main.cjs
 mac:
-  icon: build-resources/icon.png
+  icon: build-resources/icon.icns
   category: public.app-category.music
   hardenedRuntime: true
   gatekeeperAssess: false
@@ -42,7 +42,7 @@ mac:
       arch:
         - arm64
 win:
-  icon: build-resources/icon.png
+  icon: build-resources/icon.ico
   target:
     - target: nsis
       arch:
