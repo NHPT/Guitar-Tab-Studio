@@ -2,6 +2,8 @@ import type {
   AnalysisJob,
   AuthorizedMediaConsent,
   CapabilityState,
+  MediaBrowserDescriptor,
+  MediaBrowserSession,
   PlatformDescriptor,
   ProjectRevision,
   ProjectRevisionKind,
@@ -85,6 +87,7 @@ export interface StudioApplication<TUpload = MediaWrite> {
   submitLink(
     url: string,
     authorizedMedia?: AuthorizedMediaConsent,
+    mediaSession?: MediaBrowserSession,
   ): Promise<AnalysisJob>
   submitUpload(
     input: TUpload,
@@ -97,6 +100,22 @@ export interface StudioApplication<TUpload = MediaWrite> {
 export type StudioApplicationEvent =
   | { type: 'open-media' }
   | { type: 'open-project'; projectId: string }
+
+export type AppLanguage = 'zh-CN' | 'en-US'
+export type AppLanguagePreference = 'system' | AppLanguage
+
+export interface DesktopApplicationSettings {
+  language: AppLanguage
+  languagePreference: AppLanguagePreference
+  systemLanguage: AppLanguage
+}
+
+export interface DesktopBackgroundJobState {
+  active: boolean
+  jobId?: string
+  progress?: number
+  stageLabel?: string
+}
 
 export type DesktopStudioMethod =
   | 'capabilities'
@@ -141,6 +160,11 @@ export type DesktopStudioMethod =
   | 'set-storage-cleanup-config'
   | 'run-storage-cleanup'
   | 'export-diagnostics'
+  | 'application-settings'
+  | 'set-language'
+  | 'detect-default-media-browser'
+  | 'open-external-url'
+  | 'set-background-job-state'
 
 export interface DesktopInvokeRequest {
   method: DesktopStudioMethod
@@ -159,6 +183,12 @@ export interface DesktopSelectedFile {
   name: string
   mediaType: string
   bytes: Uint8Array
+}
+
+export interface DesktopDefaultMediaBrowser {
+  supported: boolean
+  browser?: MediaBrowserDescriptor
+  detectedLabel?: string
 }
 
 export interface DesktopRuntimeStatus {
@@ -249,6 +279,8 @@ export interface DesktopBridge {
   invoke(request: DesktopInvokeRequest): Promise<unknown>
   onOpenMedia(listener: () => void): () => void
   onOpenProject(listener: (projectId: string) => void): () => void
+  onOpenSettings(listener: () => void): () => void
+  onLanguageChanged(listener: (settings: DesktopApplicationSettings) => void): () => void
   onTranscriptionProgress(
     listener: (progress: TranscriptionSetupProgress) => void,
   ): () => void

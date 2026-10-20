@@ -1,7 +1,7 @@
 {
   "name": "guitar-tab-studio",
   "private": true,
-  "version": "0.1.0-preview.9",
+  "version": "0.1.0-preview.10",
   "license": "Apache-2.0",
   "workspaces": [
     "apps/*",
@@ -23,8 +23,12 @@
     "test:sealed-gate": "PYTHONPATH=services/worker .venv/bin/python -m unittest discover -s services/sealed_gate -p 'test_*.py'",
     "test:e2e": "PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright playwright test",
     "test:e2e:timing": "PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright playwright test tests/score-timing.spec.ts --grep 'places notes on the playhead|marks three evenly spaced subdivisions' --workers=1",
+    "test:e2e:mobile": "PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright playwright test tests/mobile.spec.ts --project=mobile --workers=1",
     "promotion:gate": ".venv/bin/python services/promotion_gate/gate.py",
     "sealed:gate": "PYTHONPATH=services/worker .venv/bin/python services/sealed_gate/gate.py",
+    "score:evaluate": "PYTHONPATH=services/worker .venv/bin/python -m stringtrace_ml.evaluate_worker",
+    "score:gate": "PYTHONPATH=services/worker .venv/bin/python -m stringtrace_ml.score_gate",
+    "beat:gold": "PYTHONPATH=services/worker .venv/bin/python -m stringtrace_ml.beat_reference",
     "training:runner": ".venv/bin/python services/training_runner/runner.py",
     "start": "npm run start -w @gts/api",
     "postinstall": "npm run build -w @gts/core"

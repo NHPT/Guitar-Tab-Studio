@@ -6,6 +6,7 @@ import {
   type AnalysisJob,
   type AuthorizedMediaConsent,
   type CapabilityState,
+  type MediaBrowserSession,
   type PlatformDescriptor,
   type ProjectRevision,
   type ProjectRevisionKind,
@@ -75,6 +76,7 @@ export interface StudioApiTransport {
   submitLink(
     url: string,
     authorizedMedia?: AuthorizedMediaConsent,
+    mediaSession?: MediaBrowserSession,
   ): Promise<AnalysisJob>
   submitUpload(
     upload: DesktopUpload,
@@ -305,6 +307,7 @@ export class LocalApiService implements StudioApiTransport {
   submitLink(
     url: string,
     authorizedMedia?: AuthorizedMediaConsent,
+    mediaSession?: MediaBrowserSession,
   ): Promise<AnalysisJob> {
     return this.request('/api/import/link', {
       method: 'POST',
@@ -313,6 +316,7 @@ export class LocalApiService implements StudioApiTransport {
         url,
         authorizedProcessingConsent: authorizedMedia?.accepted,
         authorizationPolicyVersion: authorizedMedia?.policyVersion,
+        mediaSession,
       }),
     })
   }

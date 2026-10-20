@@ -32,6 +32,8 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: .cache/ms-playwright
       - if: runner.os == 'macOS'
         run: npm run test:e2e:timing
+      - if: runner.os == 'macOS'
+        run: npm run test:e2e:mobile
       - run: npm run smoke:binary -w @gts/desktop
       - run: npm run package:dir -w @gts/desktop
         env:

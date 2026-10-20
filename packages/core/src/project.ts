@@ -31,6 +31,7 @@ import {
   stringAt,
   stringsAt,
 } from './validation.js'
+import { tempoMapAt } from './timing.js'
 
 const platformIds = [
   'upload',
@@ -174,6 +175,10 @@ function tabNoteAt(value: unknown, path: string): TabNote {
     fret: numberAt(note.fret, `${path}.fret`),
     at: numberAt(note.at, `${path}.at`),
     notationAt: optionalNumberAt(note.notationAt, `${path}.notationAt`),
+    notationBeat: optionalNumberAt(
+      note.notationBeat,
+      `${path}.notationBeat`,
+    ),
     duration: numberAt(note.duration, `${path}.duration`),
     technique: enumAt(note.technique, techniques, `${path}.technique`),
     harmonicType,
@@ -358,6 +363,10 @@ function tabDocumentAt(value: unknown, path: string): TabDocument {
       `${path}.timeSignature`,
       measures,
     ),
+    tempoMap:
+      tab.tempoMap === undefined
+        ? undefined
+        : tempoMapAt(tab.tempoMap, `${path}.tempoMap`),
     vocalMelody:
       tab.vocalMelody === undefined
         ? undefined
@@ -456,6 +465,14 @@ function transcriptionModelAt(
     name: stringAt(model.name, `${path}.name`),
     version: stringAt(model.version, `${path}.version`),
     kind: enumAt(model.kind, ['baseline', 'trained'] as const, `${path}.kind`),
+    timingModel: optionalStringAt(
+      model.timingModel,
+      `${path}.timingModel`,
+    ),
+    positionOptimizer: optionalStringAt(
+      model.positionOptimizer,
+      `${path}.positionOptimizer`,
+    ),
   }
 }
 

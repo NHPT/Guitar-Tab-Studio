@@ -4,7 +4,7 @@ type AudioProbe = Window & {
   demoSources: Array<{ audio: HTMLMediaElement; gain?: GainNode }>
 }
 
-test('plays and mixes the generated Country Roads stems independently', async ({
+test('plays and mixes the generated Internationale stems independently', async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -24,47 +24,61 @@ test('plays and mixes the generated Country Roads stems independently', async ({
     }
   })
   await page.goto('/')
-  await expect(page.locator('.track-strip')).toHaveCount(7)
+  await expect(
+    page.getByRole('heading', { name: '国际歌' }),
+  ).toBeVisible({ timeout: 15_000 })
+  await expect(page.locator('.track-strip')).toHaveCount(6)
   await expect(page.getByLabel('人声音量')).toBeVisible()
-  await expect(page.getByLabel('吉他 1音量')).toBeVisible()
-  await expect(page.getByLabel('吉他 2音量')).toBeVisible()
+  await expect(page.getByLabel('吉他音量')).toBeVisible()
   await page.getByLabel('预备小节数').selectOption('0')
-  await page.getByRole('button', { name: '播放', exact: true }).click()
 
   const mediaState = () => page.evaluate(() =>
     (window as unknown as AudioProbe).demoSources
       .filter(({ audio }) =>
-        audio.getAttribute('src')?.includes('take-me-home-country-roads-'),
+        audio.src.includes('internationale-'),
       )
       .map(({ audio, gain }) => ({
         role:
-          /take-me-home-country-roads-(vocals|guitar-1|guitar-2|bass|drums|piano|other)\.m4a/u
+          /internationale-(vocals|guitar|bass|drums|piano|other)\.m4a/u
             .exec(audio.src)?.[1] ?? 'unknown',
         time: audio.currentTime, duration: audio.duration,
         paused: audio.paused, gain: gain?.gain.value,
       })),
   )
-  await expect.poll(async () => (await mediaState()).filter(
-    (track) => !track.paused && track.time > 0.5,
-  ).length).toBe(7)
+  await expect.poll(async () => (await mediaState()).length, {
+    timeout: 15_000,
+  }).toBe(6)
+  await expect.poll(
+    async () =>
+      (await mediaState()).every((track) => Number.isFinite(track.duration)),
+    { timeout: 15_000 },
+  ).toBe(true)
+  await page.getByRole('button', { name: '播放', exact: true }).click()
+  await expect.poll(
+    async () =>
+      (await mediaState()).filter(
+        (track) => !track.paused && track.time > 0.5,
+      ).length,
+    { timeout: 15_000 },
+  ).toBe(6)
   const state = await mediaState()
-  expect(state).toHaveLength(7)
+  expect(state).toHaveLength(6)
   expect(Math.max(...state.map(track => track.time)) -
     Math.min(...state.map(track => track.time))).toBeLessThan(0.075)
-  for (const track of state) expect(track.duration).toBeCloseTo(194.147, 0)
+  for (const track of state) expect(track.duration).toBeCloseTo(266.733, 0)
   for (const track of state) {
     expect(track.gain).toBeGreaterThan(0.7)
     expect(track.gain).toBeCloseTo(state[0].gain!, 5)
   }
 
-  await page.getByRole('button', { name: '吉他 1独奏', exact: true }).click()
+  await page.getByRole('button', { name: '吉他独奏', exact: true }).click()
   await expect.poll(async () =>
-    (await mediaState()).filter(t => t.role !== 'guitar-1').every(t => t.gain === 0),
+    (await mediaState()).filter(t => t.role !== 'guitar').every(t => t.gain === 0),
   ).toBe(true)
-  expect((await mediaState()).find(t => t.role === 'guitar-1')?.gain).toBeGreaterThan(0.7)
-  await page.getByRole('button', { name: '吉他 1取消独奏', exact: true }).click()
-  await page.getByRole('button', { name: '吉他 1静音', exact: true }).click()
-  await expect.poll(async () => (await mediaState()).find(t => t.role === 'guitar-1')?.gain).toBe(0)
+  expect((await mediaState()).find(t => t.role === 'guitar')?.gain).toBeGreaterThan(0.7)
+  await page.getByRole('button', { name: '吉他取消独奏', exact: true }).click()
+  await page.getByRole('button', { name: '吉他静音', exact: true }).click()
+  await expect.poll(async () => (await mediaState()).find(t => t.role === 'guitar')?.gain).toBe(0)
   expect((await mediaState()).find(t => t.role === 'vocals')?.gain).toBeGreaterThan(0.7)
 
   // All decoders must stay on the same media time after seeking.

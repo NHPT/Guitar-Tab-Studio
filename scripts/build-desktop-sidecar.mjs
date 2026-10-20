@@ -162,7 +162,7 @@ writeFileSync(
       createdAt: new Date().toISOString(),
       platform: process.platform,
       arch: process.arch,
-      analysisSchemaVersion: 9,
+      analysisSchemaVersion: 10,
       builder: 'pyinstaller-onedir',
       files,
     },

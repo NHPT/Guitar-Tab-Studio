@@ -24,6 +24,16 @@ test('simultaneous string pairs do not reverse the independently observed sweep 
   assert.equal(gesture.style, 'strum')
 })
 
+test('a sparse simultaneous dyad followed by one note is not enough sweep evidence', () => {
+  assert.deepEqual(
+    guitarGestures(
+      [note(0.1, 1), note(0.1, 3), note(0.15, 4)],
+      () => 0.5,
+    ),
+    [],
+  )
+})
+
 test('simultaneous plucks, repeated picks and legato do not acquire sweep labels', () => {
   assert.deepEqual(guitarGestures([note(0.1, 6), note(0.1, 5), note(0.1, 4)], () => 0.5), [])
   assert.deepEqual(guitarGestures([0.1, 0.15, 0.2, 0.25].map((at) => note(at, 3)), () => 0.5), [])

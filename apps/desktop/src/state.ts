@@ -5,6 +5,7 @@ import {
   migrateStudioProject,
   parseProjectRevision,
   type AnalysisJob,
+  type AppLanguagePreference,
   type DesktopRecentProject,
   type ProjectRepository,
   type ProjectRevision,
@@ -334,6 +335,25 @@ export class DesktopStateStore
          ON CONFLICT(key) DO UPDATE SET json = excluded.json`,
       )
       .run(JSON.stringify(state))
+  }
+
+  languagePreference(): AppLanguagePreference {
+    const value = this.stringSetting('application-language')
+    return value === 'zh-CN' || value === 'en-US' ? value : 'system'
+  }
+
+  setLanguagePreference(preference: AppLanguagePreference): void {
+    if (
+      preference !== 'system' &&
+      preference !== 'zh-CN' &&
+      preference !== 'en-US'
+    ) {
+      throw new Error('Invalid application language')
+    }
+    this.setStringSetting(
+      'application-language',
+      preference === 'system' ? undefined : preference,
+    )
   }
 
   runtimeMode(entityId?: string): 'local' | 'cloud' {

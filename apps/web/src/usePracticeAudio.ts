@@ -26,6 +26,15 @@ interface PracticeAudioOptions {
     kit: RhythmKit
     volume: number
   }
+  standalone: {
+    playing: boolean
+    bpm: number
+    definition: PracticeRhythm
+    kit: RhythmKit
+    volume: number
+    mutedVoices: PercussionVoice[]
+    onStep: (step: number) => void
+  }
 }
 
 interface StartCountInOptions {
@@ -227,17 +236,26 @@ function schedulePercussion(
   if (
     voice === 'closed-hat' ||
     voice === 'open-hat' ||
-    voice === 'shaker'
+    voice === 'shaker' ||
+    voice === 'crash'
   ) {
     const duration =
-      voice === 'open-hat' ? 0.18 : voice === 'shaker' ? 0.065 : 0.045
-    const frequency = voice === 'shaker' ? 4200 : 6500
+      voice === 'crash'
+        ? 0.42
+        : voice === 'open-hat'
+          ? 0.18
+          : voice === 'shaker'
+            ? 0.065
+            : 0.045
+    const frequency =
+      voice === 'crash' ? 2800 : voice === 'shaker' ? 4200 : 6500
     return [
       scheduleNoiseBurst(
         context,
         at,
         duration,
-        level * (voice === 'open-hat' ? 0.16 : 0.11),
+        level *
+          (voice === 'crash' ? 0.22 : voice === 'open-hat' ? 0.16 : 0.11),
         destination,
         'highpass',
         frequency,
@@ -383,6 +401,7 @@ export function usePracticeAudio({
   speed,
   mixes,
   rhythm,
+  standalone,
 }: PracticeAudioOptions): PracticeAudioState {
   const contextRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
@@ -397,6 +416,15 @@ export function usePracticeAudio({
   const mediaRef = useRef<Map<string, HTMLAudioElement>>(new Map())
   const mediaSourcesRef = useRef<Map<string, MediaElementAudioSourceNode>>(new Map())
   const mediaGainsRef = useRef<Map<string, GainNode>>(new Map())
+  const {
+    playing: standalonePlaying,
+    bpm: standaloneBpm,
+    definition: standaloneDefinition,
+    kit: standaloneKit,
+    volume: standaloneVolume,
+    mutedVoices: standaloneMutedVoices,
+    onStep: onStandaloneStep,
+  } = standalone
   const hasRealStems = useMemo(
     () => Boolean(project?.tracks.some((track) => track.url && track.available)),
     [project],
@@ -473,7 +501,14 @@ export function usePracticeAudio({
       cancelCountIn()
       const generation = countInGenerationRef.current
       const { context, analyser } = ensureAudioGraph()
-      if (context.state !== 'running') await context.resume()
+      if (context.state !== 'running') {
+        await Promise.race([
+          context.resume(),
+          new Promise<void>((resolveDelay) =>
+            window.setTimeout(resolveDelay, 250),
+          ),
+        ])
+      }
       if (generation !== countInGenerationRef.current) return
       const beatsPerBar = beatDurations.length
       const startsAt = context.currentTime + 0.06
@@ -510,16 +545,15 @@ export function usePracticeAudio({
         elapsed += beatDurations[beat - 1] / playbackSpeed
       }
       const songStartsAt = startsAt + elapsed
-      nodes.push(
-        ...schedulePercussion(
-          context,
-          'click-high',
-          kit,
-          0.82 * volume,
-          songStartsAt,
-          analyser,
-        ),
+      const songStartNodes = schedulePercussion(
+        context,
+        'click-high',
+        kit,
+        0.82 * volume,
+        songStartsAt,
+        analyser,
       )
+      nodes.push(...songStartNodes)
 
       if (project && !hasRealStems && sourceScoreNotes.length === 0) {
         const beatIndex = Math.floor(songPosition / (60 / project.bpm))
@@ -582,21 +616,27 @@ export function usePracticeAudio({
         preScheduledRhythmKeysRef.current = scheduledKeys
       }
 
+      let completed = false
+      const finishCountIn = () => {
+        if (completed || generation !== countInGenerationRef.current) return
+        completed = true
+        if (hasRealStems) {
+          mediaStartedByCountInRef.current = true
+          mediaRef.current.forEach((audio) => {
+            if (audio.readyState > 0) audio.currentTime = songPosition
+            void audio.play()
+          })
+        }
+        countInTimersRef.current = []
+        countInNodesRef.current = []
+        onComplete()
+      }
+      songStartNodes[0]?.addEventListener('ended', finishCountIn, {
+        once: true,
+      })
       timers.push(
         window.setTimeout(
-          () => {
-            if (generation !== countInGenerationRef.current) return
-            if (hasRealStems) {
-              mediaStartedByCountInRef.current = true
-              mediaRef.current.forEach((audio) => {
-                if (audio.readyState > 0) audio.currentTime = songPosition
-                void audio.play()
-              })
-            }
-            countInTimersRef.current = []
-            countInNodesRef.current = []
-            onComplete()
-          },
+          finishCountIn,
           Math.max(0, (songStartsAt - context.currentTime) * 1000),
         ),
       )
@@ -930,6 +970,101 @@ export function usePracticeAudio({
     rhythm.kit,
     rhythm.volume,
     speed,
+  ])
+
+  useEffect(() => {
+    if (!standalonePlaying) {
+      onStandaloneStep(-1)
+      return
+    }
+    const { context, analyser } = ensureAudioGraph()
+    const scheduledNodes = new Set<AudioScheduledSourceNode>()
+    const stepTimers = new Set<number>()
+    const mutedVoices = new Set(standaloneMutedVoices)
+    const bpm = Math.max(30, Math.min(260, standaloneBpm))
+    const [beatsPerBar, beatUnit] = standaloneDefinition.timeSignature
+    const barDuration = (60 / bpm) * beatsPerBar * (4 / beatUnit)
+    const baseStepDuration =
+      barDuration / standaloneDefinition.stepsPerBar
+    const swing = Math.max(
+      0.5,
+      Math.min(0.75, standaloneDefinition.swing),
+    )
+    let nextStep = 0
+    let nextAt = context.currentTime + 0.06
+    let timer: number | undefined
+    let active = true
+
+    const trackNode = (node: AudioScheduledSourceNode) => {
+      scheduledNodes.add(node)
+      node.addEventListener('ended', () => scheduledNodes.delete(node), {
+        once: true,
+      })
+    }
+    const scheduleAhead = () => {
+      const horizon = context.currentTime + 0.16
+      while (nextAt <= horizon) {
+        const step = nextStep
+        standaloneDefinition.hits
+          .filter(
+            (hit) =>
+              hit.step === step && !mutedVoices.has(hit.voice),
+          )
+          .forEach((hit) => {
+            schedulePercussion(
+              context,
+              hit.voice,
+              standaloneKit,
+              hit.velocity * standaloneVolume,
+              nextAt,
+              analyser,
+            ).forEach(trackNode)
+          })
+        const callbackTimer = window.setTimeout(() => {
+          stepTimers.delete(callbackTimer)
+          if (active) onStandaloneStep(step)
+        }, Math.max(0, (nextAt - context.currentTime) * 1000))
+        stepTimers.add(callbackTimer)
+        const swingFactor =
+            standaloneDefinition.stepsPerBar > beatsPerBar &&
+            standaloneDefinition.stepsPerBar % 2 === 0
+            ? nextStep % 2 === 0
+              ? swing * 2
+              : (1 - swing) * 2
+            : 1
+        nextAt += baseStepDuration * swingFactor
+        nextStep =
+          (nextStep + 1) % standaloneDefinition.stepsPerBar
+      }
+    }
+
+    void context.resume().then(() => {
+      if (!active) return
+      scheduleAhead()
+      timer = window.setInterval(scheduleAhead, 40)
+    })
+    return () => {
+      active = false
+      onStandaloneStep(-1)
+      if (timer !== undefined) window.clearInterval(timer)
+      stepTimers.forEach((stepTimer) => window.clearTimeout(stepTimer))
+      scheduledNodes.forEach((node) => {
+        try {
+          node.stop()
+        } catch {
+          // A scheduled sound may already have ended.
+        }
+      })
+    }
+  }, [
+    ensureAudioGraph,
+    onStandaloneStep,
+    standaloneBpm,
+    standaloneDefinition,
+    standaloneKit,
+    standaloneMutedVoices,
+    standalonePlaying,
+    standaloneVolume,
   ])
 
   useEffect(

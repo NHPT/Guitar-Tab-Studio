@@ -15,9 +15,11 @@ import { StringDecoder } from 'node:string_decoder'
 import {
   guitarGestures,
   detectStandardAudioSignature,
+  notationPositionAt,
   parseAnalysisDocument,
   requiresAuthorizedMediaDecode,
   STUDIO_PROJECT_SCHEMA_VERSION,
+  tempoMapFromBeats,
   type AnalysisDocument,
 } from '@gts/core'
 import type {
@@ -380,19 +382,29 @@ export function createStudioProject(
   source: SourceDescriptor,
   title =
     builtinDemoAnalysis.metadata?.title ??
-    'Take Me Home, Country Roads',
+    '国际歌',
 ): StudioProject {
   const analysis = builtinDemoAnalysis
   const tab = tabFromWorker(analysis)
   tab.capo = analysis.capo ?? 0
   tab.measures.forEach((measure, index) => {
-    measure.section = index === 0 ? '前奏' : undefined
+    measure.section =
+      analysis.pickup_beats && index === 0
+        ? '弱起'
+        : index === (analysis.pickup_beats ? 1 : 0)
+          ? '前奏'
+          : undefined
   })
   const guitarArrangement = guitarPartsFromWorker(analysis, tab)
   for (const part of guitarArrangement.guitarParts) {
     part.tab.capo = analysis.capo ?? 0
     part.tab.measures.forEach((measure, index) => {
-      measure.section = index === 0 ? '前奏' : undefined
+      measure.section =
+        analysis.pickup_beats && index === 0
+          ? '弱起'
+          : index === (analysis.pickup_beats ? 1 : 0)
+            ? '前奏'
+            : undefined
     })
   }
   const duration =
@@ -402,9 +414,7 @@ export function createStudioProject(
         Math.max(maximum, measure.start + measure.duration),
       0,
     )
-  const separatedGuitars = (analysis.stem_tracks ?? []).filter(
-    (track) => track.role === 'guitar',
-  )
+  const separatedGuitars = confirmedGuitarTracks(analysis)
   return {
     schemaVersion: STUDIO_PROJECT_SCHEMA_VERSION,
     id: randomUUID(),
@@ -510,6 +520,12 @@ export function tabFromWorker(
           { length: Math.ceil(duration / beatDuration) + 5 },
           (_, index) => index * beatDuration,
         )
+  const pickupBeats =
+    detectedBeats.length >= 2 &&
+    Number.isInteger(analysis.pickup_beats) &&
+    (analysis.pickup_beats ?? 0) > 0
+      ? Math.min(beatsPerMeasure - 1, analysis.pickup_beats ?? 0)
+      : 0
   while (
     beatStarts.length < 5 ||
     beatStarts.at(-1)! <= duration + measureDuration
@@ -525,17 +541,36 @@ export function tabFromWorker(
       recentIntervals[Math.floor(recentIntervals.length / 2)] ?? beatDuration
     beatStarts.push(previous + extrapolatedDuration)
   }
-  const measureCount = Math.max(
-    1,
-    Array.from(
-      { length: Math.ceil(beatStarts.length / beatsPerMeasure) },
-      (_, index) => index * beatsPerMeasure,
-    ).filter((beatIndex) => beatStarts[beatIndex] < duration - 0.05).length,
-  )
-  const measures: TabMeasure[] = Array.from({ length: measureCount }, (_, measureIndex) => {
-    const firstBeatIndex = measureIndex * beatsPerMeasure
+  const measureBeatRanges: Array<{
+    firstBeatIndex: number
+    beatCount: number
+  }> = []
+  if (pickupBeats > 0 && beatStarts[0] < duration - 0.05) {
+    measureBeatRanges.push({
+      firstBeatIndex: 0,
+      beatCount: pickupBeats,
+    })
+  }
+  for (
+    let firstBeatIndex = pickupBeats;
+    beatStarts[firstBeatIndex] < duration - 0.05;
+    firstBeatIndex += beatsPerMeasure
+  ) {
+    measureBeatRanges.push({
+      firstBeatIndex,
+      beatCount: beatsPerMeasure,
+    })
+  }
+  if (measureBeatRanges.length === 0) {
+    measureBeatRanges.push({
+      firstBeatIndex: 0,
+      beatCount: beatsPerMeasure,
+    })
+  }
+  const measures: TabMeasure[] = measureBeatRanges.map((range, measureIndex) => {
+    const { firstBeatIndex, beatCount } = range
     const start = beatStarts[firstBeatIndex]
-    const end = beatStarts[firstBeatIndex + beatsPerMeasure]
+    const end = beatStarts[firstBeatIndex + beatCount]
     const chord =
       sourceChords.find(
         (candidate) => candidate.start <= start && candidate.start + candidate.duration > start,
@@ -547,12 +582,14 @@ export function tabFromWorker(
       duration: end - start,
       chord,
       section:
-        measureIndex === 0
-          ? '前奏'
-          : measureIndex % 16 === 0
-            ? `段落 ${Math.floor(measureIndex / 16) + 1}`
+        measureIndex === 0 && pickupBeats > 0
+          ? '弱起'
+          : measureIndex === (pickupBeats > 0 ? 1 : 0)
+            ? '前奏'
+            : (measureIndex - (pickupBeats > 0 ? 1 : 0)) % 16 === 0
+              ? `段落 ${Math.floor((measureIndex - (pickupBeats > 0 ? 1 : 0)) / 16) + 1}`
             : undefined,
-      beats: Array.from({ length: beatsPerMeasure }, (_, beatIndex): TabBeat => ({
+      beats: Array.from({ length: beatCount }, (_, beatIndex): TabBeat => ({
         at: beatStarts[firstBeatIndex + beatIndex],
         duration:
           beatStarts[firstBeatIndex + beatIndex + 1] -
@@ -562,6 +599,13 @@ export function tabFromWorker(
       })),
     }
   })
+  const beatSlots = measureBeatRanges.flatMap((range, measureIndex) =>
+    Array.from({ length: range.beatCount }, (_, beatIndex) => ({
+      globalBeatIndex: range.firstBeatIndex + beatIndex,
+      measureIndex,
+      beatIndex,
+    })),
+  )
 
   const beatIndexAt = (at: number) => {
     let beatLowerBound = 0
@@ -576,7 +620,7 @@ export function tabFromWorker(
     }
     return Math.max(
       0,
-      Math.min(measures.length * beatsPerMeasure - 1, beatLowerBound - 1),
+      Math.min(beatSlots.length - 1, beatLowerBound - 1),
     )
   }
   const beatDurationAt = (at: number) => {
@@ -630,14 +674,10 @@ export function tabFromWorker(
   for (const note of notes) {
     const gesture = gestureByNote.get(note.id)
     const anchor = gesture?.at ?? note.at
-    const index = beatIndexAt(anchor)
-    // Quantize only to a nearby beat (<= 20ms); never snap successive strings
-    // to a broadband attack and destroy the evidence of sweep direction.
-    const nearestBeat = [beatStarts[index], beatStarts[index + 1]]
-      .reduce((best, at) => Math.abs(at - anchor) < Math.abs(best - anchor) ? at : best)
-    const notationAnchor = Math.abs(nearestBeat - anchor) <= 0.02 ? nearestBeat : anchor
+    // Keep the performed timestamp immutable. Nearby quarter, eighth, triplet,
+    // and sixteenth positions are cleaned only on the notation timeline.
     const performedNotationAt =
-      gesture?.style === 'arpeggio' ? note.at : notationAnchor
+      gesture?.style === 'arpeggio' ? note.at : anchor
     if (gesture?.style === 'strum') {
       note.technique = gesture.direction === 'up' ? 'strum-up' : 'strum-down'
       note.techniqueConfidence = Math.min(0.82, ...gesture.notes.map((item) => item.confidence))
@@ -647,23 +687,15 @@ export function tabFromWorker(
         `spread-ms:${Math.round((gesture.notes.at(-1)!.at - gesture.at) * 1000)}`,
       ]
     }
-    const physicalIndex = beatIndexAt(performedNotationAt)
-    const earlyBy = beatStarts[physicalIndex + 1] - performedNotationAt
-    // A slightly anticipated beat belongs to its notated beat. Keep the
-    // performance timestamp, and make this decision once for the whole sweep.
+    const notation = notationPositionAt(performedNotationAt, beatStarts)
     const assignedIndex = Math.min(
-      measures.length * beatsPerMeasure - 1,
-      earlyBy >= 0 && earlyBy <= beatDurationAt(performedNotationAt) * 0.16
-        ? physicalIndex + 1
-        : physicalIndex,
+      beatSlots.length - 1,
+      notation.beatIndex,
     )
-    note.notationAt =
-      performedNotationAt < beatStarts[0] || assignedIndex !== physicalIndex
-        ? beatStarts[assignedIndex]
-        : performedNotationAt
-    const beat = measures[
-      Math.floor(assignedIndex / beatsPerMeasure)
-    ].beats[assignedIndex % beatsPerMeasure]
+    note.notationAt = notation.notationAt
+    note.notationBeat = notation.notationBeat
+    const slot = beatSlots[assignedIndex]
+    const beat = measures[slot.measureIndex].beats[slot.beatIndex]
     beat.notes.push(note)
   }
   measures.forEach((measure) => {
@@ -683,6 +715,17 @@ export function tabFromWorker(
     tuning: ['E4', 'B3', 'G3', 'D3', 'A2', 'E2'],
     capo: 0,
     timeSignature,
+    tempoMap: analysis.tempo_map
+      ? {
+          ...analysis.tempo_map,
+          points: analysis.tempo_map.points.map((point) => ({ ...point })),
+        }
+      : tempoMapFromBeats(
+          detectedBeats.length >= 2
+            ? detectedBeats
+            : beatStarts.filter((beat) => beat <= duration),
+          bpm,
+        ),
     vocalMelody: analysis.vocal_melody?.map((note, index) => ({
       id: `vocal-${index + 1}`,
       at: note.start,
@@ -767,6 +810,16 @@ function guitarPartsFromWorker(
   }
 }
 
+function confirmedGuitarTracks(analysis: WorkerAnalysis) {
+  const transcribedTrackIds = new Set(
+    (analysis.guitar_parts ?? []).map((part) => part.track_id),
+  )
+  return (analysis.stem_tracks ?? []).filter(
+    (track) =>
+      track.role === 'guitar' && transcribedTrackIds.has(track.id),
+  )
+}
+
 export function workerProject(
   analysis: WorkerAnalysis,
   source: SourceDescriptor,
@@ -787,9 +840,7 @@ export function workerProject(
       0,
     )
   const dataRoot = runtimeDataRoot()
-  const separatedGuitars = (analysis.stem_tracks ?? []).filter(
-    (track) => track.role === 'guitar',
-  )
+  const separatedGuitars = confirmedGuitarTracks(analysis)
   const baseTrackTemplates = base.tracks.filter(
     (track, index, tracks) =>
       tracks.findIndex((candidate) => candidate.role === track.role) === index,
@@ -854,11 +905,23 @@ export function workerProject(
   }
 }
 
-function workerSourceArguments(job: AnalysisJob, inputPath?: string): string[] {
+export function workerSourceArguments(
+  job: AnalysisJob,
+  inputPath?: string,
+): string[] {
   return inputPath
     ? ['--input', resolve(inputPath)]
     : job.source.url
-      ? ['--url', job.source.url]
+      ? [
+          '--url',
+          job.source.url,
+          ...(job.source.mediaSession
+            ? [
+                '--cookies-from-browser',
+                job.source.mediaSession.browser,
+              ]
+            : []),
+        ]
       : []
 }
 
@@ -1284,7 +1347,7 @@ async function acquireAuthorizedLink(
   await executeWorker(
     workerCommand,
     ffmpegCommand,
-    ['--url', job.source.url, '--acquire-only'],
+    [...workerSourceArguments(job), '--acquire-only'],
     root,
     undefined,
     options.signal,
@@ -1420,36 +1483,95 @@ export function runPipeline(
   return runInferencePipeline(job, onUpdate, inputPath, options).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : '媒体获取失败'
     if (!inputPath && platform) {
-      throw new Error(describeMediaAcquisitionFailure(platform, message))
+      const failure = classifyMediaAcquisitionFailure(platform, message)
+      const wrapped = new Error(failure.message) as Error & {
+        errorCode?: 'media-auth-required' | 'media-session-unavailable'
+      }
+      wrapped.errorCode = failure.errorCode
+      throw wrapped
     }
     throw error
   })
+}
+
+export function classifyMediaAcquisitionFailure(
+  platform: PlatformDescriptor,
+  message: string,
+): {
+  message: string
+  errorCode?: 'media-auth-required' | 'media-session-unavailable'
+} {
+  if (/drm|encrypted|encryption/iu.test(message)) {
+    return {
+      message: `${platform.label}返回了当前解码器不支持的 DRM 或加密媒体流`,
+    }
+  }
+  if (
+    /sign in|login|cookie|captcha|confirm you.re not a bot|http error (?:401|403|412|429)/iu.test(
+      message,
+    )
+  ) {
+    if (
+      /could not (?:copy|find).*cookie|failed to decrypt|keyring|safe storage/iu.test(
+        message,
+      )
+    ) {
+      return {
+        message: `${platform.label}需要登录，但无法读取或解密系统默认浏览器的 Cookie；请确认已登录并完全退出浏览器后重试`,
+        errorCode: 'media-session-unavailable',
+      }
+    }
+    return {
+      message: `${platform.label}要求登录会话或人机验证；可在导入窗口使用系统默认浏览器的登录状态重试`,
+      errorCode: 'media-auth-required',
+    }
+  }
+  if (/unsupported url|no suitable extractor/iu.test(message)) {
+    return {
+      message: `${platform.label}链接格式暂未被当前提取器识别，请使用标准歌曲/视频详情页链接`,
+    }
+  }
+  if (/unavailable|private|removed|geo|region|not available/iu.test(message)) {
+    return { message: `${platform.label}媒体在当前账号或网络区域不可用` }
+  }
+  if (/requested format|no video formats|no formats/iu.test(message)) {
+    return { message: `${platform.label}没有返回可解码的音频格式` }
+  }
+  if (
+    /unable to download webpage|connection|network|timed out|timeout|ssl|certificate|proxy/iu.test(
+      message,
+    )
+  ) {
+    return {
+      message: `${platform.label}媒体获取网络请求失败；请检查系统代理、TLS 证书、网络限制或稍后重试`,
+    }
+  }
+  if (
+    /extractor|signature|unable to extract|failed to parse|site changed/iu.test(
+      message,
+    )
+  ) {
+    return {
+      message: `${platform.label}页面结构与当前提取器不兼容；请更新到包含新版 yt-dlp 的应用版本后重试`,
+    }
+  }
+  const detail = message
+    .replace(/[\r\n\t]+/gu, ' ')
+    .replace(/[\\/](?:Users|home|var|tmp|private)[\\/]\S*/giu, '[local path]')
+    .trim()
+    .slice(0, 240)
+  return {
+    message: detail
+      ? `${platform.label}媒体获取失败：${detail}`
+      : `${platform.label}媒体获取失败；请检查链接状态、登录会话、网络限制或提取器版本`,
+  }
 }
 
 export function describeMediaAcquisitionFailure(
   platform: PlatformDescriptor,
   message: string,
 ): string {
-  if (/drm|encrypted|encryption/iu.test(message)) {
-    return `${platform.label}返回了当前解码器不支持的 DRM 或加密媒体流`
-  }
-  if (
-    /sign in|login|cookie|captcha|confirm you.re not a bot|http error (?:401|403|429)/iu.test(
-      message,
-    )
-  ) {
-    return `${platform.label}要求登录会话、人机验证，或限制了当前网络请求；可配置本地 Cookie 文件或代理后重试`
-  }
-  if (/unsupported url|no suitable extractor/iu.test(message)) {
-    return `${platform.label}链接格式暂未被当前提取器识别，请使用标准歌曲/视频详情页链接`
-  }
-  if (/unavailable|private|removed|geo|region|not available/iu.test(message)) {
-    return `${platform.label}媒体在当前账号或网络区域不可用`
-  }
-  if (/requested format|no video formats|no formats/iu.test(message)) {
-    return `${platform.label}没有返回可解码的音频格式`
-  }
-  return `${platform.label}媒体获取失败；请检查链接状态、登录会话、网络限制或提取器版本`
+  return classifyMediaAcquisitionFailure(platform, message).message
 }
 
 export function sourceFromLink(url: string): SourceDescriptor {

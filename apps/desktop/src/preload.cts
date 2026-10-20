@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  DesktopApplicationSettings,
   DesktopBridge,
   DesktopInvokeRequest,
   DesktopStudioMethod,
@@ -18,7 +19,9 @@ const allowedMethods = new Set<DesktopStudioMethod>([
   'cancel-job',
   'submit-link',
   'submit-upload',
+  'submit-score',
   'select-local-file',
+  'import-media-key-database',
   'local-projects',
   'remove-project',
   'recent-projects',
@@ -42,10 +45,16 @@ const allowedMethods = new Set<DesktopStudioMethod>([
   'create-backup',
   'restore-backup',
   'clear-cache',
+  'open-full-disk-access-settings',
   'storage-cleanup-status',
   'set-storage-cleanup-config',
   'run-storage-cleanup',
   'export-diagnostics',
+  'application-settings',
+  'set-language',
+  'detect-default-media-browser',
+  'open-external-url',
+  'set-background-job-state',
 ])
 
 const bridge: DesktopBridge = {
@@ -64,6 +73,22 @@ const bridge: DesktopBridge = {
     const handler = (_event: unknown, projectId: string) => listener(projectId)
     ipcRenderer.on('studio:open-project', handler)
     return () => ipcRenderer.removeListener('studio:open-project', handler)
+  },
+  onOpenSettings(listener: () => void): () => void {
+    const handler = () => listener()
+    ipcRenderer.on('studio:open-settings', handler)
+    return () => ipcRenderer.removeListener('studio:open-settings', handler)
+  },
+  onLanguageChanged(
+    listener: (settings: DesktopApplicationSettings) => void,
+  ): () => void {
+    const handler = (
+      _event: unknown,
+      settings: DesktopApplicationSettings,
+    ) => listener(settings)
+    ipcRenderer.on('studio:language-changed', handler)
+    return () =>
+      ipcRenderer.removeListener('studio:language-changed', handler)
   },
   onTranscriptionProgress(
     listener: (progress: TranscriptionSetupProgress) => void,

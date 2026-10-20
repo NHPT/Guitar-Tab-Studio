@@ -69,7 +69,7 @@ test('imports a PDF TAB as an editable and playable project', async ({
   ).toBeVisible({ timeout: 30_000 })
   await expect(page.locator('.score-measure')).toHaveCount(2)
   await expect(page.locator('.tab-glyph')).toHaveCount(6)
-  await expect(page.locator('.track-title strong')).toHaveText(['吉他'])
+  await expect(page.locator('.track-title strong')).toHaveText(['曲谱合成'])
 
   await page.getByRole('button', { name: '完整曲谱' }).click()
   await expect(page.locator('.chord-diagram figcaption')).toHaveText(['G', 'C'])

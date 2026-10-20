@@ -24,6 +24,7 @@ export type PercussionVoice =
   | 'snare'
   | 'closed-hat'
   | 'open-hat'
+  | 'crash'
   | 'clap'
   | 'rim'
   | 'tom-high'
@@ -265,6 +266,40 @@ export const PRACTICE_RHYTHMS: PracticeRhythm[] = [
     ],
   }),
   rhythm({
+    id: 'rock-arena-fill',
+    label: '体育场摇滚加花',
+    group: 'rock',
+    kit: 'acoustic',
+    timeSignature: FOUR_FOUR,
+    stepsPerBar: 16,
+    bpmRange: [70, 165],
+    hits: [
+      ...hits('crash', [0], 0.84),
+      ...hits('kick', [0, 7, 8], 0.94),
+      ...hits('snare', [4, 12, 15], 0.9),
+      ...hits('closed-hat', [0, 2, 4, 6, 8, 10], 0.52),
+      ...hits('tom-high', [13], 0.72),
+      ...hits('tom-low', [14], 0.82),
+    ],
+  }),
+  rhythm({
+    id: 'rock-progressive-fill',
+    label: '渐进摇滚轮鼓',
+    group: 'rock',
+    kit: 'acoustic',
+    timeSignature: FOUR_FOUR,
+    stepsPerBar: 16,
+    bpmRange: [65, 150],
+    hits: [
+      ...hits('crash', [0], 0.78),
+      ...hits('kick', [0, 3, 6, 8, 10], 0.9),
+      ...hits('snare', [4, 12], 0.92),
+      ...hits('closed-hat', [0, 2, 4, 6, 8, 10], 0.46),
+      ...hits('tom-high', [11, 13], 0.68),
+      ...hits('tom-low', [14, 15], 0.8),
+    ],
+  }),
+  rhythm({
     id: 'pop-clean',
     label: '清爽流行',
     group: 'pop',
@@ -322,6 +357,24 @@ export const PRACTICE_RHYTHMS: PracticeRhythm[] = [
     ],
   }),
   rhythm({
+    id: 'pop-transition-fill',
+    label: '流行过门加花',
+    group: 'pop',
+    kit: 'acoustic',
+    timeSignature: FOUR_FOUR,
+    stepsPerBar: 16,
+    bpmRange: [72, 150],
+    hits: [
+      ...hits('crash', [0], 0.68),
+      ...hits('kick', [0, 7, 8], 0.84),
+      ...hits('snare', [4, 12], 0.84),
+      ...every('closed-hat', 16, 2, 0.44),
+      ...hits('open-hat', [10], 0.5),
+      ...hits('tom-high', [13, 14], 0.62),
+      ...hits('tom-low', [15], 0.76),
+    ],
+  }),
+  rhythm({
     id: 'funk-sixteenth',
     label: '十六分放克',
     group: 'funk',
@@ -349,6 +402,23 @@ export const PRACTICE_RHYTHMS: PracticeRhythm[] = [
       ...hits('snare', [4, 12], 0.92),
       ...hits('rim', [7, 15], 0.42),
       ...every('closed-hat', 16, 2, 0.5),
+    ],
+  }),
+  rhythm({
+    id: 'funk-ghost-fill',
+    label: '放克幽灵音加花',
+    group: 'funk',
+    kit: 'acoustic',
+    timeSignature: FOUR_FOUR,
+    stepsPerBar: 16,
+    bpmRange: [65, 128],
+    hits: [
+      ...hits('kick', [0, 3, 7, 10], 0.84),
+      ...hits('snare', [4, 12], 0.9),
+      ...hits('rim', [2, 6, 11, 14], 0.36),
+      ...every('closed-hat', 16, 1, 0.34),
+      ...hits('open-hat', [6, 14], 0.5),
+      ...hits('tom-high', [15], 0.62),
     ],
   }),
   rhythm({
@@ -496,6 +566,23 @@ export const PRACTICE_RHYTHMS: PracticeRhythm[] = [
     ],
   }),
   rhythm({
+    id: 'drum-and-bass-fill',
+    label: 'DnB 碎拍加花',
+    group: 'electronic',
+    kit: 'electronic',
+    timeSignature: FOUR_FOUR,
+    stepsPerBar: 16,
+    bpmRange: [145, 195],
+    hits: [
+      ...hits('crash', [0], 0.72),
+      ...hits('kick', [0, 6, 10, 15], 0.94),
+      ...hits('snare', [4, 12], 0.96),
+      ...every('closed-hat', 16, 1, 0.33),
+      ...hits('tom-high', [13], 0.62),
+      ...hits('tom-low', [14], 0.74),
+    ],
+  }),
+  rhythm({
     id: 'trap',
     label: 'Trap 半拍',
     group: 'electronic',
@@ -633,6 +720,23 @@ export const PRACTICE_RHYTHMS: PracticeRhythm[] = [
       ...hits('kick', [0, 5, 6], 0.9),
       ...hits('snare', [6], 0.92),
       ...every('closed-hat', 12, 2, 0.48),
+    ],
+  }),
+  rhythm({
+    id: 'six-eight-fill',
+    label: '6/8 轮鼓加花',
+    group: 'other-meter',
+    kit: 'acoustic',
+    timeSignature: SIX_EIGHT,
+    stepsPerBar: 12,
+    bpmRange: [65, 145],
+    hits: [
+      ...hits('crash', [0], 0.74),
+      ...hits('kick', [0, 5, 6], 0.88),
+      ...hits('snare', [6, 11], 0.88),
+      ...every('closed-hat', 12, 2, 0.44),
+      ...hits('tom-high', [8, 9], 0.66),
+      ...hits('tom-low', [10], 0.8),
     ],
   }),
   rhythm({

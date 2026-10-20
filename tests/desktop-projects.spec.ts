@@ -96,6 +96,14 @@ test('lists, switches and removes local projects from the sidebar', async ({
             }
             case 'project-revisions':
               return []
+            case 'application-settings':
+              return {
+                language: 'zh-CN',
+                languagePreference: 'system',
+                systemLanguage: 'zh-CN',
+              }
+            case 'set-background-job-state':
+              return request.payload
             default:
               throw new Error(`Unexpected desktop method: ${request.method}`)
           }
@@ -104,6 +112,12 @@ test('lists, switches and removes local projects from the sidebar', async ({
           return () => undefined
         },
         onOpenProject() {
+          return () => undefined
+        },
+        onOpenSettings() {
+          return () => undefined
+        },
+        onLanguageChanged() {
           return () => undefined
         },
         onTranscriptionProgress() {

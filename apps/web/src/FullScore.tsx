@@ -1,9 +1,11 @@
-import { useCallback, useLayoutEffect, useMemo, useRef } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { MutableRefObject } from 'react'
+import type { AppLanguage } from '@gts/core'
 import type { StudioProject, TabMeasure, TabNote, Technique } from './types'
 import { transposeChordForCapo } from './capo'
 import { inferBeatStyle, scoreTiming } from './rhythm'
 import type { ScoreTiming } from './rhythm'
+import { translate } from './i18n'
 
 type Fret = number | 'x'
 
@@ -333,19 +335,28 @@ export function ChordDiagram({ name }: { name: string }) {
   )
 }
 
-function rhythmKind(measure: TabMeasure, timing: ScoreTiming): string {
+function rhythmKind(
+  measure: TabMeasure,
+  timing: ScoreTiming,
+  language: AppLanguage,
+): string {
   const styles = measure.beats
     .filter((beat) => beat.notes.length > 0)
     .flatMap((beat) => inferBeatStyle(beat) === 'pick' &&
       beat.notes.some((note) => note.technique.startsWith('strum-'))
       ? ['strum', 'pick'] : [inferBeatStyle(beat)])
-  if (styles.length === 0) return measure.beats.some((beat) => timing.heldBeatTimes.has(beat.at)) ? '延音' : '休止'
-  if (styles.every((style) => style === 'strum')) return '扫弦'
-  if (styles.every((style) => style === 'arpeggio')) return '琶音'
-  if (styles.every((style) => style === 'rasgueado')) return '轮扫'
-  if (styles.every((style) => style === 'tremolo')) return '轮指'
-  if (styles.every((style) => !style || style === 'pick')) return '拨弦'
-  return '综合'
+  let label: string
+  if (styles.length === 0) {
+    label = measure.beats.some((beat) => timing.heldBeatTimes.has(beat.at))
+      ? '延音'
+      : '休止'
+  } else if (styles.every((style) => style === 'strum')) label = '扫弦'
+  else if (styles.every((style) => style === 'arpeggio')) label = '琶音'
+  else if (styles.every((style) => style === 'rasgueado')) label = '轮扫'
+  else if (styles.every((style) => style === 'tremolo')) label = '轮指'
+  else if (styles.every((style) => !style || style === 'pick')) label = '拨弦'
+  else label = '综合'
+  return translate(language, label)
 }
 
 function relativeFret(note: TabNote, capo: number): number {
@@ -420,6 +431,7 @@ function TabNotation({
   lyrics,
   keySignature,
   melodyTonicPitch,
+  language,
   showLabels,
   timelineWidth,
   selectedNoteId,
@@ -437,6 +449,7 @@ function TabNotation({
   lyrics: StudioProject['tab']['lyrics']
   keySignature: string
   melodyTonicPitch: number
+  language: AppLanguage
   showLabels: boolean
   timelineWidth?: number
   selectedNoteId?: string
@@ -480,7 +493,10 @@ function TabNotation({
   )
   const rhythmSegments = timing.segments.get(measure.number) ?? []
   const quarterScale = 4 / timeSignature[1]
-  const measureCapacity = timeSignature[0] * quarterScale
+  const measureCapacity = Math.max(
+    quarterScale,
+    measure.beats.length * quarterScale,
+  )
   const melodyPositionAt = (at: number) => {
     const beatIndex = Math.max(
       0,
@@ -755,7 +771,11 @@ function TabNotation({
       data-timeline-start={timelineStart}
       data-timeline-end={timelineEnd}
       role="img"
-      aria-label={`第 ${measure.number} 小节 ${rhythmKind(measure, timing)}六线谱`}
+      aria-label={
+        language === 'en-US'
+          ? `Measure ${measure.number}, ${rhythmKind(measure, timing, language)} guitar tablature`
+          : `第 ${measure.number} 小节 ${rhythmKind(measure, timing, language)}六线谱`
+      }
     >
       {showLabels ? (
         <>
@@ -1396,7 +1416,9 @@ function ScoreMeasure({
   lyrics,
   keySignature,
   melodyTonicPitch,
+  language,
   showLabels,
+  rowEnd,
   timelineWidth,
   selectedMeasureNumber,
   selectedNoteId,
@@ -1415,7 +1437,9 @@ function ScoreMeasure({
   lyrics: StudioProject['tab']['lyrics']
   keySignature: string
   melodyTonicPitch: number
+  language: AppLanguage
   showLabels: boolean
+  rowEnd: boolean
   timelineWidth?: number
   selectedMeasureNumber?: number
   selectedNoteId?: string
@@ -1429,7 +1453,7 @@ function ScoreMeasure({
     <article
       className={`score-measure${
         selectedMeasureNumber === measure.number ? ' is-chord-selected' : ''
-      }`}
+      }${rowEnd ? ' is-row-end' : ''}`}
       data-measure={measure.number}
       style={
         timelineWidth === undefined
@@ -1441,18 +1465,26 @@ function ScoreMeasure({
             }
       }
     >
-      {measure.section ? <span className="score-section-label">{measure.section}</span> : null}
+      {measure.section ? (
+        <span className="score-section-label">
+          {translate(language, measure.section)}
+        </span>
+      ) : null}
       <header className="measure-chord">
         <button
           className="chord-diagram-button"
           type="button"
-          aria-label={`校对第 ${measure.number} 小节 ${chord} 和弦`}
+          aria-label={
+            language === 'en-US'
+              ? `Review ${chord} in measure ${measure.number}`
+              : `校对第 ${measure.number} 小节 ${chord} 和弦`
+          }
           onClick={() => onSelectChord(measure.number)}
         >
           <ChordDiagram name={chord} />
         </button>
         <span>
-          <small>{rhythmKind(measure, timing)}</small>
+          <small>{rhythmKind(measure, timing, language)}</small>
         </span>
       </header>
       <TabNotation
@@ -1467,6 +1499,7 @@ function ScoreMeasure({
         lyrics={lyrics}
         keySignature={keySignature}
         melodyTonicPitch={melodyTonicPitch}
+        language={language}
         showLabels={showLabels}
         timelineWidth={timelineWidth}
         selectedNoteId={selectedNoteId}
@@ -1485,6 +1518,7 @@ export function FullScore({
   playing,
   speed,
   expanded,
+  language,
   capo,
   selectedMeasureNumber,
   selectedNoteId,
@@ -1498,6 +1532,7 @@ export function FullScore({
   playing: boolean
   speed: number
   expanded: boolean
+  language: AppLanguage
   capo: number
   selectedMeasureNumber?: number
   selectedNoteId?: string
@@ -1510,6 +1545,7 @@ export function FullScore({
   const timelineAnchorsRef = useRef<Array<{ at: number; x: number }>>([])
   const activeMeasureRef = useRef<number | undefined>(undefined)
   const visualPositionRef = useRef(positionSnapshot)
+  const [measureColumns, setMeasureColumns] = useState(4)
   const timing = useMemo(() => scoreTiming(project.tab), [project.tab])
   const relatedNotes = useMemo(
     () =>
@@ -1540,6 +1576,22 @@ export function FullScore({
     const pitchClass = numberedPitchClasses[root] ?? 0
     return pitchClass + 12 * Math.round((center - pitchClass) / 12)
   }, [project.key, project.tab.vocalMelody])
+
+  useLayoutEffect(() => {
+    const flow = scoreFlowRef.current
+    if (!flow || !expanded) return
+    const updateColumns = (width: number) => {
+      setMeasureColumns(
+        Math.max(1, Math.min(8, Math.floor(width / 240))),
+      )
+    }
+    updateColumns(flow.clientWidth)
+    const observer = new ResizeObserver(([entry]) => {
+      updateColumns(entry.contentRect.width)
+    })
+    observer.observe(flow)
+    return () => observer.disconnect()
+  }, [expanded])
 
   const syncScorePosition = useCallback((position: number) => {
     const flow = scoreFlowRef.current
@@ -1692,7 +1744,15 @@ export function FullScore({
           lyrics={project.tab.lyrics}
           keySignature={project.key}
           melodyTonicPitch={melodyTonicPitch}
-          showLabels={expanded || index === 0}
+          language={language}
+          showLabels={
+            expanded ? index % measureColumns === 0 : index === 0
+          }
+          rowEnd={
+            expanded &&
+            ((index + 1) % measureColumns === 0 ||
+              index === project.tab.measures.length - 1)
+          }
           timelineWidth={
             expanded
               ? undefined
@@ -1708,6 +1768,8 @@ export function FullScore({
     [
       capo,
       expanded,
+      language,
+      measureColumns,
       onSelectBeat,
       onSelectChord,
       onSelectNote,
@@ -1737,6 +1799,13 @@ export function FullScore({
         <div
           className="score-track"
           ref={scoreTrackRef}
+          style={
+            expanded
+              ? {
+                  gridTemplateColumns: `repeat(${measureColumns}, minmax(0, 1fr))`,
+                }
+              : undefined
+          }
         >
           {measures}
         </div>

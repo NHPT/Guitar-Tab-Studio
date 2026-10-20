@@ -2,6 +2,7 @@ import type {
   GuitarPartRole,
   Technique,
   TechniqueModelInfo,
+  TempoMap,
   TimeSignature,
   TrackRole,
   TranscriptionModelInfo,
@@ -18,6 +19,7 @@ import {
   stringAt,
   stringsAt,
 } from './validation.js'
+import { tempoMapAt } from './timing.js'
 
 export const ANALYSIS_SCHEMA_VERSION = 10 as const
 export const MINIMUM_ANALYSIS_SCHEMA_VERSION = 1 as const
@@ -130,6 +132,8 @@ export interface AnalysisDocument {
   key?: string
   capo?: number
   beats?: number[]
+  pickup_beats?: number
+  tempo_map?: TempoMap
   onsets?: number[]
   vocal_melody?: AnalysisVocalMelodyNote[]
   lyrics?: AnalysisTimedLyric[]
@@ -262,6 +266,14 @@ function transcriptionModelAt(
     name: stringAt(model.name, `${path}.name`),
     version: modelVersionAt(model.version, `${path}.version`),
     kind: kind === 'hybrid' ? 'trained' : kind,
+    timingModel: optionalStringAt(
+      model.timingModel ?? model.timing_model,
+      `${path}.timingModel`,
+    ),
+    positionOptimizer: optionalStringAt(
+      model.positionOptimizer ?? model.position_optimizer,
+      `${path}.positionOptimizer`,
+    ),
   }
 }
 
@@ -322,6 +334,17 @@ function nullableNumberAt(
   path: string,
 ): number | null | undefined {
   return value === null ? null : optionalNumberAt(value, path)
+}
+
+function pickupBeatsAt(value: unknown, path: string): number | undefined {
+  const pickupBeats = optionalNumberAt(value, path)
+  if (
+    pickupBeats !== undefined &&
+    (!Number.isInteger(pickupBeats) || pickupBeats < 0 || pickupBeats > 3)
+  ) {
+    throw new CoreValidationError(path, 'expected integer between 0 and 3')
+  }
+  return pickupBeats
 }
 
 function noteAt(value: unknown, path: string): AnalysisNote {
@@ -497,6 +520,14 @@ export function parseAnalysisDocument(value: unknown): AnalysisDocument {
       analysis.beats === undefined
         ? undefined
         : numericArrayAt(analysis.beats, 'analysis.beats'),
+    pickup_beats: pickupBeatsAt(
+      analysis.pickup_beats,
+      'analysis.pickup_beats',
+    ),
+    tempo_map:
+      analysis.tempo_map === undefined
+        ? undefined
+        : tempoMapAt(analysis.tempo_map, 'analysis.tempo_map'),
     onsets:
       analysis.onsets === undefined
         ? undefined

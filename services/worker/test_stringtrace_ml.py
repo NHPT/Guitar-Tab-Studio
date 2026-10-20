@@ -11,6 +11,15 @@ import pretty_midi
 import soundfile
 import torch
 
+from stringtrace_ml.beat_reference import (
+    adjudicate_reviews as adjudicate_beat_reviews,
+    compare_reviews as compare_beat_reviews,
+    create_review as create_beat_review,
+    evaluate_gate as evaluate_beat_gate,
+    evaluate_review as evaluate_beat_review,
+    submit_review as submit_beat_review,
+    validate_review as validate_beat_review,
+)
 from stringtrace_ml.candidate_activity import (
     CandidateActivityConfig,
     CandidateActivityDataset,
@@ -70,7 +79,11 @@ from stringtrace_ml.hybrid import (
 )
 from stringtrace_ml.gate import evaluate_gate
 from stringtrace_ml.import_agpt_techniques import normalized_pitch
-from stringtrace_ml.metrics import evaluate_events
+from stringtrace_ml.metrics import (
+    evaluate_beats,
+    evaluate_chords,
+    evaluate_events,
+)
 from stringtrace_ml.model import (
     OPEN_STRING_PITCHES,
     PITCH_MIN,
@@ -127,6 +140,7 @@ from stringtrace_ml.residual_onset_review import (
     select_review_windows,
 )
 from stringtrace_ml.schema import (
+    ChordRegion,
     ExcludedRange,
     LabeledEvent,
     TrackAnnotation,
@@ -134,6 +148,7 @@ from stringtrace_ml.schema import (
     reject_quarantined_references,
     write_manifest,
 )
+from stringtrace_ml.score_gate import evaluate_score_gate
 from stringtrace_ml.technique_schema import TechniqueEvent
 from stringtrace_ml.technique_descriptors import (
     TechniqueDescriptorConfig,
@@ -2050,6 +2065,83 @@ class StringTraceMlTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "changed after approval"):
                 load_approved_review(review_path, project_path, audio_path)
 
+    def test_beat_gold_requires_two_annotations_and_third_party_adjudication(
+        self,
+    ) -> None:
+        with self.temporary_directory() as directory:
+            root = Path(directory)
+            audio_path = root / "source.wav"
+            analysis_path = root / "analysis.json"
+            soundfile.write(
+                audio_path,
+                np.zeros(22_050 * 5, dtype=np.float32),
+                22_050,
+                subtype="PCM_16",
+            )
+            analysis = {
+                "time_signature": [4, 4],
+                "pickup_beats": 1,
+                "beats": [0.25, 0.75, 1.25, 1.75, 2.25, 2.75, 3.25, 3.75],
+            }
+            analysis_path.write_text(
+                json.dumps(analysis),
+                encoding="utf-8",
+            )
+            paths = {
+                alias: root / f"{alias}.json"
+                for alias in ("annotator-a", "annotator-b", "adjudicator")
+            }
+            for alias, review_path in paths.items():
+                create_beat_review(
+                    audio_path=audio_path,
+                    analysis_path=analysis_path,
+                    review_path=review_path,
+                    clip_id="steady-4-4-001",
+                    group_id="source-song-001",
+                    annotator_alias=alias,
+                    source_start=0,
+                    duration=4,
+                    tags=["steady", "4-4"],
+                )
+            right = json.loads(paths["annotator-b"].read_text(encoding="utf-8"))
+            for marker in right["beats"]:
+                marker["at"] = round(float(marker["at"]) + 0.01, 6)
+            paths["annotator-b"].write_text(
+                json.dumps(right),
+                encoding="utf-8",
+            )
+            submitted = {
+                alias: submit_beat_review(review_path)
+                for alias, review_path in paths.items()
+            }
+            agreement = compare_beat_reviews(
+                submitted["annotator-a"],
+                submitted["annotator-b"],
+            )
+            self.assertEqual(agreement["beat_metrics"]["f1"], 1)
+            self.assertTrue(agreement["meter_agreement"])
+
+            gold_path = root / "gold.json"
+            gold = adjudicate_beat_reviews(
+                left_path=paths["annotator-a"],
+                right_path=paths["annotator-b"],
+                resolved_path=paths["adjudicator"],
+                output_path=gold_path,
+                adjudicator_alias="adjudicator",
+            )
+            self.assertEqual(gold["verification_status"], "adjudicated_gold")
+            self.assertTrue(gold["benchmark_eligible"])
+            report = evaluate_beat_review(gold, analysis)
+            self.assertEqual(report["beat_metrics"]["f1"], 1)
+            self.assertEqual(report["downbeat_metrics"]["f1"], 1)
+            self.assertTrue(evaluate_beat_gate(report)["passed"])
+            report["beat_metrics"]["p95_error_ms"] = 80
+            self.assertFalse(evaluate_beat_gate(report)["passed"])
+
+            gold["beats"][0]["at"] = 0.3
+            with self.assertRaisesRegex(ValueError, "invalid digest"):
+                validate_beat_review(gold, require_adjudicated=True)
+
     def test_reviewed_export_is_test_only_and_drops_unreviewed_technique(
         self,
     ) -> None:
@@ -3324,6 +3416,51 @@ class StringTraceMlTest(unittest.TestCase):
             0.06,
         )
 
+    def test_beat_metrics_report_accuracy_and_tail_error(self) -> None:
+        metrics = evaluate_beats(
+            [0.0, 0.5, 1.0, 1.5],
+            [0.01, 0.48, 1.04, 1.72],
+            tolerance=0.07,
+        )
+
+        self.assertEqual(metrics["true_positive"], 3)
+        self.assertEqual(metrics["false_positive"], 1)
+        self.assertEqual(metrics["false_negative"], 1)
+        self.assertAlmostEqual(metrics["f1"], 0.75)
+        self.assertAlmostEqual(metrics["median_error_ms"], 20.0)
+        self.assertGreater(metrics["p95_error_ms"], 35.0)
+
+    def test_chord_metrics_separate_root_and_quality_accuracy(self) -> None:
+        metrics = evaluate_chords(
+            [
+                ChordRegion(0.0, 2.0, "G"),
+                ChordRegion(2.0, 4.0, "Em"),
+            ],
+            [
+                ChordRegion(0.0, 2.0, "G7"),
+                ChordRegion(2.0, 4.0, "Em"),
+            ],
+        )
+
+        self.assertEqual(metrics["coverage"], 1.0)
+        self.assertEqual(metrics["exact_accuracy"], 0.5)
+        self.assertEqual(metrics["root_accuracy"], 1.0)
+
+    def test_event_metrics_score_reviewed_techniques_only(self) -> None:
+        reference = [
+            LabeledEvent(0.1, 0.4, 2, 1, "bend"),
+            LabeledEvent(0.6, 0.9, 2, 3, "unknown"),
+        ]
+        predicted = [
+            LabeledEvent(0.1, 0.4, 2, 1, "bend"),
+            LabeledEvent(0.6, 0.9, 2, 3, "slide"),
+        ]
+
+        metrics = evaluate_events(reference, predicted)
+
+        self.assertEqual(metrics["technique"]["true_positive"], 1)
+        self.assertEqual(metrics["technique"]["false_negative"], 0)
+
     def test_metrics_measure_repeated_same_fret_attacks_separately(self) -> None:
         reference = [
             LabeledEvent(0.1, 0.3, 2, 1),
@@ -3386,6 +3523,32 @@ class StringTraceMlTest(unittest.TestCase):
         self.assertFalse(result["checks"]["minimum_tracks"])
         self.assertFalse(result["checks"]["tablature_f1"])
         self.assertFalse(result["checks"]["baseline_improvement"])
+
+    def test_full_score_gate_requires_every_accuracy_layer(self) -> None:
+        report = {
+            "reference_events": 200,
+            "beat_metrics": {"f1": 0.97, "median_error_ms": 12.0},
+            "chord_metrics": {"exact_accuracy": 0.93},
+            "metrics": {
+                "onset": {"f1": 0.94},
+                "pitch": {"f1": 0.92},
+                "tablature": {"f1": 0.91},
+                "repeated_tablature": {"recall": 0.92},
+                "technique": {
+                    "true_positive": 18,
+                    "false_negative": 2,
+                    "precision": 0.9,
+                },
+            },
+        }
+
+        passed = evaluate_score_gate(report)
+        self.assertTrue(passed["passed"])
+
+        report["metrics"]["pitch"]["f1"] = 0.7
+        failed = evaluate_score_gate(report)
+        self.assertFalse(failed["passed"])
+        self.assertFalse(failed["checks"]["pitch_f1"])
 
     def test_guitar_techs_midi_preserves_string_and_applies_alignment(
         self,

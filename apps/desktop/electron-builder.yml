@@ -10,6 +10,8 @@ files:
 extraResources:
   - from: ../../THIRD_PARTY_NOTICES.md
     to: THIRD_PARTY_NOTICES.md
+  - from: build-resources/icon.ico
+    to: icon.ico
   - from: ../web/dist
     to: web
     filter:
@@ -21,7 +23,7 @@ extraResources:
   - from: ../api/assets
     to: api/assets
     filter:
-      - "take-me-home-country-roads*"
+      - "internationale*"
   - from: build-resources/sidecar
     to: sidecar
     filter:
@@ -32,6 +34,8 @@ extraMetadata:
 mac:
   icon: build-resources/icon.icns
   category: public.app-category.music
+  extendInfo:
+    NSMicrophoneUsageDescription: Guitar Tab Studio uses audio input for tuning and real-time tablature.
   hardenedRuntime: true
   gatekeeperAssess: false
   target:

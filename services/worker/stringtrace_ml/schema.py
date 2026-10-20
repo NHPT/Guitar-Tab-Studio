@@ -75,6 +75,34 @@ class ExcludedRange:
             raise ValueError("Excluded range reason must contain 1..200 characters")
 
 
+@dataclass(frozen=True)
+class ChordRegion:
+    start: float
+    end: float
+    chord: str
+
+    @classmethod
+    def from_dict(cls, value: dict[str, object]) -> "ChordRegion":
+        return cls(
+            start=float(value["start"]),
+            end=float(value["end"]),
+            chord=str(value["chord"]).strip(),
+        )
+
+    def validate(self, duration: float) -> None:
+        if (
+            not math.isfinite(self.start)
+            or not math.isfinite(self.end)
+            or not 0 <= self.start < self.end <= duration + 0.05
+        ):
+            raise ValueError(
+                f"Invalid chord region {self.start:.4f}-{self.end:.4f} "
+                f"for duration {duration:.4f}"
+            )
+        if not 1 <= len(self.chord) <= 32:
+            raise ValueError("Chord label must contain 1..32 characters")
+
+
 @dataclass
 class TrackAnnotation:
     track_id: str
@@ -83,6 +111,7 @@ class TrackAnnotation:
     split: str
     duration: float
     events: list[LabeledEvent]
+    chords: list[ChordRegion] = field(default_factory=list)
     excluded_ranges: list[ExcludedRange] = field(default_factory=list)
     tuning: list[int] = field(default_factory=lambda: list(STANDARD_TUNING_LIST))
     capo: int = 0
@@ -103,6 +132,9 @@ class TrackAnnotation:
         excluded_ranges_value = value.get("excluded_ranges", [])
         if not isinstance(excluded_ranges_value, list):
             raise ValueError("excluded_ranges must be a list")
+        chords_value = value.get("chords", [])
+        if not isinstance(chords_value, list):
+            raise ValueError("chords must be a list")
         annotation = cls(
             track_id=str(value["track_id"]),
             group_id=str(value["group_id"]),
@@ -110,6 +142,7 @@ class TrackAnnotation:
             split=str(value["split"]),
             duration=float(value["duration"]),
             events=[LabeledEvent.from_dict(event) for event in events_value],
+            chords=[ChordRegion.from_dict(chord) for chord in chords_value],
             excluded_ranges=[
                 ExcludedRange.from_dict(excluded_range)
                 for excluded_range in excluded_ranges_value
@@ -151,6 +184,13 @@ class TrackAnnotation:
         for previous, current in zip(self.events, self.events[1:]):
             if current.onset < previous.onset:
                 raise ValueError("events must be ordered by onset")
+        for chord in self.chords:
+            chord.validate(self.duration)
+        for previous, current in zip(self.chords, self.chords[1:]):
+            if current.start < previous.start:
+                raise ValueError("chords must be ordered by start")
+            if current.start < previous.end - 1e-6:
+                raise ValueError("chord regions must not overlap")
         for excluded_range in self.excluded_ranges:
             excluded_range.validate(self.duration)
         for previous, current in zip(

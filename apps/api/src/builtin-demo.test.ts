@@ -9,26 +9,39 @@ import {
   builtinDemoStemFilenames,
 } from './builtin-demo.js'
 
-test('bundles the requested NetEase default recording', () => {
+test('bundles the requested Internationale recording', () => {
   const audio = readFileSync(builtinDemoAudioPath)
-  assert.equal(audio.subarray(0, 3).toString('ascii'), 'ID3')
-  assert.equal(audio.byteLength, 3_107_570)
+  assert.equal(audio.subarray(0, 4).toString('ascii'), 'OggS')
+  assert.equal(audio.byteLength, 3_340_717)
   assert.equal(
     createHash('sha256').update(audio).digest('hex'),
-    '0fb7faa72934b35b7f5a3adb65b1ac7cbb49b128692da6fe42c4cc8b90624608',
+    'ad7b28cd453b33a45e84932d97ccc27ec2fe896b3ac7b8d4ab898eb3de5af181',
   )
 })
 
-test('loads the generated Country Roads TAB analysis', () => {
+test('loads the generated Internationale TAB analysis', () => {
   const analysis = builtinDemoAnalysis
-  assert.equal(analysis.metadata?.title, 'Take Me Home, Country Roads')
-  assert.equal(analysis.metadata?.artist, 'John Denver')
-  assert.ok(Math.abs(analysis.metadata!.duration! - 194.14667) < 0.001)
-  assert.equal(analysis.bpm, 161.5)
-  assert.equal(analysis.key, 'A major')
+  assert.equal(analysis.metadata?.title, '国际歌')
+  assert.equal(analysis.metadata?.artist, '唐朝')
+  assert.ok(Math.abs(analysis.metadata!.duration! - 266.73333) < 0.001)
+  assert.equal(analysis.bpm, 98.1)
+  assert.equal(analysis.key, 'G major')
   assert.equal(analysis.capo, 0)
-  assert.equal(analysis.chords.length, 130)
-  assert.equal(analysis.notes.length, 1789)
+  assert.equal(analysis.pickup_beats, 1)
+  assert.equal(analysis.beats?.[0], 0.3317)
+  assert.equal(analysis.beats?.[1], 0.9433)
+  assert.equal(analysis.chords.length, 107)
+  assert.equal(analysis.notes.length, 1462)
+  assert.equal(analysis.tempo_map?.mode, 'steady')
+  assert.equal(analysis.tempo_map?.points.length, 437)
+  assert.equal(
+    analysis.transcription_model?.positionOptimizer,
+    'sequence-optimizer-v3',
+  )
+  assert.equal(
+    analysis.transcription_model?.timingModel,
+    'percussion-downbeat-grid-v2',
+  )
   assert.equal(analysis.transcription_model?.name, 'spotify-basic-pitch')
   assert.ok(
     analysis.notes.every(
@@ -61,13 +74,14 @@ test('publishes independent M4A stems and separated guitar parts', () => {
   )
   assert.equal(
     createHash('sha256').update(vocals).digest('hex'),
-    '05a349e17268dafc12e1b780542bb2e930fcdc29f9c53493c37475f37d880c75',
+    '6ffff90356b97b53dff273ad1e946e313c803008ccfda868cf289df124d9cae0',
   )
   for (const media of builtinDemoMediaPaths.values()) {
     const contents = readFileSync(media)
-    if (contents.subarray(0, 3).toString('ascii') === 'ID3') continue
+    if (contents.subarray(0, 4).toString('ascii') === 'OggS') continue
     assert.equal(contents.subarray(4, 8).toString('ascii'), 'ftyp')
   }
-  assert.equal(builtinDemoAnalysis.stem_tracks?.length, 2)
-  assert.equal(builtinDemoMediaPaths.size, 9)
+  assert.equal(builtinDemoAnalysis.stem_tracks?.length, 0)
+  assert.equal(builtinDemoAnalysis.guitar_parts?.length, 1)
+  assert.equal(builtinDemoMediaPaths.size, 7)
 })

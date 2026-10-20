@@ -149,6 +149,12 @@ export function createEasyTab(original: TabDocument): TabDocument {
     tuning: [...original.tuning],
     capo: original.capo,
     timeSignature: [...original.timeSignature],
+    tempoMap: original.tempoMap
+      ? {
+          ...original.tempoMap,
+          points: original.tempoMap.points.map((point) => ({ ...point })),
+        }
+      : undefined,
     vocalMelody: original.vocalMelody?.map((note) => ({ ...note })),
     lyrics: original.lyrics?.map((lyric) => ({ ...lyric })),
     measures,

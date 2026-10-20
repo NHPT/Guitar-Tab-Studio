@@ -2,6 +2,7 @@ import type {
   AnalysisJob,
   AuthorizedMediaConsent,
   CapabilityState,
+  MediaBrowserSession,
   CommunityAccount,
   CommunityAnswer,
   CommunityContribution,
@@ -115,6 +116,7 @@ export class HttpStudioApplication implements StudioApplication<File> {
   submitLink(
     url: string,
     authorizedMedia?: AuthorizedMediaConsent,
+    mediaSession?: MediaBrowserSession,
   ): Promise<AnalysisJob> {
     return jsonRequest<AnalysisJob>('/api/import/link', {
       method: 'POST',
@@ -123,6 +125,7 @@ export class HttpStudioApplication implements StudioApplication<File> {
         url,
         authorizedProcessingConsent: authorizedMedia?.accepted,
         authorizationPolicyVersion: authorizedMedia?.policyVersion,
+        mediaSession,
       }),
     })
   }
@@ -171,7 +174,8 @@ export const cancelJob = (id: string) => studioApplication.cancelJob(id)
 export const submitLink = (
   url: string,
   authorizedMedia?: AuthorizedMediaConsent,
-) => studioApplication.submitLink(url, authorizedMedia)
+  mediaSession?: MediaBrowserSession,
+) => studioApplication.submitLink(url, authorizedMedia, mediaSession)
 export const submitUpload = (
   file: File,
   authorizedMedia?: AuthorizedMediaConsent,

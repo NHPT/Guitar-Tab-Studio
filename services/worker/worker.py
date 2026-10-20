@@ -877,7 +877,11 @@ def ffmpeg_command() -> str:
     return require_command("ffmpeg")
 
 
-def acquire_url(url: str, destination: Path) -> tuple[Path, dict[str, object]]:
+def acquire_url(
+    url: str,
+    destination: Path,
+    cookies_from_browser: str | None = None,
+) -> tuple[Path, dict[str, object]]:
     ffmpeg = ffmpeg_command()
     output = destination / "source.%(ext)s"
     javascript_runtime = (
@@ -892,6 +896,24 @@ def acquire_url(url: str, destination: Path) -> tuple[Path, dict[str, object]]:
         if not cookies_path.is_file():
             raise RuntimeError("Configured media cookies file is unavailable")
         session_options.extend(["--cookies", str(cookies_path)])
+    elif cookies_from_browser:
+        supported_browsers = {
+            "brave",
+            "chrome",
+            "chromium",
+            "edge",
+            "firefox",
+            "opera",
+            "safari",
+            "vivaldi",
+        }
+        if cookies_from_browser not in supported_browsers:
+            raise RuntimeError(
+                "Configured browser cookie source is unsupported"
+            )
+        session_options.extend(
+            ["--cookies-from-browser", cookies_from_browser]
+        )
     proxy = os.environ.get("GTS_MEDIA_PROXY")
     if proxy:
         session_options.extend(["--proxy", proxy])
@@ -1811,6 +1833,303 @@ def regularize_beat_times(
     )
 
 
+def tempo_map_from_beats(
+    beat_times: Iterable[float],
+    fallback_bpm: float = 120.0,
+) -> dict[str, object]:
+    import numpy as np
+
+    beats = [
+        float(beat)
+        for beat in beat_times
+        if math.isfinite(float(beat)) and float(beat) >= 0
+    ]
+    beats = [
+        beat
+        for index, beat in enumerate(beats)
+        if index == 0 or beat - beats[index - 1] > 0.05
+    ]
+    safe_fallback = (
+        float(fallback_bpm)
+        if math.isfinite(fallback_bpm) and fallback_bpm > 0
+        else 120.0
+    )
+    if len(beats) < 2:
+        return {
+            "mode": "steady",
+            "median_bpm": round(safe_fallback, 4),
+            "variation": 0.0,
+            "points": [
+                {
+                    "at": round(beats[0] if beats else 0.0, 4),
+                    "beat": 0,
+                    "bpm": round(safe_fallback, 4),
+                    "confidence": 0.0,
+                }
+            ],
+        }
+
+    intervals = np.diff(np.asarray(beats, dtype=np.float64))
+    points: list[dict[str, float | int]] = []
+    for index, at in enumerate(beats):
+        start = max(0, index - 2)
+        end = min(len(intervals), index + 3)
+        local = intervals[start:end]
+        local = local[
+            np.isfinite(local) & (local >= 0.15) & (local <= 3.0)
+        ]
+        local_median = (
+            float(np.median(local))
+            if local.size
+            else 60.0 / safe_fallback
+        )
+        relative_deviation = (
+            float(np.median(np.abs(local - local_median)))
+            / max(local_median, 1e-6)
+            if local.size
+            else 1.0
+        )
+        points.append(
+            {
+                "at": round(at, 4),
+                "beat": index,
+                "bpm": round(60.0 / local_median, 4),
+                "confidence": round(
+                    max(0.0, min(1.0, 1.0 - relative_deviation * 6.0)),
+                    4,
+                ),
+            }
+        )
+    tempos = np.asarray(
+        [
+            float(point["bpm"])
+            for point in points
+            if 20 <= float(point["bpm"]) <= 320
+        ],
+        dtype=np.float64,
+    )
+    median_bpm = (
+        float(np.median(tempos))
+        if tempos.size
+        else safe_fallback
+    )
+    variation = (
+        float(
+            (np.quantile(tempos, 0.9) - np.quantile(tempos, 0.1))
+            / max(median_bpm, 1.0)
+        )
+        if tempos.size > 1
+        else 0.0
+    )
+    return {
+        "mode": "variable" if variation >= 0.04 else "steady",
+        "median_bpm": round(median_bpm, 4),
+        "variation": round(variation, 6),
+        "points": points,
+    }
+
+
+def beat_grid_irregularity(beat_times: Iterable[float]) -> float:
+    """Score detector jitter and isolated edge beats; lower is better."""
+    import numpy as np
+
+    beats = np.asarray(
+        [
+            float(value)
+            for value in beat_times
+            if math.isfinite(float(value)) and float(value) >= 0
+        ],
+        dtype=np.float64,
+    )
+    if beats.size < 8:
+        return math.inf
+    intervals = np.diff(beats)
+    intervals = intervals[
+        np.isfinite(intervals) & (intervals >= 0.15) & (intervals <= 3.0)
+    ]
+    if intervals.size < 7:
+        return math.inf
+    median_interval = float(np.median(intervals))
+    relative_errors = np.abs(intervals / median_interval - 1.0)
+    opening_error = float(np.mean(relative_errors[: min(2, len(relative_errors))]))
+    return float(
+        np.median(relative_errors)
+        + np.quantile(relative_errors, 0.9)
+        + opening_error * 0.5
+    )
+
+
+def select_timing_grid(
+    mix_bpm: float,
+    mix_beats: Iterable[float],
+    percussion_bpm: float,
+    percussion_beats: Iterable[float],
+) -> tuple[list[float], str]:
+    """Prefer a coherent percussion grid without accepting tempo mismatches."""
+    mix = [float(value) for value in mix_beats]
+    percussion = [float(value) for value in percussion_beats]
+    ratio = percussion_bpm / max(mix_bpm, 1e-8)
+    if (
+        len(percussion) < 16
+        or len(percussion) < len(mix) * 0.75
+        or not 0.9 <= ratio <= 1.1
+    ):
+        return mix, "mix"
+    mix_error = beat_grid_irregularity(mix)
+    percussion_error = beat_grid_irregularity(percussion)
+    if percussion_error + 0.005 < mix_error:
+        return percussion, "drums"
+    return mix, "mix"
+
+
+def align_beats_to_downbeats(
+    beat_times: Iterable[float],
+    notes: Iterable[NoteEvent],
+    beats_per_measure: int = 4,
+) -> tuple[list[float], int, float]:
+    """Align beat zero to the strongest recurring harmonic-change phase."""
+    beats = [float(value) for value in beat_times]
+    note_list = list(notes)
+    if len(beats) < beats_per_measure * 6 or not note_list:
+        return beats, 0, 0.0
+    intervals = [
+        current - previous
+        for previous, current in zip(beats, beats[1:])
+        if 0.15 <= current - previous <= 3.0
+    ]
+    fallback_interval = (
+        sorted(intervals)[len(intervals) // 2]
+        if intervals
+        else 0.5
+    )
+    vectors: list[list[float]] = []
+    for index, start in enumerate(beats):
+        end = (
+            beats[index + 1]
+            if index + 1 < len(beats)
+            else start + fallback_interval
+        )
+        vector = [0.0] * 12
+        for note in note_list:
+            overlap = max(
+                0.0,
+                min(end, note.end) - max(start, note.start),
+            )
+            if overlap <= 0:
+                continue
+            vector[note.pitch % 12] += (
+                overlap
+                * max(1, note.velocity)
+                / 127.0
+                * max(0.05, note.confidence)
+            )
+        vectors.append(vector)
+
+    novelty: list[float] = []
+    for index, current in enumerate(vectors):
+        previous = vectors[index - 1] if index > 0 else [0.0] * 12
+        current_norm = math.sqrt(sum(value * value for value in current))
+        previous_norm = math.sqrt(sum(value * value for value in previous))
+        if current_norm == 0 and previous_norm == 0:
+            novelty.append(0.0)
+        elif current_norm == 0 or previous_norm == 0:
+            novelty.append(1.0)
+        else:
+            similarity = sum(
+                left * right
+                for left, right in zip(previous, current)
+            ) / (previous_norm * current_norm)
+            novelty.append(max(0.0, min(1.0, 1.0 - similarity)))
+
+    margin = beats_per_measure * 2
+    usable = range(margin, max(margin, len(beats) - margin))
+    phase_scores = [
+        [
+            novelty[index]
+            for index in usable
+            if index % beats_per_measure == phase
+        ]
+        for phase in range(beats_per_measure)
+    ]
+    averages = [
+        sum(values) / len(values) if values else 0.0
+        for values in phase_scores
+    ]
+    ranked = sorted(
+        range(beats_per_measure),
+        key=lambda phase: averages[phase],
+        reverse=True,
+    )
+    best = ranked[0]
+    second = averages[ranked[1]] if len(ranked) > 1 else 0.0
+    confidence = max(0.0, averages[best] - second)
+    if (
+        averages[best] < 0.12
+        or confidence < 0.04
+        or averages[best] < second * 1.2
+    ):
+        return beats, 0, confidence
+    return beats[best:], best, confidence
+
+
+def prepend_pickup_beats(
+    beat_times: Iterable[float],
+    notes: Iterable[NoteEvent],
+    *,
+    maximum_pickup_beats: int = 3,
+) -> tuple[list[float], int]:
+    """Reconstruct a short anacrusis before the first detected downbeat."""
+    beats = [float(value) for value in beat_times]
+    note_list = [
+        note
+        for note in notes
+        if note.confidence >= 0.6 and note.start >= 0
+    ]
+    if len(beats) < 2 or not note_list:
+        return beats, 0
+    intervals = sorted(
+        current - previous
+        for previous, current in zip(beats, beats[1:])
+        if 0.15 <= current - previous <= 3.0
+    )
+    if not intervals:
+        return beats, 0
+    interval = intervals[len(intervals) // 2]
+    first_downbeat = beats[0]
+    early_notes = [
+        note.start
+        for note in note_list
+        if max(0.0, first_downbeat - maximum_pickup_beats * interval - 0.1)
+        <= note.start
+        < first_downbeat - min(0.06, interval * 0.1)
+    ]
+    if not early_notes:
+        return beats, 0
+    earliest = min(early_notes)
+    pickup_beats = min(
+        maximum_pickup_beats,
+        max(
+            1,
+            math.ceil(
+                (first_downbeat - earliest - interval * 0.15)
+                / interval
+            ),
+        ),
+    )
+    while (
+        pickup_beats > 0
+        and first_downbeat - pickup_beats * interval < 0
+    ):
+        pickup_beats -= 1
+    if pickup_beats == 0:
+        return beats, 0
+    pickup = [
+        round(first_downbeat - index * interval, 4)
+        for index in range(pickup_beats, 0, -1)
+    ]
+    return [*pickup, *beats], pickup_beats
+
+
 def select_quarter_note_grid(
     onset_envelope: object,
     fast_tempo: float,
@@ -1863,7 +2182,9 @@ def select_quarter_note_grid(
     return fast_tempo, fast
 
 
-def estimate_tempo(path: Path) -> tuple[float, list[float], list[float]]:
+def estimate_tempo(
+    path: Path,
+) -> tuple[float, list[float], list[float], dict[str, object]]:
     import librosa
     import numpy as np
 
@@ -1891,7 +2212,7 @@ def estimate_tempo(path: Path) -> tuple[float, list[float], list[float]]:
         float(np.atleast_1d(slow_tempo)[0]),
         slow_beat_frames,
     )
-    bpm = round(value if math.isfinite(value) and value > 0 else 120.0, 2)
+    fallback_bpm = value if math.isfinite(value) and value > 0 else 120.0
     onset_frames = librosa.onset.onset_detect(
         onset_envelope=onset_envelope,
         sr=sample_rate,
@@ -1918,7 +2239,9 @@ def estimate_tempo(path: Path) -> tuple[float, list[float], list[float]]:
         for time in onset_times
         if np.isfinite(time) and time >= 0
     ]
-    return bpm, usable_beats, usable_onsets
+    tempo_map = tempo_map_from_beats(usable_beats, fallback_bpm)
+    bpm = round(float(tempo_map["median_bpm"]), 2)
+    return bpm, usable_beats, usable_onsets, tempo_map
 
 
 def waveform(path: Path, bar_count: int = 120) -> list[float]:
@@ -2163,6 +2486,39 @@ def assign_fingering_group(
             previous = position
         return fallback, 0.42
 
+    scored = fingering_group_options(
+        pitches,
+        previous_positions,
+    )
+    if not scored:
+        return [
+            select_fingering(
+                pitch,
+                previous_positions[-1] if previous_positions else None,
+            )
+            for pitch in pitches
+        ], 0.4
+
+    best_score, best_positions = scored[0]
+    if len(scored) == 1:
+        confidence = 0.94
+    else:
+        margin = max(0.0, scored[1][0] - best_score)
+        confidence = min(0.92, 0.56 + margin * 0.1)
+    return best_positions, round(confidence, 4)
+
+
+def fingering_group_options(
+    pitches: list[int],
+    previous_positions: list[tuple[int, int]] | None = None,
+    limit: int = 12,
+) -> list[tuple[float, list[tuple[int, int]]]]:
+    if not pitches or len(pitches) > 6:
+        return []
+    previous_positions = previous_positions or []
+    candidate_sets = [candidate_positions(pitch) for pitch in pitches]
+    if any(not candidates for candidates in candidate_sets):
+        return []
     scored: list[tuple[float, list[tuple[int, int]]]] = []
 
     def visit(
@@ -2199,23 +2555,100 @@ def assign_fingering_group(
             positions.pop()
 
     visit(0, set(), [])
-    if not scored:
-        return [
-            select_fingering(
-                pitch,
-                previous_positions[-1] if previous_positions else None,
-            )
-            for pitch in pitches
-        ], 0.4
+    scored.sort(key=lambda item: (item[0], item[1]))
+    return scored[: max(1, limit)]
 
-    scored.sort(key=lambda item: item[0])
-    best_score, best_positions = scored[0]
-    if len(scored) == 1:
-        confidence = 0.94
-    else:
-        margin = max(0.0, scored[1][0] - best_score)
-        confidence = min(0.92, 0.56 + margin * 0.1)
-    return best_positions, round(confidence, 4)
+
+def assign_fingering_sequence(
+    pitch_groups: list[list[int]],
+    beam_width: int = 8,
+    window_size: int = 32,
+) -> list[tuple[list[tuple[int, int]], float]]:
+    if not pitch_groups:
+        return []
+    resolved: list[tuple[list[tuple[int, int]], float]] = []
+    previous_window_positions: list[tuple[int, int]] = []
+    for window_start in range(0, len(pitch_groups), max(1, window_size)):
+        window = pitch_groups[window_start : window_start + window_size]
+        beams: list[
+            tuple[
+                float,
+                list[tuple[int, int]],
+                list[tuple[list[tuple[int, int]], float]],
+            ]
+        ] = [(0.0, previous_window_positions, [])]
+        for pitches in window:
+            candidates: list[
+                tuple[
+                    float,
+                    list[tuple[int, int]],
+                    list[tuple[list[tuple[int, int]], float]],
+                ]
+            ] = []
+            for path_cost, previous_positions, assignments in beams:
+                options = fingering_group_options(
+                    pitches,
+                    previous_positions,
+                    limit=max(beam_width, 12),
+                )
+                if not options:
+                    fallback, confidence = assign_fingering_group(
+                        pitches,
+                        previous_positions,
+                    )
+                    options = [(12.0, fallback)]
+                    option_confidences = [confidence]
+                else:
+                    option_confidences = [
+                        (
+                            0.94
+                            if len(options) == 1
+                            else min(
+                                0.92,
+                                0.56
+                                + max(
+                                    0.0,
+                                    (
+                                        options[index + 1][0]
+                                        if index + 1 < len(options)
+                                        else options[index][0] + 2.0
+                                    )
+                                    - option[0],
+                                )
+                                * 0.1,
+                            )
+                        )
+                        for index, option in enumerate(options)
+                    ]
+                for option_index, (cost, positions) in enumerate(options):
+                    candidates.append(
+                        (
+                            path_cost + cost,
+                            positions,
+                            [
+                                *assignments,
+                                (
+                                    positions,
+                                    round(
+                                        option_confidences[option_index],
+                                        4,
+                                    ),
+                                ),
+                            ],
+                        )
+                    )
+            candidates.sort(
+                key=lambda item: (
+                    item[0],
+                    item[1],
+                )
+            )
+            beams = candidates[: max(1, beam_width)]
+        selected = beams[0][2]
+        resolved.extend(selected)
+        if selected:
+            previous_window_positions = selected[-1][0]
+    return resolved
 
 
 NATURAL_HARMONIC_INTERVALS = {
@@ -2347,6 +2780,43 @@ def collapse_note_fragments(
         latest_by_pitch[event.pitch] = event
         retained.append(event)
     return retained
+
+
+def collapse_inaudible_rearticulations(
+    events: list[NoteEvent],
+    features: list[AudioFeature],
+    maximum_gap: float = 0.03,
+    maximum_onset_strength: float = 0.28,
+) -> tuple[list[NoteEvent], list[AudioFeature]]:
+    if len(events) != len(features):
+        raise ValueError("Events and audio features must have equal lengths")
+    retained: list[NoteEvent] = []
+    retained_features: list[AudioFeature] = []
+    latest_by_pitch: dict[int, int] = {}
+    for event, feature in zip(events, features, strict=True):
+        previous_index = latest_by_pitch.get(event.pitch)
+        if previous_index is not None:
+            previous = retained[previous_index]
+            gap = event.start - previous.end
+            if (
+                0 <= gap <= maximum_gap
+                and feature.onset < maximum_onset_strength
+            ):
+                retained[previous_index] = replace(
+                    previous,
+                    end=max(previous.end, event.end),
+                    velocity=max(previous.velocity, event.velocity),
+                    confidence=max(previous.confidence, event.confidence),
+                    position_confidence=max(
+                        previous.position_confidence,
+                        event.position_confidence,
+                    ),
+                )
+                continue
+        latest_by_pitch[event.pitch] = len(retained)
+        retained.append(event)
+        retained_features.append(feature)
+    return retained, retained_features
 
 
 def extract_note_features(path: Path, notes: list[NoteEvent]) -> list[AudioFeature]:
@@ -2776,12 +3246,17 @@ def transcribe_basic_pitch(
             note_groups[-1].append(midi_note)
 
     events: list[NoteEvent] = []
-    previous_positions: list[tuple[int, int]] = []
-    for group in note_groups:
-        positions, position_confidence = assign_fingering_group(
-            [int(note.pitch) for note in group],
-            previous_positions,
-        )
+    assignments = assign_fingering_sequence(
+        [
+            [int(note.pitch) for note in group]
+            for group in note_groups
+        ]
+    )
+    for group, (positions, position_confidence) in zip(
+        note_groups,
+        assignments,
+        strict=True,
+    ):
         for midi_note, (string, fret) in zip(group, positions, strict=True):
             events.append(
                 NoteEvent(
@@ -2794,12 +3269,18 @@ def transcribe_basic_pitch(
                     technique="pick",
                     confidence=min(0.98, 0.54 + midi_note.velocity / 220),
                     position_confidence=position_confidence,
+                    position_source="sequence-optimizer-v3",
                 )
             )
-        previous_positions = positions
     events = collapse_note_fragments(events)
-    events, forced_harmonic_indices = collapse_harmonic_stacks(events)
     features = extract_note_features(path, events)
+    events, features = collapse_inaudible_rearticulations(events, features)
+    feature_by_event = {
+        id(event): feature
+        for event, feature in zip(events, features, strict=True)
+    }
+    events, forced_harmonic_indices = collapse_harmonic_stacks(events)
+    features = [feature_by_event[id(event)] for event in events]
     annotated = annotate_techniques(
         events,
         features,
@@ -2906,12 +3387,14 @@ def transcribe_muscriptor(
             groups[-1].append(item)
 
     events: list[NoteEvent] = []
-    previous_positions: list[tuple[int, int]] = []
-    for group in groups:
-        positions, position_confidence = assign_fingering_group(
-            [item[2] for item in group],
-            previous_positions,
-        )
+    assignments = assign_fingering_sequence(
+        [[item[2] for item in group] for group in groups]
+    )
+    for group, (positions, position_confidence) in zip(
+        groups,
+        assignments,
+        strict=True,
+    ):
         for (start, end, pitch), (string, fret) in zip(
             group,
             positions,
@@ -2931,7 +3414,6 @@ def transcribe_muscriptor(
                     position_source="muscriptor-pitch-optimizer-v1",
                 )
             )
-        previous_positions = positions
 
     events = collapse_note_fragments(events)
     events, forced_harmonic_indices = collapse_harmonic_stacks(events)
@@ -3013,12 +3495,14 @@ def transcribe_mr_mt3(
         else:
             groups[-1].append(item)
     events: list[NoteEvent] = []
-    previous_positions: list[tuple[int, int]] = []
-    for group in groups:
-        positions, position_confidence = assign_fingering_group(
-            [item[2] for item in group],
-            previous_positions,
-        )
+    assignments = assign_fingering_sequence(
+        [[item[2] for item in group] for group in groups]
+    )
+    for group, (positions, position_confidence) in zip(
+        groups,
+        assignments,
+        strict=True,
+    ):
         for (start, end, pitch, velocity), (string, fret) in zip(
             group,
             positions,
@@ -3038,7 +3522,6 @@ def transcribe_mr_mt3(
                     position_source="mr-mt3-pitch-optimizer-v1",
                 )
             )
-        previous_positions = positions
     return events, len(decoded) - len(guitar_notes)
 
 
@@ -3098,12 +3581,14 @@ def transcribe_yourmt3(
         else:
             groups[-1].append(item)
     events: list[NoteEvent] = []
-    previous_positions: list[tuple[int, int]] = []
-    for group in groups:
-        positions, position_confidence = assign_fingering_group(
-            [item[2] for item in group],
-            previous_positions,
-        )
+    assignments = assign_fingering_sequence(
+        [[item[2] for item in group] for group in groups]
+    )
+    for group, (positions, position_confidence) in zip(
+        groups,
+        assignments,
+        strict=True,
+    ):
         for (start, end, pitch, velocity), (string, fret) in zip(
             group,
             positions,
@@ -3123,7 +3608,6 @@ def transcribe_yourmt3(
                     position_source="yourmt3-playability-v1",
                 )
             )
-        previous_positions = positions
     return events, len(decoded) - len(guitar_notes)
 
 
@@ -3797,32 +4281,92 @@ def chord_score(pitch_classes: set[int], root: int, intervals: tuple[int, ...]) 
     return matched * 2.0 - foreign * 0.35
 
 
-def infer_chords(notes: Iterable[NoteEvent], bpm: float) -> list[dict[str, object]]:
+def infer_chords(
+    notes: Iterable[NoteEvent],
+    bpm: float,
+    beat_times: Iterable[float] | None = None,
+    beats_per_measure: int = 4,
+    pickup_beats: int = 0,
+) -> list[dict[str, object]]:
     note_list = list(notes)
     if not note_list:
         return []
     beat = 60 / bpm
-    window = beat * 4
     duration = max(note.end for note in note_list)
     result: list[dict[str, object]] = []
-    start = 0.0
+    detected_beats = [
+        float(value)
+        for value in (beat_times or [])
+        if math.isfinite(float(value)) and float(value) >= 0
+    ]
+    detected_beats = [
+        value
+        for index, value in enumerate(detected_beats)
+        if index == 0 or value - detected_beats[index - 1] > 0.05
+    ]
+    windows: list[tuple[float, float]] = []
+    if len(detected_beats) >= beats_per_measure + 1:
+        safe_pickup_beats = max(
+            0,
+            min(int(pickup_beats), beats_per_measure - 1),
+        )
+        intervals = [
+            current - previous
+            for previous, current in zip(
+                detected_beats,
+                detected_beats[1:],
+            )
+            if 0.15 <= current - previous <= 3.0
+        ]
+        fallback_interval = (
+            sorted(intervals)[len(intervals) // 2]
+            if intervals
+            else beat
+        )
+        if safe_pickup_beats > 0:
+            windows.append(
+                (
+                    detected_beats[0],
+                    detected_beats[safe_pickup_beats],
+                )
+            )
+        for index in range(
+            safe_pickup_beats,
+            len(detected_beats),
+            beats_per_measure,
+        ):
+            start = detected_beats[index]
+            if start >= duration:
+                break
+            end_index = index + beats_per_measure
+            end = (
+                detected_beats[end_index]
+                if end_index < len(detected_beats)
+                else start + fallback_interval * beats_per_measure
+            )
+            windows.append((start, max(end, start + 0.1)))
+    if not windows:
+        window = beat * beats_per_measure
+        start = 0.0
+        while start < duration:
+            windows.append((start, min(start + window, duration)))
+            start += window
 
     qualities = (("", (0, 4, 7)), ("m", (0, 3, 7)), ("7", (0, 4, 7, 10)))
-    while start < duration:
+    for start, end in windows:
         active = {
             note.pitch % 12
             for note in note_list
-            if note.start < start + window and note.end > start
+            if note.start < end and note.end > start
         }
         if len(active) < 2:
             result.append(
                 {
                     "start": round(start, 4),
-                    "duration": round(window, 4),
+                    "duration": round(end - start, 4),
                     "chord": "N.C.",
                 }
             )
-            start += window
             continue
         best_name = "N.C."
         best_score = -100.0
@@ -3832,8 +4376,13 @@ def infer_chords(notes: Iterable[NoteEvent], bpm: float) -> list[dict[str, objec
                 if score > best_score:
                     best_score = score
                     best_name = f"{PITCH_NAMES[root]}{suffix}"
-        result.append({"start": round(start, 4), "duration": round(window, 4), "chord": best_name})
-        start += window
+        result.append(
+            {
+                "start": round(start, 4),
+                "duration": round(end - start, 4),
+                "chord": best_name,
+            }
+        )
     return result
 
 
@@ -4008,6 +4557,20 @@ def main() -> None:
     source_group = parser.add_mutually_exclusive_group(required=False)
     source_group.add_argument("--input", type=Path)
     source_group.add_argument("--url")
+    parser.add_argument(
+        "--cookies-from-browser",
+        choices=(
+            "brave",
+            "chrome",
+            "chromium",
+            "edge",
+            "firefox",
+            "opera",
+            "safari",
+            "vivaldi",
+        ),
+        help="Read cookies from this browser for this URL acquisition only.",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--transcription-provider",
@@ -4088,7 +4651,11 @@ def main() -> None:
 
     if arguments.url:
         emit_progress(3, "acquiring", "正在获取在线媒体")
-        source, metadata = acquire_url(arguments.url, output)
+        source, metadata = acquire_url(
+            arguments.url,
+            output,
+            arguments.cookies_from_browser,
+        )
         emit_progress(10, "acquiring", "在线媒体获取完成")
     else:
         source = arguments.input.resolve()
@@ -4151,7 +4718,26 @@ def main() -> None:
         ),
     )
     emit_progress(57, "transcribing", "正在检测速度与拍点")
-    bpm, beat_times, onset_times = estimate_tempo(source)
+    mix_bpm, mix_beats, onset_times, mix_tempo_map = estimate_tempo(source)
+    timing_source = "mix"
+    bpm = mix_bpm
+    beat_times = mix_beats
+    tempo_map = mix_tempo_map
+    try:
+        drum_bpm, drum_beats, _drum_onsets, drum_tempo_map = (
+            estimate_tempo(stems["drums"])
+        )
+        beat_times, timing_source = select_timing_grid(
+            mix_bpm,
+            mix_beats,
+            drum_bpm,
+            drum_beats,
+        )
+        if timing_source == "drums":
+            bpm = drum_bpm
+            tempo_map = drum_tempo_map
+    except Exception:
+        timing_source = "mix"
     emit_progress(63, "transcribing", "拍点检测完成")
     note_source, source_warning = transcription_source(normalized, stems)
     configured_model = arguments.tab_model
@@ -4369,6 +4955,16 @@ def main() -> None:
         part["technique_model"] = part_technique_model
     notes = primary_transcription["notes"]
     technique_model = primary_transcription["technique_model"]
+    beat_times, downbeat_shift, downbeat_confidence = (
+        align_beats_to_downbeats(beat_times, notes)
+    )
+    beat_times, pickup_beats = prepend_pickup_beats(
+        beat_times,
+        notes,
+    )
+    tempo_map = tempo_map_from_beats(beat_times, bpm)
+    bpm = round(float(tempo_map["median_bpm"]), 2)
+    transcription_model["timing_model"] = "percussion-downbeat-grid-v2"
     emit_progress(89, "transcribing", "演奏技法分析完成")
     emit_progress(91, "mapping", "正在提取人声旋律与歌词")
     vocal_melody = extract_vocal_melody(stems["vocals"])
@@ -4469,6 +5065,12 @@ def main() -> None:
         f"guitar-part separation ({guitar_leakage_report['removed_energy_ratio']:.1%} "
         "of estimated stem energy removed)."
     )
+    warnings.append(
+        "Quarter-note timing uses the "
+        f"{timing_source} grid, harmonic downbeat phase {downbeat_shift} "
+        f"(confidence {downbeat_confidence:.3f}), and "
+        f"{pickup_beats} reconstructed pickup beat(s)."
+    )
     if dropped_note_count:
         warnings.append(
             f"{dropped_note_count} note events outside the 24-fret guitar range were discarded."
@@ -4483,6 +5085,8 @@ def main() -> None:
         "key": estimate_key(notes),
         "capo": 0,
         "beats": beat_times,
+        "pickup_beats": pickup_beats,
+        "tempo_map": tempo_map,
         "onsets": onset_times,
         "vocal_melody": vocal_melody,
         "lyrics": lyrics,
@@ -4506,7 +5110,12 @@ def main() -> None:
                     asdict(note)
                     for note in part["notes"]
                 ],
-                "chords": infer_chords(part["notes"], bpm),
+                "chords": infer_chords(
+                    part["notes"],
+                    bpm,
+                    beat_times,
+                    pickup_beats=pickup_beats,
+                ),
             }
             for part in part_transcriptions
         ],
@@ -4514,7 +5123,12 @@ def main() -> None:
         "waveforms": waveforms,
         "visualization": visualization,
         "notes": [asdict(note) for note in notes],
-        "chords": infer_chords(notes, bpm),
+        "chords": infer_chords(
+            notes,
+            bpm,
+            beat_times,
+            pickup_beats=pickup_beats,
+        ),
         "warnings": warnings,
     }
     result_path = output / "analysis.json"

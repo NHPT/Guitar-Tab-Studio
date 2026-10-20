@@ -92,8 +92,17 @@ test('lets a desktop administrator configure and run automatic cleanup', async (
               return demoProject
             case 'project-revisions':
             case 'recent-projects':
+            case 'local-projects':
             case 'model-packages':
               return []
+            case 'application-settings':
+              return {
+                language: 'zh-CN',
+                languagePreference: 'system',
+                systemLanguage: 'zh-CN',
+              }
+            case 'set-background-job-state':
+              return request.payload
             case 'runtime-status':
               return {
                 mode: 'desktop-local',
@@ -175,6 +184,12 @@ test('lets a desktop administrator configure and run automatic cleanup', async (
           return () => undefined
         },
         onOpenProject() {
+          return () => undefined
+        },
+        onOpenSettings() {
+          return () => undefined
+        },
+        onLanguageChanged() {
           return () => undefined
         },
         onTranscriptionProgress() {

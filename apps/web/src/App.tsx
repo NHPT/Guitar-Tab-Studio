@@ -1,9 +1,11 @@
 import {
+  ArrowLeft,
   AudioLines,
   Check,
   ChevronDown,
   CircleAlert,
   Cloud,
+  Cookie,
   Download,
   Drum,
   ExternalLink,
@@ -16,10 +18,12 @@ import {
   Headphones,
   History,
   KeyRound,
+  Languages,
   Link2,
   Laptop,
   LoaderCircle,
   Maximize2,
+  Minus,
   Minimize2,
   Music2,
   Palette,
@@ -42,6 +46,7 @@ import {
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import {
   arrangementPreservesPitch,
   authorizedMediaProviderForContent,
@@ -55,13 +60,21 @@ import {
   type DesktopLocalFileSource,
   type DesktopRecentProject,
   type DesktopRuntimeStatus,
+  type AppLanguage,
+  type AppLanguagePreference,
+  type DesktopApplicationSettings,
   type AuthorizedMediaProvider,
   type InstalledModelPackage,
+  type MediaBrowserDescriptor,
+  type MediaBrowserSession,
+  type PercussionVoice,
+  type PracticeRhythm,
   type ProjectRevision,
   type RhythmGroup,
   type RhythmKit,
   type StorageCleanupStatus,
   type StudioApplication,
+  type TimeSignature,
   type TranscriptionModelVariant,
   type TranscriptionProviderId,
   type TranscriptionSetupProgress,
@@ -84,8 +97,20 @@ import { AudioVisualizer } from './AudioVisualizer'
 import { BrandMark } from './BrandMark'
 import { recommendCapo, transposeChordForCapo } from './capo'
 import { ChordDiagram, FullScore } from './FullScore'
+import {
+  LiveTranscriptionWorkspace,
+  TunerWorkspace,
+} from './LiveGuitarWorkspaces'
 import { inferBeatStyle } from './rhythm'
+import { useLiveGuitar } from './useLiveGuitar'
 import { usePracticeAudio } from './usePracticeAudio'
+import {
+  initialLanguage,
+  resolveLanguage,
+  systemLanguage,
+  translate,
+  translatePracticeMessage,
+} from './i18n'
 
 const themePresets = [
   { id: 'vermilion', label: '朱砂', accent: '#b43c30', surface: '#ffffff' },
@@ -120,6 +145,7 @@ const visualizerModes: Array<{ id: VisualizerMode; label: string }> = [
 ]
 
 const countInBarOptions = [0, 1, 2, 3, 4] as const
+const countInBarsStorageKey = 'gts-count-in-bars-v2'
 const countInKitOptions = [
   { id: 'click', label: '电子滴答' },
   { id: 'wood', label: '木质节拍' },
@@ -136,6 +162,12 @@ type ProtectedImportRequest =
       url: string
       provider: 'qqmusic' | 'netease'
     }
+interface MediaSessionRecovery {
+  url: string
+  authorized: boolean
+  detecting: boolean
+  browser?: MediaBrowserDescriptor
+}
 const protectedProviderLabels: Record<AuthorizedMediaProvider, string> = {
   qqmusic: 'QQ 音乐',
   netease: '网易云音乐',
@@ -170,6 +202,35 @@ const rhythmKitOptions: Array<{
   { id: 'wood', label: '木质' },
 ]
 type RhythmKitSelection = (typeof rhythmKitOptions)[number]['id']
+type StandalonePracticeMode = 'metronome' | 'drums'
+type WorkspaceView = 'analysis' | 'practice' | 'tuner' | 'live-transcription'
+type PracticeSubdivision = 1 | 2 | 3 | 4
+type PracticeLaneId = 'kick' | 'snare' | 'hat' | 'percussion'
+
+const practiceTimeSignatures: TimeSignature[] = [
+  [4, 4],
+  [3, 4],
+  [2, 4],
+  [6, 8],
+]
+const practiceLanes: Array<{
+  id: PracticeLaneId
+  label: string
+  voices: PercussionVoice[]
+}> = [
+  { id: 'kick', label: '底鼓', voices: ['kick'] },
+  { id: 'snare', label: '军鼓', voices: ['snare', 'clap', 'rim'] },
+  {
+    id: 'hat',
+    label: '踩镲',
+    voices: ['closed-hat', 'open-hat', 'crash', 'shaker'],
+  },
+  {
+    id: 'percussion',
+    label: '打击乐',
+    voices: ['tom-high', 'tom-low', 'cowbell'],
+  },
+]
 const rhythmGroupOrder: RhythmGroup[] = [
   'metronome',
   'rock',
@@ -232,7 +293,7 @@ function initialVisualizer(): VisualizerMode {
 }
 
 function initialCountInBars(): number {
-  const persisted = window.localStorage.getItem('gts-count-in-bars')
+  const persisted = window.localStorage.getItem(countInBarsStorageKey)
   if (persisted === null) return 2
   const stored = Number(persisted)
   return countInBarOptions.includes(
@@ -273,6 +334,43 @@ function initialRhythmKit(): RhythmKitSelection {
   return rhythmKitOptions.some((option) => option.id === stored)
     ? (stored as RhythmKitSelection)
     : 'pattern'
+}
+
+function initialStandaloneBpm(): number {
+  const stored = Number(window.localStorage.getItem('gts-practice-bpm'))
+  return Number.isFinite(stored) && stored >= 30 && stored <= 260
+    ? Math.round(stored)
+    : 100
+}
+
+function createMetronomeRhythm(
+  timeSignature: TimeSignature,
+  subdivision: PracticeSubdivision,
+  accent: boolean,
+): PracticeRhythm {
+  const stepsPerBar = timeSignature[0] * subdivision
+  return {
+    id: `standalone-click-${formatTimeSignature(timeSignature)}-${subdivision}`,
+    label: '独立节拍器',
+    group: 'metronome',
+    kit: 'click',
+    timeSignature,
+    stepsPerBar,
+    bpmRange: [30, 260],
+    swing: 0.5,
+    hits: Array.from({ length: stepsPerBar }, (_, step) => {
+      const beatStart = step % subdivision === 0
+      return {
+        step,
+        voice:
+          accent && step === 0
+            ? ('click-high' as const)
+            : ('click-low' as const),
+        velocity:
+          accent && step === 0 ? 1 : beatStart ? 0.72 : 0.32,
+      }
+    }),
+  }
 }
 
 function extractSharedUrl(value: string): string | null {
@@ -391,6 +489,11 @@ function formatTime(seconds: number): string {
   return `${minutes}:${remainder.toString().padStart(2, '0')}`
 }
 
+function formatBpm(bpm: number): string {
+  const rounded = Math.round(bpm * 10) / 10
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
+}
+
 function formatStorageSize(bytes: number): string {
   const gibibytes = bytes / 1024 ** 3
   if (gibibytes >= 1) return `${gibibytes.toFixed(1)} GB`
@@ -448,15 +551,42 @@ function App({ application = studioApplication }: AppProps) {
   const [rhythmKit, setRhythmKit] =
     useState<RhythmKitSelection>(initialRhythmKit)
   const [rhythmVolume, setRhythmVolume] = useState(initialRhythmVolume)
+  const [workspaceView, setWorkspaceView] =
+    useState<WorkspaceView>('analysis')
+  const [practiceMode, setPracticeMode] =
+    useState<StandalonePracticeMode>('metronome')
+  const [practicePlaying, setPracticePlaying] = useState(false)
+  const [practiceBpm, setPracticeBpm] = useState(initialStandaloneBpm)
+  const [practiceTimeSignature, setPracticeTimeSignature] =
+    useState<TimeSignature>([4, 4])
+  const [practiceSubdivision, setPracticeSubdivision] =
+    useState<PracticeSubdivision>(1)
+  const [practiceAccent, setPracticeAccent] = useState(true)
+  const [practiceRhythmId, setPracticeRhythmId] =
+    useState('rock-basic')
+  const [practiceKit, setPracticeKit] =
+    useState<RhythmKit>('click')
+  const [practiceVolume, setPracticeVolume] = useState(0.7)
+  const [practiceStep, setPracticeStep] = useState(-1)
+  const [mutedPracticeLanes, setMutedPracticeLanes] =
+    useState<PracticeLaneId[]>([])
   const [loopEnabled, setLoopEnabled] = useState(false)
   const [loopStartMeasure, setLoopStartMeasure] = useState(1)
   const [loopEndMeasure, setLoopEndMeasure] = useState(1)
-  const [scorePart, setScorePart] = useState<'guitar' | 'bass' | 'drums'>('guitar')
+  const [scorePart, setScorePart] = useState<'guitar' | 'bass'>('guitar')
   const [scoreGuitarPartId, setScoreGuitarPartId] = useState('overview')
   const [scoreExpanded, setScoreExpanded] = useState(false)
   const [capoEnabled, setCapoEnabled] = useState(true)
   const [capoFret, setCapoFret] = useState(0)
   const [theme, setTheme] = useState<ThemeId>(initialTheme)
+  const [language, setLanguage] = useState<AppLanguage>(initialLanguage)
+  const [languagePreference, setLanguagePreference] =
+    useState<AppLanguagePreference>('system')
+  const [detectedSystemLanguage, setDetectedSystemLanguage] =
+    useState<AppLanguage>(() => systemLanguage(window.navigator.language))
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsBusy, setSettingsBusy] = useState(false)
+  const [settingsError, setSettingsError] = useState('')
   const [visualizerMode, setVisualizerMode] = useState<VisualizerMode>(initialVisualizer)
   const [themeOpen, setThemeOpen] = useState(false)
   const [selectedNoteId, setSelectedNoteId] = useState<string>()
@@ -519,6 +649,8 @@ function App({ application = studioApplication }: AppProps) {
   const [job, setJob] = useState<AnalysisJob | null>(null)
   const [protectedImport, setProtectedImport] =
     useState<ProtectedImportRequest | null>(null)
+  const [mediaSessionRecovery, setMediaSessionRecovery] =
+    useState<MediaSessionRecovery | null>(null)
   const [scoreImportBusy, setScoreImportBusy] = useState(false)
   const [error, setError] = useState('')
   const [mediaKeyNotice, setMediaKeyNotice] = useState('')
@@ -529,15 +661,25 @@ function App({ application = studioApplication }: AppProps) {
   const timeReadoutRef = useRef<HTMLElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const countInConsumedRef = useRef(false)
+  const practiceTapTimesRef = useRef<number[]>([])
   const projectListResizeRef = useRef<{
     pointerId: number
     startY: number
     startHeight: number
   } | null>(null)
   const projectId = project?.id
+  const t = useCallback(
+    (source: string) => translate(language, source),
+    [language],
+  )
+  const liveGuitar = useLiveGuitar()
+  const stopLiveInput = liveGuitar.stop
 
   const loadProject = useCallback((nextProject: StudioProject) => {
     const finalMeasure = Math.max(1, nextProject.tab.measures.length)
+    stopLiveInput()
+    setPracticePlaying(false)
+    setWorkspaceView('analysis')
     setProject(nextProject)
     setMixes(initialMixes(nextProject))
     playbackPositionRef.current = 0
@@ -562,7 +704,7 @@ function App({ application = studioApplication }: AppProps) {
     setSelectedBeatIndex(undefined)
     setScoreLayer('original')
     setRevisionNotice('')
-  }, [])
+  }, [stopLiveInput])
 
   const refreshLocalProjects = useCallback(async () => {
     if (!desktopControls.localProjects) return []
@@ -671,6 +813,59 @@ function App({ application = studioApplication }: AppProps) {
     document.documentElement.dataset.theme = theme
     window.localStorage.setItem('gts-theme', theme)
   }, [theme])
+
+  useEffect(() => {
+    document.documentElement.lang = language
+    window.localStorage.setItem('gts-language', language)
+  }, [language])
+
+  useEffect(() => {
+    if (!desktopControls.applicationSettings) return
+    let active = true
+    void desktopControls.applicationSettings().then((settings) => {
+      if (!active) return
+      setLanguage(settings.language)
+      setLanguagePreference(settings.languagePreference)
+      setDetectedSystemLanguage(settings.systemLanguage)
+    })
+    return () => {
+      active = false
+    }
+  }, [desktopControls])
+
+  useEffect(() => {
+    if (!desktopControls.onOpenSettings) return
+    return desktopControls.onOpenSettings(() => setSettingsOpen(true))
+  }, [desktopControls])
+
+  useEffect(() => {
+    if (!desktopControls.onLanguageChanged) return
+    return desktopControls.onLanguageChanged(
+      (settings: DesktopApplicationSettings) => {
+        setLanguage(settings.language)
+        setLanguagePreference(settings.languagePreference)
+        setDetectedSystemLanguage(settings.systemLanguage)
+      },
+    )
+  }, [desktopControls])
+
+  useEffect(() => {
+    if (!desktopControls.setBackgroundJobState) return
+    const active = Boolean(
+      job &&
+        !['completed', 'degraded', 'failed', 'cancelled'].includes(job.status),
+    )
+    void desktopControls.setBackgroundJobState(
+      active && job
+        ? {
+            active: true,
+            jobId: job.id,
+            progress: job.progress,
+            stageLabel: job.stageLabel,
+          }
+        : { active: false },
+    )
+  }, [desktopControls, job])
 
   useEffect(() => {
     const updateMaximumHeight = () => {
@@ -809,7 +1004,7 @@ function App({ application = studioApplication }: AppProps) {
   }, [visualizerMode])
 
   useEffect(() => {
-    window.localStorage.setItem('gts-count-in-bars', String(countInBars))
+    window.localStorage.setItem(countInBarsStorageKey, String(countInBars))
     window.localStorage.setItem('gts-count-in-kit', countInKit)
     window.localStorage.setItem(
       'gts-count-in-volume',
@@ -823,6 +1018,10 @@ function App({ application = studioApplication }: AppProps) {
     window.localStorage.setItem('gts-rhythm-kit', rhythmKit)
     window.localStorage.setItem('gts-rhythm-volume', String(rhythmVolume))
   }, [rhythmEnabled, rhythmId, rhythmKit, rhythmVolume])
+
+  useEffect(() => {
+    window.localStorage.setItem('gts-practice-bpm', String(practiceBpm))
+  }, [practiceBpm])
 
   const scoreProject = useMemo(() => {
     if (!project) return project
@@ -921,6 +1120,49 @@ function App({ application = studioApplication }: AppProps) {
         timeSignature,
       ).compatible,
   ).length
+  const standaloneDrumRhythms = useMemo(
+    () =>
+      PRACTICE_RHYTHMS.filter(
+        (rhythm) =>
+          rhythm.group !== 'metronome' &&
+          rhythm.timeSignature[0] === practiceTimeSignature[0] &&
+          rhythm.timeSignature[1] === practiceTimeSignature[1],
+      ),
+    [practiceTimeSignature],
+  )
+  const selectedStandaloneDrumRhythm =
+    standaloneDrumRhythms.find(
+      (rhythm) => rhythm.id === practiceRhythmId,
+    ) ??
+    standaloneDrumRhythms[0] ??
+    PRACTICE_RHYTHMS.find((rhythm) => rhythm.id === 'rock-basic')!
+  const standaloneDefinition = useMemo(
+    () =>
+      practiceMode === 'metronome'
+        ? createMetronomeRhythm(
+            practiceTimeSignature,
+            practiceSubdivision,
+            practiceAccent,
+          )
+        : selectedStandaloneDrumRhythm,
+    [
+      practiceAccent,
+      practiceMode,
+      practiceSubdivision,
+      practiceTimeSignature,
+      selectedStandaloneDrumRhythm,
+    ],
+  )
+  const mutedPracticeVoices = useMemo(
+    () =>
+      practiceLanes
+        .filter((lane) => mutedPracticeLanes.includes(lane.id))
+        .flatMap((lane) => lane.voices),
+    [mutedPracticeLanes],
+  )
+  const handlePracticeStep = useCallback((step: number) => {
+    setPracticeStep(step)
+  }, [])
 
   const {
     analyserRef,
@@ -941,6 +1183,15 @@ function App({ application = studioApplication }: AppProps) {
       kit: rhythmKit === 'pattern' ? selectedRhythm.kit : rhythmKit,
       volume: rhythmVolume,
     },
+    standalone: {
+      playing: practicePlaying,
+      bpm: practiceBpm,
+      definition: standaloneDefinition,
+      kit: practiceKit,
+      volume: practiceVolume,
+      mutedVoices: mutedPracticeVoices,
+      onStep: handlePracticeStep,
+    },
   })
 
   useEffect(() => {
@@ -951,11 +1202,15 @@ function App({ application = studioApplication }: AppProps) {
     (seconds: number) => {
       cancelCountIn()
       setCountInProgress(null)
+      const firstMeasureStart = scoreProject?.tab.measures[0]?.start ?? 0
+      if (seconds <= firstMeasureStart + 0.05) {
+        countInConsumedRef.current = false
+      }
       playbackPositionRef.current = seconds
       setPosition(seconds)
       seekAudio(seconds)
     },
-    [cancelCountIn, seekAudio],
+    [cancelCountIn, scoreProject, seekAudio],
   )
 
   useEffect(() => {
@@ -1238,9 +1493,86 @@ function App({ application = studioApplication }: AppProps) {
     setCountInProgress(null)
   }
 
+  const openImportDialog = (
+    mode: 'upload' | 'score' | 'link' = 'upload',
+  ) => {
+    setImportMode(mode)
+    setImportOpen(true)
+  }
+
+  const openAnalysisWorkspace = () => {
+    setPracticePlaying(false)
+    stopLiveInput()
+    setWorkspaceView('analysis')
+  }
+
+  const openPracticeWorkspace = () => {
+    if (playing) {
+      setPosition(playbackPositionRef.current)
+      setPlaying(false)
+    }
+    cancelPreparation()
+    stopLiveInput()
+    setWorkspaceView('practice')
+  }
+
+  const openLiveWorkspace = (
+    view: Extract<WorkspaceView, 'tuner' | 'live-transcription'>,
+  ) => {
+    if (playing) {
+      setPosition(playbackPositionRef.current)
+      setPlaying(false)
+    }
+    setPracticePlaying(false)
+    cancelPreparation()
+    stopLiveInput()
+    setWorkspaceView(view)
+  }
+
   const changePlaybackSpeed = (nextSpeed: number) => {
     cancelPreparation()
     setSpeed(nextSpeed)
+  }
+
+  const changePracticeTempo = (nextTempo: number) => {
+    if (!Number.isFinite(nextTempo)) return
+    setPracticeBpm(Math.max(30, Math.min(260, Math.round(nextTempo))))
+  }
+
+  const tapPracticeTempo = () => {
+    const now = performance.now()
+    const recent = [
+      ...practiceTapTimesRef.current.filter((time) => now - time <= 2_000),
+      now,
+    ].slice(-6)
+    practiceTapTimesRef.current = recent
+    if (recent.length < 2) return
+    const intervals = recent.slice(1).map((time, index) => time - recent[index])
+    const average =
+      intervals.reduce((total, interval) => total + interval, 0) /
+      intervals.length
+    changePracticeTempo(60_000 / average)
+  }
+
+  const togglePracticePlayback = () => {
+    if (practicePlaying) {
+      setPracticePlaying(false)
+      return
+    }
+    setPracticePlaying(true)
+    void activateAudio().catch((cause: unknown) =>
+      setError(
+        cause instanceof Error ? cause.message : '无法启动练习音频',
+      ),
+    )
+  }
+
+  const togglePracticeLane = (lane: PracticeLaneId) => {
+    setMutedPracticeLanes((current) =>
+      current.includes(lane)
+        ? current.filter((candidate) => candidate !== lane)
+        : [...current, lane],
+    )
   }
 
   const togglePlayback = () => {
@@ -1337,6 +1669,20 @@ function App({ application = studioApplication }: AppProps) {
       }
 
       if (nextJob.status === 'failed') {
+        if (
+          nextJob.source.url &&
+          (nextJob.errorCode === 'media-auth-required' ||
+            nextJob.errorCode === 'media-session-unavailable') &&
+          desktopControls.detectDefaultMediaBrowser
+        ) {
+          setMediaSessionRecovery({
+            url: nextJob.source.url,
+            authorized: Boolean(nextJob.source.authorizedMedia),
+            detecting: false,
+          })
+        } else {
+          setMediaSessionRecovery(null)
+        }
         setError(nextJob.error ?? '分析任务失败')
         setJob(null)
         return
@@ -1353,7 +1699,7 @@ function App({ application = studioApplication }: AppProps) {
         }, 700)
       }
     },
-    [application, loadProject],
+    [application, desktopControls, loadProject],
   )
 
   const authorizedMediaConsent = {
@@ -1364,16 +1710,19 @@ function App({ application = studioApplication }: AppProps) {
   const startLinkImport = async (
     authorized = false,
     preparedUrl?: string,
+    mediaSession?: MediaBrowserSession,
   ) => {
     setError('')
+    setMediaSessionRecovery(null)
     try {
       const normalizedUrl = preparedUrl ?? extractSharedUrl(linkValue)
-      if (!normalizedUrl || !detectedPlatform) {
+      if (!normalizedUrl || !detectInputPlatform(normalizedUrl, platforms)) {
         throw new Error('未识别该链接来源，请粘贴受支持平台的完整分享链接')
       }
       const nextJob = await application.submitLink(
         normalizedUrl,
         authorized ? authorizedMediaConsent : undefined,
+        mediaSession,
       )
       setProtectedImport(null)
       setJob(nextJob)
@@ -1415,6 +1764,7 @@ function App({ application = studioApplication }: AppProps) {
 
   const requestLinkImport = async () => {
     setError('')
+    setMediaSessionRecovery(null)
     try {
       const normalizedUrl = extractSharedUrl(linkValue)
       if (!normalizedUrl || !detectedPlatform) {
@@ -1437,6 +1787,51 @@ function App({ application = studioApplication }: AppProps) {
         importError instanceof Error ? importError.message : '链接导入失败',
       )
     }
+  }
+
+  const detectMediaSessionForRetry = async () => {
+    if (
+      !mediaSessionRecovery ||
+      !desktopControls.detectDefaultMediaBrowser
+    ) {
+      return
+    }
+    setMediaSessionRecovery((current) =>
+      current ? { ...current, detecting: true } : current,
+    )
+    try {
+      const result = await desktopControls.detectDefaultMediaBrowser()
+      if (!result.supported || !result.browser) {
+        throw new Error(
+          result.detectedLabel
+            ? `系统默认浏览器“${result.detectedLabel}”暂不支持自动读取登录状态`
+            : '无法识别系统默认浏览器，请确认已设置默认浏览器',
+        )
+      }
+      setMediaSessionRecovery((current) =>
+        current
+          ? { ...current, detecting: false, browser: result.browser }
+          : current,
+      )
+    } catch (cause) {
+      setMediaSessionRecovery((current) =>
+        current ? { ...current, detecting: false } : current,
+      )
+      setError(
+        cause instanceof Error ? cause.message : '无法识别系统默认浏览器',
+      )
+    }
+  }
+
+  const retryWithDefaultBrowserSession = async () => {
+    if (!mediaSessionRecovery?.browser) return
+    const recovery = mediaSessionRecovery
+    const browser = mediaSessionRecovery.browser
+    await startLinkImport(
+      recovery.authorized,
+      recovery.url,
+      { browser: browser.id },
+    )
   }
 
   const startScoreUpload = async (file: File) => {
@@ -1529,12 +1924,51 @@ function App({ application = studioApplication }: AppProps) {
     }
   }
 
+  const changeLanguage = async (
+    preference: AppLanguagePreference,
+  ) => {
+    setSettingsBusy(true)
+    setSettingsError('')
+    try {
+      const settings = desktopControls.setLanguage
+        ? await desktopControls.setLanguage(preference)
+        : {
+            languagePreference: preference,
+            systemLanguage: systemLanguage(window.navigator.language),
+            language: resolveLanguage(
+              preference,
+              systemLanguage(window.navigator.language),
+            ),
+          }
+      setLanguage(settings.language)
+      setLanguagePreference(settings.languagePreference)
+      setDetectedSystemLanguage(settings.systemLanguage)
+      window.localStorage.setItem(
+        'gts-language-preference',
+        settings.languagePreference,
+      )
+    } catch (languageError) {
+      setSettingsError(
+        languageError instanceof Error
+          ? languageError.message
+          : 'Unable to change language',
+      )
+    } finally {
+      setSettingsBusy(false)
+    }
+  }
+
   if (!project) {
     return (
       <main className="loading-screen">
         <AudioLines aria-hidden="true" />
         <LoaderCircle className="spin" aria-hidden="true" />
-        <p>{error || '正在连接本地工作台'}</p>
+        <p>
+          {error ||
+            (language === 'en-US'
+              ? 'Connecting to the local workspace'
+              : '正在连接本地工作台')}
+        </p>
       </main>
     )
   }
@@ -1665,7 +2099,11 @@ function App({ application = studioApplication }: AppProps) {
 
   return (
     <div
-      className={`app-shell${selectedNote || selectedMeasure ? ' has-inspector' : ''}`}
+      className={`app-shell${
+        workspaceView === 'analysis' && (selectedNote || selectedMeasure)
+          ? ' has-inspector'
+          : ''
+      }`}
       onDragOver={(event) => {
         if (event.dataTransfer.types.includes('Files')) {
           event.preventDefault()
@@ -1696,26 +2134,38 @@ function App({ application = studioApplication }: AppProps) {
           </span>
           <div>
             <strong>Guitar Tab Studio</strong>
-            <span>AI 吉他谱与分轨</span>
+            <span>{t('AI 吉他谱与分轨')}</span>
           </div>
         </div>
         <div className="header-status">
           <span className={`status-dot ${capabilities?.mode ?? 'demo'}`} />
           <span>
             {capabilities?.mode === 'inference'
-              ? '模型已就绪'
+              ? t('模型已就绪')
               : capabilities?.mode === 'hybrid'
-                ? '混合处理'
-                : '演示引擎'}
+                ? t('混合处理')
+                : t('演示引擎')}
           </span>
         </div>
         <div className="header-actions">
+          {job && !jobTerminal ? (
+            <button
+              className="background-job-button"
+              type="button"
+              aria-label={t('打开分析进度')}
+              title={t('后台分析任务')}
+              onClick={() => setImportOpen(true)}
+            >
+              <LoaderCircle className="spin" aria-hidden="true" />
+              <span>{Math.round(job.progress)}%</span>
+            </button>
+          ) : null}
           {desktopControls.runtimeStatus && (
             <button
               className="icon-button"
               type="button"
-              aria-label="桌面运行时"
-              title="桌面运行时"
+              aria-label={t('桌面运行时')}
+              title={t('桌面运行时')}
               onClick={() => {
                 setRuntimeOpen(true)
                 setRuntimeLocation(runtimeStatus?.providerMode ?? 'local')
@@ -1730,28 +2180,37 @@ function App({ application = studioApplication }: AppProps) {
           <button
             className="icon-button"
             type="button"
-            aria-label="打开社区协作"
-            title="社区协作"
+            aria-label={t('打开社区协作')}
+            title={t('社区协作')}
             onClick={() => {
               window.location.href = '/community'
             }}
           >
             <Users aria-hidden="true" />
           </button>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label={t('设置')}
+            title={t('设置')}
+            onClick={() => setSettingsOpen(true)}
+          >
+            <Languages aria-hidden="true" />
+          </button>
           <div className="theme-picker">
             <button
               className="icon-button"
               type="button"
-              aria-label="选择界面配色"
-              title="选择界面配色"
+              aria-label={t('选择界面配色')}
+              title={t('选择界面配色')}
               aria-expanded={themeOpen}
               onClick={() => setThemeOpen((current) => !current)}
             >
               <Palette aria-hidden="true" />
             </button>
             {themeOpen ? (
-              <div className="theme-menu" role="menu" aria-label="界面配色">
-                <strong>界面配色</strong>
+              <div className="theme-menu" role="menu" aria-label={t('界面配色')}>
+                <strong>{t('界面配色')}</strong>
                 <div>
                   {themePresets.map((preset) => (
                     <button
@@ -1771,7 +2230,7 @@ function App({ application = studioApplication }: AppProps) {
                           '--theme-surface': preset.surface,
                         } as React.CSSProperties}
                       />
-                      <span>{preset.label}</span>
+                      <span>{t(preset.label)}</span>
                       {theme === preset.id ? <Check aria-hidden="true" /> : null}
                     </button>
                   ))}
@@ -1782,24 +2241,32 @@ function App({ application = studioApplication }: AppProps) {
           <button
             className="icon-button"
             type="button"
-            aria-label="打印或导出 PDF"
-            title="打印或导出 PDF"
+            aria-label={t('打印或导出 PDF')}
+            title={t('打印或导出 PDF')}
             onClick={() => window.print()}
           >
             <Download aria-hidden="true" />
           </button>
-          <button className="primary-button" type="button" onClick={() => setImportOpen(true)}>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={() => openImportDialog()}
+          >
             <Plus aria-hidden="true" />
-            导入歌曲
+            {t('导入歌曲')}
           </button>
         </div>
       </header>
 
       <aside className="library-rail">
         <div className="rail-heading">
-          <span>项目</span>
-          <button className="icon-button compact" type="button" onClick={() => setImportOpen(true)}>
-            <Plus aria-label="新建项目" />
+          <span>{t('项目')}</span>
+          <button
+            className="icon-button compact"
+            type="button"
+            onClick={() => openImportDialog()}
+          >
+            <Plus aria-label={t('新建项目')} />
           </button>
         </div>
         <div
@@ -1814,6 +2281,7 @@ function App({ application = studioApplication }: AppProps) {
               type="button"
               key={item.id}
               onClick={() => {
+                openAnalysisWorkspace()
                 if (item.id === builtinProject?.id) {
                   loadProject(builtinProject)
                   window.history.replaceState(
@@ -1917,35 +2385,64 @@ function App({ application = studioApplication }: AppProps) {
           }}
         />
         <div className="rail-section">
-          <span>来源</span>
-          <button type="button" onClick={() => setImportOpen(true)}>
+          <span>{t('来源')}</span>
+          <button type="button" onClick={() => openImportDialog('upload')}>
             <Upload aria-hidden="true" />
-            本地音视频
+            {t('本地音视频')}
           </button>
           <button
             type="button"
-            onClick={() => {
-              setImportMode('link')
-              setImportOpen(true)
-            }}
+            onClick={() => openImportDialog('link')}
           >
             <Link2 aria-hidden="true" />
-            在线链接
+            {t('在线链接')}
+          </button>
+        </div>
+        <div className="rail-section rail-tools">
+          <span>{t('工具')}</span>
+          <button
+            type="button"
+            className={workspaceView === 'practice' ? 'is-active' : ''}
+            aria-pressed={workspaceView === 'practice'}
+            onClick={openPracticeWorkspace}
+          >
+            <TimerReset aria-hidden="true" />
+            {t('节拍器 / 鼓机')}
+          </button>
+          <button
+            type="button"
+            className={workspaceView === 'tuner' ? 'is-active' : ''}
+            aria-pressed={workspaceView === 'tuner'}
+            onClick={() => openLiveWorkspace('tuner')}
+          >
+            <Gauge aria-hidden="true" />
+            {t('调音器')}
+          </button>
+          <button
+            type="button"
+            className={
+              workspaceView === 'live-transcription' ? 'is-active' : ''
+            }
+            aria-pressed={workspaceView === 'live-transcription'}
+            onClick={() => openLiveWorkspace('live-transcription')}
+          >
+            <Guitar aria-hidden="true" />
+            {t('实时记谱')}
           </button>
         </div>
         <div className="rail-capabilities">
-          <span>处理能力</span>
+          <span>{t('处理能力')}</span>
           <p>
             <i className={capabilities?.ffmpeg ? 'ok' : ''} />
-            媒体标准化
+            {t('媒体标准化')}
           </p>
           <p>
             <i className={capabilities?.ytDlp ? 'ok' : ''} />
-            公开链接解析
+            {t('公开链接解析')}
           </p>
           <p>
             <i className={capabilities?.worker ? 'ok' : ''} />
-            AI 推理 Worker
+            {t('AI 推理 Worker')}
           </p>
         </div>
       </aside>
@@ -1965,12 +2462,18 @@ function App({ application = studioApplication }: AppProps) {
             onClick={() => void removeLocalProject(projectContextMenu.project)}
           >
             <Trash2 aria-hidden="true" />
-            删除项目
+            {t('删除项目')}
           </button>
         </div>
       ) : null}
 
-      <main className="workspace">
+      <main
+        className={`workspace${
+          workspaceView === 'analysis'
+            ? ''
+            : ` is-tool-workspace is-${workspaceView}-workspace`
+        }`}
+      >
         <section className="project-bar">
           <div>
             <span className="eyebrow">{project.artist}</span>
@@ -1978,44 +2481,48 @@ function App({ application = studioApplication }: AppProps) {
           </div>
           <dl>
             <div>
-              <dt>速度</dt>
-              <dd>{project.bpm} BPM</dd>
+              <dt>{t('速度')}</dt>
+              <dd>{formatBpm(project.bpm)} BPM</dd>
             </div>
             <div>
-              <dt>调性</dt>
+              <dt>{t('调性')}</dt>
               <dd>{project.key}</dd>
             </div>
             <div>
-              <dt>拍号</dt>
+              <dt>{t('拍号')}</dt>
               <dd>4 / 4</dd>
             </div>
             <div>
-              <dt>转录模型</dt>
+              <dt>{t('转录模型')}</dt>
               <dd
                 title={
                   project.analysisMode === 'demo'
-                    ? '内置演示项目'
+                    ? t('内置演示项目')
                     : project.transcriptionModel
                     ? `${project.transcriptionModel.name} ${project.transcriptionModel.version}`
-                    : '历史项目未记录模型版本'
+                    : t('历史项目未记录模型版本')
                 }
               >
                 {project.analysisMode === 'demo'
-                  ? '待复核'
+                  ? t('待复核')
                   : project.transcriptionModel?.kind === 'trained'
-                  ? '弦级模型'
-                  : '通用基线'}
+                  ? t('弦级模型')
+                  : t('通用基线')}
               </dd>
             </div>
           </dl>
           <div className="project-revision-controls">
-            <div className="score-layer-switch" role="group" aria-label="谱面版本">
+            <div
+              className="score-layer-switch"
+              role="group"
+              aria-label={t('谱面版本')}
+            >
               <button
                 type="button"
                 className={scoreLayer === 'original' ? 'is-active' : ''}
                 onClick={() => setScoreLayer('original')}
               >
-                原始谱
+                {t('原始谱')}
               </button>
               <button
                 type="button"
@@ -2026,22 +2533,22 @@ function App({ application = studioApplication }: AppProps) {
                 }}
               >
                 <WandSparkles aria-hidden="true" />
-                易弹版
+                {t('易弹版')}
               </button>
             </div>
             <label className="revision-picker">
               <History aria-hidden="true" />
               <select
-                aria-label="恢复项目修订"
+                aria-label={t('恢复项目修订')}
                 value=""
                 disabled={revisionBusy || revisions.length === 0}
                 onChange={(event) => void restoreRevision(event.target.value)}
               >
-                <option value="">修订历史</option>
+                <option value="">{t('修订历史')}</option>
                 {revisions.map((revision) => (
                   <option value={revision.id} key={revision.id}>
                     {revision.label} ·{' '}
-                    {new Date(revision.createdAt).toLocaleString('zh-CN', {
+                    {new Date(revision.createdAt).toLocaleString(language, {
                       month: '2-digit',
                       day: '2-digit',
                       hour: '2-digit',
@@ -2069,7 +2576,7 @@ function App({ application = studioApplication }: AppProps) {
               ) : (
                 <Save aria-hidden="true" />
               )}
-              保存修订
+              {t('保存修订')}
             </button>
             {revisionNotice ? (
               <span className="revision-notice" role="status">
@@ -2084,8 +2591,8 @@ function App({ application = studioApplication }: AppProps) {
             <button
               className="icon-button"
               type="button"
-              title="回到开始"
-              aria-label="回到开始"
+              title={t('回到开始')}
+              aria-label={t('回到开始')}
               onClick={() => seekPosition(loopEnabled ? loopRange.start : 0)}
             >
               <SkipBack aria-hidden="true" />
@@ -2094,7 +2601,11 @@ function App({ application = studioApplication }: AppProps) {
               className="play-button"
               type="button"
               aria-label={
-                countInProgress ? '取消预备' : playing ? '暂停' : '播放'
+                countInProgress
+                  ? t('取消预备')
+                  : playing
+                    ? t('暂停')
+                    : t('播放')
               }
               onClick={togglePlayback}
             >
@@ -2111,7 +2622,7 @@ function App({ application = studioApplication }: AppProps) {
             <div className="speed-control">
               <Gauge aria-hidden="true" />
               <input
-                aria-label="播放速度"
+                aria-label={t('播放速度')}
                 type="range"
                 min="0.5"
                 max="1.25"
@@ -2127,19 +2638,21 @@ function App({ application = studioApplication }: AppProps) {
               <button
                 className="loop-toggle"
                 type="button"
-                aria-label="练习循环"
+                aria-label={t('练习循环')}
                 aria-pressed={loopEnabled}
-                title={loopEnabled ? '关闭练习循环' : '开启练习循环'}
+                title={
+                  loopEnabled ? t('关闭练习循环') : t('开启练习循环')
+                }
                 onClick={() => setLoopEnabled((current) => !current)}
               >
                 <RotateCcw aria-hidden="true" />
-                <span>练习循环</span>
+                <span>{t('练习循环')}</span>
               </button>
-              <div className="loop-range" aria-label="循环小节范围">
+              <div className="loop-range" aria-label={t('循环小节范围')}>
                 <label className="loop-measure-picker">
-                  <span>起</span>
+                  <span>{t('起')}</span>
                   <select
-                    aria-label="循环起始小节"
+                    aria-label={t('循环起始小节')}
                     value={loopStartMeasure}
                     disabled={!loopEnabled}
                     onChange={(event) => {
@@ -2152,17 +2665,19 @@ function App({ application = studioApplication }: AppProps) {
                   >
                     {displayedProject.tab.measures.map((measure) => (
                       <option value={measure.number} key={measure.number}>
-                        第 {measure.number} 小节
+                        {language === 'en-US'
+                          ? `Measure ${measure.number}`
+                          : `第 ${measure.number} 小节`}
                       </option>
                     ))}
                   </select>
                   <ChevronDown aria-hidden="true" />
                 </label>
-                <span className="loop-range-separator">至</span>
+                <span className="loop-range-separator">{t('至')}</span>
                 <label className="loop-measure-picker">
-                  <span>止</span>
+                  <span>{t('止')}</span>
                   <select
-                    aria-label="循环结束小节"
+                    aria-label={t('循环结束小节')}
                     value={loopEndMeasure}
                     disabled={!loopEnabled}
                     onChange={(event) => {
@@ -2175,7 +2690,9 @@ function App({ application = studioApplication }: AppProps) {
                   >
                     {displayedProject.tab.measures.map((measure) => (
                       <option value={measure.number} key={measure.number}>
-                        第 {measure.number} 小节
+                        {language === 'en-US'
+                          ? `Measure ${measure.number}`
+                          : `第 ${measure.number} 小节`}
                       </option>
                     ))}
                   </select>
@@ -2186,7 +2703,7 @@ function App({ application = studioApplication }: AppProps) {
             <label className="visualizer-picker">
               <AudioLines aria-hidden="true" />
               <select
-                aria-label="播放可视化模式"
+                aria-label={t('播放可视化模式')}
                 value={visualizerMode}
                 onChange={(event) =>
                   setVisualizerMode(event.target.value as VisualizerMode)
@@ -2194,19 +2711,21 @@ function App({ application = studioApplication }: AppProps) {
               >
                 {visualizerModes.map((mode) => (
                   <option value={mode.id} key={mode.id}>
-                    {mode.label}
+                    {t(mode.label)}
                   </option>
                 ))}
               </select>
               <ChevronDown aria-hidden="true" />
             </label>
           </div>
+        </section>
+        <section className="practice-section">
           <div className="practice-controls">
             <label className="practice-picker count-in-picker">
               <TimerReset aria-hidden="true" />
-              <span>预备</span>
+              <span>{t('预备')}</span>
               <select
-                aria-label="预备小节数"
+                aria-label={t('预备小节数')}
                 value={countInBars}
                 onChange={(event) => {
                   cancelPreparation()
@@ -2215,16 +2734,20 @@ function App({ application = studioApplication }: AppProps) {
               >
                 {countInBarOptions.map((bars) => (
                   <option value={bars} key={bars}>
-                    {bars === 0 ? '关闭' : `${bars} 小节`}
+                    {bars === 0
+                      ? t('关闭')
+                      : language === 'en-US'
+                        ? `${bars} measure${bars === 1 ? '' : 's'}`
+                        : `${bars} 小节`}
                   </option>
                 ))}
               </select>
               <ChevronDown aria-hidden="true" />
             </label>
             <label className="practice-picker count-in-sound">
-              <span>预备音色</span>
+              <span>{t('预备音色')}</span>
               <select
-                aria-label="预备节拍音色"
+                aria-label={t('预备节拍音色')}
                 value={countInKit}
                 disabled={countInBars === 0}
                 onChange={(event) =>
@@ -2233,7 +2756,7 @@ function App({ application = studioApplication }: AppProps) {
               >
                 {countInKitOptions.map((option) => (
                   <option value={option.id} key={option.id}>
-                    {option.label}
+                    {t(option.label)}
                   </option>
                 ))}
               </select>
@@ -2242,7 +2765,7 @@ function App({ application = studioApplication }: AppProps) {
             <label className="rhythm-volume count-in-volume">
               <Volume2 aria-hidden="true" />
               <input
-                aria-label="预备节拍音量"
+                aria-label={t('预备节拍音量')}
                 type="range"
                 min="0"
                 max="1"
@@ -2257,22 +2780,22 @@ function App({ application = studioApplication }: AppProps) {
             <button
               className={`rhythm-toggle${rhythmEnabled ? ' is-active' : ''}`}
               type="button"
-              aria-label="节奏伴奏"
+              aria-label={t('节奏伴奏')}
               aria-pressed={rhythmEnabled}
               onClick={() => setRhythmEnabled((current) => !current)}
             >
               <Drum aria-hidden="true" />
-              <span>节奏伴奏</span>
+              <span>{t('节奏伴奏')}</span>
             </button>
             <label className="practice-picker rhythm-picker">
-              <span>节奏</span>
+              <span>{t('节奏')}</span>
               <select
-                aria-label="节奏型"
+                aria-label={t('节奏型')}
                 value={selectedRhythm.id}
                 onChange={(event) => setRhythmId(event.target.value)}
               >
                 {rhythmGroupOrder.map((group) => (
-                  <optgroup label={rhythmGroupLabels[group]} key={group}>
+                  <optgroup label={t(rhythmGroupLabels[group])} key={group}>
                     {PRACTICE_RHYTHMS.filter(
                       (rhythm) => rhythm.group === group,
                     ).map((rhythm) => {
@@ -2287,9 +2810,12 @@ function App({ application = studioApplication }: AppProps) {
                           disabled={!compatibility.compatible}
                           key={rhythm.id}
                         >
-                          {rhythm.label}
+                          {t(rhythm.label)}
                           {compatibility.message
-                            ? ` · ${compatibility.message}`
+                            ? ` · ${translatePracticeMessage(
+                                language,
+                                compatibility.message,
+                              )}`
                             : ''}
                         </option>
                       )
@@ -2300,9 +2826,9 @@ function App({ application = studioApplication }: AppProps) {
               <ChevronDown aria-hidden="true" />
             </label>
             <label className="practice-picker rhythm-kit-picker">
-              <span>鼓组音色</span>
+              <span>{t('鼓组音色')}</span>
               <select
-                aria-label="鼓组音色"
+                aria-label={t('鼓组音色')}
                 value={rhythmKit}
                 disabled={!rhythmEnabled}
                 onChange={(event) =>
@@ -2313,7 +2839,7 @@ function App({ application = studioApplication }: AppProps) {
               >
                 {rhythmKitOptions.map((option) => (
                   <option value={option.id} key={option.id}>
-                    {option.label}
+                    {t(option.label)}
                   </option>
                 ))}
               </select>
@@ -2322,7 +2848,7 @@ function App({ application = studioApplication }: AppProps) {
             <label className="rhythm-volume">
               <Volume2 aria-hidden="true" />
               <input
-                aria-label="节奏伴奏音量"
+                aria-label={t('节奏伴奏音量')}
                 type="range"
                 min="0.1"
                 max="1"
@@ -2336,7 +2862,8 @@ function App({ application = studioApplication }: AppProps) {
             </label>
             <span className="rhythm-availability" role="status">
               {formatTimeSignature(timeSignature)} · {tempoLabel} BPM ·{' '}
-              {compatibleRhythmCount}/{PRACTICE_RHYTHMS.length} 可用
+              {compatibleRhythmCount}/{PRACTICE_RHYTHMS.length}{' '}
+              {language === 'en-US' ? 'available' : '可用'}
             </span>
           </div>
           {countInProgress ? (
@@ -2344,13 +2871,15 @@ function App({ application = studioApplication }: AppProps) {
               <div>
                 <TimerReset aria-hidden="true" />
                 <span>
-                  预备 {countInProgress.bar}/{countInProgress.totalBars} 小节
+                  {t('预备')} {countInProgress.bar}/
+                  {countInProgress.totalBars}{' '}
+                  {language === 'en-US' ? 'measures' : '小节'}
                   {' · '}
                   {countInProgress.tempo} BPM
                 </span>
               </div>
               <strong>
-                {countInProgress.beat || '准备'}
+                {countInProgress.beat || t('准备')}
               </strong>
               <div className="count-in-beats" aria-hidden="true">
                 {Array.from(
@@ -2382,16 +2911,339 @@ function App({ application = studioApplication }: AppProps) {
           />
         </section>
 
+        <section
+          className={`standalone-practice${practicePlaying ? ' is-playing' : ''}`}
+          aria-labelledby="standalone-practice-title"
+        >
+          <header>
+            <button
+              className="practice-back-button"
+              type="button"
+              aria-label={t('返回分析')}
+              title={t('返回分析')}
+              onClick={openAnalysisWorkspace}
+            >
+              <ArrowLeft aria-hidden="true" />
+            </button>
+            <div className="practice-title">
+              <span className="eyebrow">{t('独立练习')}</span>
+              <h2 id="standalone-practice-title">
+                {t('节拍器 / 鼓机')}
+              </h2>
+            </div>
+            <div
+              className="practice-mode-switch"
+              role="group"
+              aria-label={t('节拍器 / 鼓机模式')}
+            >
+              <button
+                type="button"
+                className={practiceMode === 'metronome' ? 'is-active' : ''}
+                aria-pressed={practiceMode === 'metronome'}
+                onClick={() => {
+                  setPracticeMode('metronome')
+                  if (practiceKit !== 'wood') setPracticeKit('click')
+                }}
+              >
+                <TimerReset aria-hidden="true" />
+                {t('节拍器')}
+              </button>
+              <button
+                type="button"
+                className={practiceMode === 'drums' ? 'is-active' : ''}
+                aria-pressed={practiceMode === 'drums'}
+                onClick={() => {
+                  setPracticeMode('drums')
+                  if (practiceKit === 'click') {
+                    setPracticeKit(selectedStandaloneDrumRhythm.kit)
+                  }
+                }}
+              >
+                <Drum aria-hidden="true" />
+                {t('鼓机')}
+              </button>
+            </div>
+            <button
+              className="practice-master-toggle"
+              type="button"
+              aria-label={
+                practicePlaying
+                  ? t('停止节拍器 / 鼓机')
+                  : t('启动节拍器 / 鼓机')
+              }
+              aria-pressed={practicePlaying}
+              onClick={() => void togglePracticePlayback()}
+            >
+              {practicePlaying ? (
+                <Pause aria-hidden="true" />
+              ) : (
+                <Play aria-hidden="true" />
+              )}
+              <span>{practicePlaying ? t('停止') : t('开始')}</span>
+            </button>
+          </header>
+
+          <div className="standalone-practice-controls">
+            <div className="practice-tempo-control">
+              <span>{t('速度')}</span>
+              <button
+                type="button"
+                aria-label={t('降低练习速度')}
+                onClick={() => changePracticeTempo(practiceBpm - 1)}
+              >
+                <Minus aria-hidden="true" />
+              </button>
+              <label>
+                <input
+                  aria-label={t('练习速度')}
+                  type="number"
+                  min="30"
+                  max="260"
+                  value={practiceBpm}
+                  onChange={(event) =>
+                    changePracticeTempo(Number(event.target.value))
+                  }
+                />
+                <small>BPM</small>
+              </label>
+              <button
+                type="button"
+                aria-label={t('提高练习速度')}
+                onClick={() => changePracticeTempo(practiceBpm + 1)}
+              >
+                <Plus aria-hidden="true" />
+              </button>
+              <button
+                className="tap-tempo-button"
+                type="button"
+                onClick={tapPracticeTempo}
+              >
+                TAP
+              </button>
+            </div>
+
+            <label className="practice-tool-picker">
+              <span>{t('拍号')}</span>
+              <select
+                aria-label={t('练习拍号')}
+                value={formatTimeSignature(practiceTimeSignature)}
+                onChange={(event) => {
+                  const next =
+                    practiceTimeSignatures.find(
+                      (signature) =>
+                        formatTimeSignature(signature) === event.target.value,
+                    ) ?? practiceTimeSignatures[0]
+                  setPracticeTimeSignature(next)
+                  const firstPattern = PRACTICE_RHYTHMS.find(
+                    (rhythm) =>
+                      rhythm.group !== 'metronome' &&
+                      rhythm.timeSignature[0] === next[0] &&
+                      rhythm.timeSignature[1] === next[1],
+                  )
+                  if (firstPattern) {
+                    setPracticeRhythmId(firstPattern.id)
+                  }
+                }}
+              >
+                {practiceTimeSignatures.map((signature) => (
+                  <option
+                    value={formatTimeSignature(signature)}
+                    key={formatTimeSignature(signature)}
+                  >
+                    {formatTimeSignature(signature)}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" />
+            </label>
+
+            {practiceMode === 'metronome' ? (
+              <>
+                <label className="practice-tool-picker">
+                  <span>{t('细分')}</span>
+                  <select
+                    aria-label={t('节拍细分')}
+                    value={practiceSubdivision}
+                    onChange={(event) =>
+                      setPracticeSubdivision(
+                        Number(event.target.value) as PracticeSubdivision,
+                      )
+                    }
+                  >
+                    <option value="1">{t('四分音符')}</option>
+                    <option value="2">{t('八分音符')}</option>
+                    <option value="3">{t('三连音')}</option>
+                    <option value="4">{t('十六分音符')}</option>
+                  </select>
+                  <ChevronDown aria-hidden="true" />
+                </label>
+                <button
+                  className={`practice-accent-toggle${practiceAccent ? ' is-active' : ''}`}
+                  type="button"
+                  aria-pressed={practiceAccent}
+                  onClick={() => setPracticeAccent((current) => !current)}
+                >
+                  {t('首拍重音')}
+                </button>
+              </>
+            ) : (
+              <label className="practice-tool-picker practice-pattern-picker">
+                <span>{t('节奏型')}</span>
+                <select
+                  aria-label={t('独立鼓机节奏型')}
+                  value={selectedStandaloneDrumRhythm.id}
+                  onChange={(event) => {
+                    const next =
+                      standaloneDrumRhythms.find(
+                        (rhythm) => rhythm.id === event.target.value,
+                      ) ?? selectedStandaloneDrumRhythm
+                    setPracticeRhythmId(next.id)
+                    setPracticeKit(next.kit)
+                  }}
+                >
+                  {standaloneDrumRhythms.map((rhythm) => (
+                    <option value={rhythm.id} key={rhythm.id}>
+                      {t(rhythm.label)}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown aria-hidden="true" />
+              </label>
+            )}
+
+            <label className="practice-tool-picker">
+              <span>{t('音色')}</span>
+              <select
+                aria-label={t('独立练习音色')}
+                value={practiceKit}
+                onChange={(event) =>
+                  setPracticeKit(event.target.value as RhythmKit)
+                }
+              >
+                {(practiceMode === 'metronome'
+                  ? countInKitOptions
+                  : rhythmKitOptions.filter(
+                      (option) =>
+                        option.id !== 'pattern' && option.id !== 'click',
+                    )
+                ).map((option) => (
+                  <option value={option.id} key={option.id}>
+                    {t(option.label)}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" />
+            </label>
+
+            <label className="practice-tool-volume">
+              <Volume2 aria-hidden="true" />
+              <input
+                aria-label={t('独立练习音量')}
+                type="range"
+                min="0.05"
+                max="1"
+                step="0.05"
+                value={practiceVolume}
+                onChange={(event) =>
+                  setPracticeVolume(Number(event.target.value))
+                }
+              />
+              <span>{Math.round(practiceVolume * 100)}%</span>
+            </label>
+          </div>
+
+          {practiceMode === 'drums' ? (
+            <div
+              className="practice-step-sequencer"
+              style={{
+                '--practice-step-count': standaloneDefinition.stepsPerBar,
+              } as CSSProperties}
+            >
+              {practiceLanes.map((lane) => {
+                const muted = mutedPracticeLanes.includes(lane.id)
+                const laneSteps = new Set(
+                  standaloneDefinition.hits
+                    .filter((hit) => lane.voices.includes(hit.voice))
+                    .map((hit) => hit.step),
+                )
+                return (
+                  <div className={muted ? 'is-muted' : ''} key={lane.id}>
+                    <button
+                      type="button"
+                      aria-label={`${t(lane.label)}${muted ? t('取消静音') : t('静音')}`}
+                      aria-pressed={muted}
+                      onClick={() => togglePracticeLane(lane.id)}
+                    >
+                      {t(lane.label)}
+                    </button>
+                    <span aria-hidden="true">
+                      {Array.from(
+                        { length: standaloneDefinition.stepsPerBar },
+                        (_, step) => (
+                          <i
+                            className={`${laneSteps.has(step) ? 'has-hit' : ''}${
+                              practiceStep === step ? ' is-current' : ''
+                            }`}
+                            key={step}
+                          />
+                        ),
+                      )}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div
+              className="metronome-pulse-strip"
+              style={{
+                '--practice-step-count': standaloneDefinition.stepsPerBar,
+              } as CSSProperties}
+              aria-hidden="true"
+            >
+              {Array.from(
+                { length: standaloneDefinition.stepsPerBar },
+                (_, step) => (
+                  <i
+                    className={`${step % practiceSubdivision === 0 ? 'is-beat' : ''}${
+                      practiceStep === step ? ' is-current' : ''
+                    }`}
+                    key={step}
+                  />
+                ),
+              )}
+            </div>
+          )}
+        </section>
+
+        <TunerWorkspace
+          controller={liveGuitar}
+          onBack={openAnalysisWorkspace}
+          t={t}
+        />
+
+        <LiveTranscriptionWorkspace
+          controller={liveGuitar}
+          onBack={openAnalysisWorkspace}
+          t={t}
+        />
+
         <section className="tab-workspace">
           {project.analysisMode === 'demo' ? (
             <p className="score-review-status" role="note">
-              当前为音频分析候选谱，整首逐音准确性尚未通过独立验证。
+              {t('当前为音频分析候选谱，整首逐音准确性尚未通过独立验证。')}
             </p>
           ) : null}
           <header className="section-heading">
             <div>
-              <span className="eyebrow">和弦 · 节奏 · 六线谱 · 技法为实验性建议</span>
-              <h2>{scorePart === 'guitar' ? '吉他谱' : scorePart === 'bass' ? '贝斯谱' : '鼓谱'}</h2>
+              <span className="eyebrow">
+                {t('和弦 · 节奏 · 六线谱 · 技法为实验性建议')}
+              </span>
+              <h2>
+                {scorePart === 'guitar'
+                  ? t('吉他谱')
+                  : t('贝斯谱')}
+              </h2>
             </div>
             <div className="score-view-controls">
               <div className="capo-control">
@@ -2403,39 +3255,46 @@ function App({ application = studioApplication }: AppProps) {
                   />
                   <i aria-hidden="true" />
                   <span>
-                    <strong>变调夹</strong>
+                    <strong>{t('变调夹')}</strong>
                     <small>
                       {capoEnabled
                         ? capoFret === recommendedCapo
-                          ? '智能推荐'
-                          : '手动位置'
-                        : '原始指法'}
+                          ? t('智能推荐')
+                          : t('手动位置')
+                        : t('原始指法')}
                     </small>
                   </span>
                 </label>
                 <label className="capo-fret-field">
-                  <span>位置</span>
+                  <span>{t('位置')}</span>
                   <select
-                    aria-label="变调夹位置"
+                    aria-label={t('变调夹位置')}
                     disabled={!capoEnabled}
                     value={capoFret}
                     onChange={(event) => setCapoFret(Number(event.target.value))}
                   >
                     {Array.from({ length: 13 }, (_, fret) => (
                       <option value={fret} key={fret}>
-                        {fret === 0 ? '不夹' : `${fret} 品`}
-                        {fret === recommendedCapo ? ' · 推荐' : ''}
+                        {fret === 0
+                          ? t('不夹')
+                          : language === 'en-US'
+                            ? `Fret ${fret}`
+                            : `${fret} 品`}
+                        {fret === recommendedCapo
+                          ? language === 'en-US'
+                            ? ' · Recommended'
+                            : ' · 推荐'
+                          : ''}
                       </option>
                     ))}
                   </select>
                   <ChevronDown aria-hidden="true" />
                 </label>
               </div>
-              <div className="part-selector" aria-label="选择曲谱声部">
+              <div className="part-selector" aria-label={t('选择曲谱声部')}>
                 {[
                   ['guitar', '吉他'],
                   ['bass', '贝斯'],
-                  ['drums', '鼓'],
                 ].map(([value, label]) => (
                   <button
                     type="button"
@@ -2448,14 +3307,14 @@ function App({ application = studioApplication }: AppProps) {
                       setSelectedBeatIndex(undefined)
                     }}
                   >
-                    {label}
+                    {t(label)}
                   </button>
                 ))}
               </div>
               {scorePart === 'guitar' && project.guitarParts.length > 1 ? (
                 <div
                   className="guitar-part-selector"
-                  aria-label="选择吉他声部"
+                  aria-label={t('选择吉他声部')}
                 >
                   <button
                     type="button"
@@ -2470,15 +3329,15 @@ function App({ application = studioApplication }: AppProps) {
                       setSelectedBeatIndex(undefined)
                     }}
                   >
-                    总谱
+                    {t('总谱')}
                   </button>
                   {project.guitarParts.map((part, index) => {
                     const roleLabel =
                       (part.roleConfidence ?? 0) >= 0.6
                         ? part.role === 'lead'
-                          ? '主音吉他'
+                          ? t('主音吉他')
                           : part.role === 'rhythm'
-                            ? '节奏吉他'
+                            ? t('节奏吉他')
                             : part.name
                         : `Guitar ${index + 1}`
                     return (
@@ -2512,7 +3371,7 @@ function App({ application = studioApplication }: AppProps) {
                 onClick={() => setScoreExpanded((current) => !current)}
               >
                 {scoreExpanded ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}
-                {scoreExpanded ? '单行谱' : '完整曲谱'}
+                {scoreExpanded ? t('单行谱') : t('完整曲谱')}
               </button>
             </div>
           </header>
@@ -2522,15 +3381,15 @@ function App({ application = studioApplication }: AppProps) {
             project.guitarParts.length > 1 ? (
               <div className="multi-guitar-score">
                 <p className="multi-guitar-score-note">
-                  每路吉他保持独立弦品与演奏关系；总谱不合并为一把六弦琴。
+                  {t('每路吉他保持独立弦品与演奏关系；总谱不合并为一把六弦琴。')}
                 </p>
                 {project.guitarParts.map((part, index) => {
                   const roleLabel =
                     (part.roleConfidence ?? 0) >= 0.6
                       ? part.role === 'lead'
-                        ? '主音吉他'
+                        ? t('主音吉他')
                         : part.role === 'rhythm'
-                          ? '节奏吉他'
+                          ? t('节奏吉他')
                           : part.name
                       : `Guitar ${index + 1}`
                   return (
@@ -2539,7 +3398,7 @@ function App({ application = studioApplication }: AppProps) {
                         <strong>{roleLabel}</strong>
                         <span>
                           {part.role === 'unknown'
-                            ? '角色待校订'
+                            ? t('角色待校订')
                             : `角色置信度 ${Math.round(
                                 (part.roleConfidence ?? 0) * 100,
                               )}%`}
@@ -2561,6 +3420,7 @@ function App({ application = studioApplication }: AppProps) {
                         playing={playing}
                         speed={speed}
                         expanded={scoreExpanded}
+                        language={language}
                         capo={activeCapo}
                         onSelectChord={() => undefined}
                         onSelectBeat={() => undefined}
@@ -2578,6 +3438,7 @@ function App({ application = studioApplication }: AppProps) {
                 playing={playing}
                 speed={speed}
                 expanded={scoreExpanded}
+                language={language}
                 capo={activeCapo}
                 selectedMeasureNumber={selectedMeasureNumber}
                 selectedNoteId={selectedNoteId}
@@ -2589,7 +3450,7 @@ function App({ application = studioApplication }: AppProps) {
           ) : (
             <div className="part-empty-state">
               <Music2 aria-hidden="true" />
-              <strong>{scorePart === 'bass' ? '贝斯谱' : '鼓谱'}尚未生成</strong>
+              <strong>{t('贝斯谱尚未生成')}</strong>
               <span>当前项目已保留对应分轨，可继续播放、静音和独奏。</span>
             </div>
           )}
@@ -2598,14 +3459,18 @@ function App({ application = studioApplication }: AppProps) {
         <section className="mixer-section">
           <header className="section-heading">
             <div>
-              <span className="eyebrow">实时练习</span>
-              <h2>音轨混音</h2>
+              <span className="eyebrow">{t('实时练习')}</span>
+              <h2>{t('音轨混音')}</h2>
             </div>
             <span className="quiet-label">
               <SlidersHorizontal aria-hidden="true" />
               {project.analysisMode === 'inference'
-                ? `${visibleTracks.length} 条有效音轨`
-                : `${visibleTracks.length} 条独立分轨`}
+                ? language === 'en-US'
+                  ? `${visibleTracks.length} active tracks`
+                  : `${visibleTracks.length} 条有效音轨`
+                : language === 'en-US'
+                  ? `${visibleTracks.length} separate tracks`
+                  : `${visibleTracks.length} 条独立分轨`}
             </span>
           </header>
           <div className="mixer-grid">
@@ -2615,9 +3480,9 @@ function App({ application = studioApplication }: AppProps) {
                 visibleTracks.filter((candidate) => candidate.role === track.role)
                   .length > 1
               const trackName =
-                project.analysisMode === 'demo' || hasRoleSiblings
+                hasRoleSiblings || language === 'zh-CN'
                   ? track.name
-                  : (trackRoleLabels[track.role] ?? track.name)
+                  : t(trackRoleLabels[track.role] ?? track.name)
               return (
                 <div className="track-strip" key={track.id}>
                   <div className="track-title">
@@ -2636,8 +3501,12 @@ function App({ application = studioApplication }: AppProps) {
                     <button
                       className={mix?.muted ? 'is-active' : ''}
                       type="button"
-                      aria-label={`${trackName}${mix?.muted ? '取消静音' : '静音'}`}
-                      title="静音"
+                      aria-label={
+                        language === 'en-US'
+                          ? `${trackName} ${mix?.muted ? 'unmute' : 'mute'}`
+                          : `${trackName}${mix?.muted ? '取消静音' : '静音'}`
+                      }
+                      title={t('静音')}
                       onClick={() => updateMix(track.id, { muted: !mix?.muted })}
                     >
                       {mix?.muted ? <VolumeX aria-hidden="true" /> : <Volume2 aria-hidden="true" />}
@@ -2645,14 +3514,22 @@ function App({ application = studioApplication }: AppProps) {
                     <button
                       className={mix?.solo ? 'is-active' : ''}
                       type="button"
-                      aria-label={`${trackName}${mix?.solo ? '取消独奏' : '独奏'}`}
-                      title="独奏"
+                      aria-label={
+                        language === 'en-US'
+                          ? `${trackName} ${mix?.solo ? 'unsolo' : 'solo'}`
+                          : `${trackName}${mix?.solo ? '取消独奏' : '独奏'}`
+                      }
+                      title={t('独奏')}
                       onClick={() => updateMix(track.id, { solo: !mix?.solo })}
                     >
                       <Headphones aria-hidden="true" />
                     </button>
                     <input
-                      aria-label={`${trackName}音量`}
+                      aria-label={
+                        language === 'en-US'
+                          ? `${trackName} volume`
+                          : `${trackName}音量`
+                      }
                       type="range"
                       min="0"
                       max="1"
@@ -2671,7 +3548,7 @@ function App({ application = studioApplication }: AppProps) {
         </section>
       </main>
 
-      {selectedNote || selectedMeasure ? (
+      {workspaceView === 'analysis' && (selectedNote || selectedMeasure) ? (
         <aside className="inspector">
           <header>
             <span>
@@ -3013,22 +3890,26 @@ function App({ application = studioApplication }: AppProps) {
 
       {importOpen ? (
         <div className="modal-backdrop" role="presentation">
-          <section className="import-dialog" role="dialog" aria-modal="true" aria-label="导入歌曲">
+          <section
+            className="import-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t('导入歌曲')}
+          >
             <header>
               <div>
-                <span className="eyebrow">新建分析任务</span>
-                <h2>导入歌曲</h2>
+                <span className="eyebrow">{t('新建分析任务')}</span>
+                <h2>{t('导入歌曲')}</h2>
               </div>
               <button
                 className="icon-button"
                 type="button"
-                aria-label="关闭"
+                aria-label={t('关闭窗口')}
                 onClick={() => {
-                  if ((!job || jobTerminal) && !scoreImportBusy) {
-                    setImportOpen(false)
-                    setJob(null)
-                    setProtectedImport(null)
-                  }
+                  setImportOpen(false)
+                  setProtectedImport(null)
+                  setMediaSessionRecovery(null)
+                  if (!job || jobTerminal) setJob(null)
                 }}
               >
                 <X aria-hidden="true" />
@@ -3038,8 +3919,8 @@ function App({ application = studioApplication }: AppProps) {
               <div className="protected-media-consent">
                 <CircleAlert aria-hidden="true" />
                 <div>
-                  <span className="eyebrow">受保护媒体</span>
-                  <h3>版权与处理确认</h3>
+                  <span className="eyebrow">{t('受保护媒体')}</span>
+                  <h3>{t('版权与处理确认')}</h3>
                   <p>
                     已识别为
                     {protectedProviderLabels[protectedImport.provider]}
@@ -3051,16 +3932,16 @@ function App({ application = studioApplication }: AppProps) {
                 </div>
                 <dl>
                   <div>
-                    <dt>用途限制</dt>
-                    <dd>仅用于本次音轨分析和曲谱生成</dd>
+                    <dt>{t('用途限制')}</dt>
+                    <dd>{t('仅用于本次音轨分析和曲谱生成')}</dd>
                   </div>
                   <div>
-                    <dt>临时处理</dt>
-                    <dd>解码结果不提供下载，任务结束后删除</dd>
+                    <dt>{t('临时处理')}</dt>
+                    <dd>{t('解码结果不提供下载，任务结束后删除')}</dd>
                   </div>
                   <div>
-                    <dt>责任说明</dt>
-                    <dd>工具不核验或授予权利，权利责任由用户承担</dd>
+                    <dt>{t('责任说明')}</dt>
+                    <dd>{t('工具不核验或授予权利，权利责任由用户承担')}</dd>
                   </div>
                   {protectedImport.provider === 'qqmusic' &&
                     desktopControls.selectLocalFile && (
@@ -3097,7 +3978,7 @@ function App({ application = studioApplication }: AppProps) {
                       }
                     }}
                   >
-                    取消
+                    {t('取消')}
                   </button>
                   <button
                     type="button"
@@ -3114,7 +3995,7 @@ function App({ application = studioApplication }: AppProps) {
                       }
                     }}
                   >
-                    确认并继续
+                    {t('确认并继续')}
                   </button>
                 </div>
               </div>
@@ -3123,11 +4004,11 @@ function App({ application = studioApplication }: AppProps) {
                 <span className="job-icon">
                   <LoaderCircle className="spin" aria-hidden="true" />
                 </span>
-                <strong>正在识别曲谱</strong>
-                <p>检测谱线、小节、弦品、和弦与文字</p>
+                <strong>{t('正在识别曲谱')}</strong>
+                <p>{t('检测谱线、小节、弦品、和弦与文字')}</p>
                 <i
                   role="progressbar"
-                  aria-label="曲谱识别进度"
+                  aria-label={t('曲谱识别进度')}
                   className="is-animated is-indeterminate"
                 >
                   <b />
@@ -3146,10 +4027,14 @@ function App({ application = studioApplication }: AppProps) {
                   )}
                 </span>
                 <strong>{job.stageLabel}</strong>
-                <p>{job.status === 'degraded' ? '已生成可编辑演示项目' : '处理期间可保持此窗口打开'}</p>
+                <p>
+                  {job.status === 'degraded'
+                    ? t('已生成可编辑演示项目')
+                    : t('分析继续在后台进行，可以关闭此窗口')}
+                </p>
                 <i
                   role="progressbar"
-                  aria-label="歌曲分析进度"
+                  aria-label={t('歌曲分析进度')}
                   aria-valuemin={0}
                   aria-valuemax={100}
                   aria-valuenow={Math.round(Math.max(0, Math.min(100, job.progress)))}
@@ -3183,7 +4068,7 @@ function App({ application = studioApplication }: AppProps) {
                     }
                   >
                     <X aria-hidden="true" />
-                    取消任务
+                    {t('取消任务')}
                   </button>
                 )}
               </div>
@@ -3196,7 +4081,7 @@ function App({ application = studioApplication }: AppProps) {
                     onClick={() => setImportMode('upload')}
                   >
                     <Upload aria-hidden="true" />
-                    本地上传
+                    {t('本地上传')}
                   </button>
                   <button
                     type="button"
@@ -3204,7 +4089,7 @@ function App({ application = studioApplication }: AppProps) {
                     onClick={() => setImportMode('score')}
                   >
                     <FileImage aria-hidden="true" />
-                    图片 / PDF
+                    {t('图片 / PDF')}
                   </button>
                   <button
                     type="button"
@@ -3212,7 +4097,7 @@ function App({ application = studioApplication }: AppProps) {
                     onClick={() => setImportMode('link')}
                   >
                     <Link2 aria-hidden="true" />
-                    在线链接
+                    {t('在线链接')}
                   </button>
                 </div>
                 {importMode === 'upload' ? (
@@ -3224,13 +4109,13 @@ function App({ application = studioApplication }: AppProps) {
                         onClick={() => void selectDesktopFile('media')}
                       >
                         <FileAudio aria-hidden="true" />
-                        <strong>选择音频或视频</strong>
+                        <strong>{t('选择音频或视频')}</strong>
                         <span>MP3、WAV、FLAC、APE、M4A、AAC、OGG、MP4、MOV、WEBM，最大 500 MB</span>
                         <small>使用系统原生文件窗口；加密容器经授权确认后在本机临时解码。</small>
                       </button>
                       <div
                         className="media-source-shortcuts"
-                        aria-label="音乐平台下载目录"
+                        aria-label={t('音乐平台下载目录')}
                       >
                         {desktopMediaSourceOptions.map((source) => (
                           <button
@@ -3282,7 +4167,7 @@ function App({ application = studioApplication }: AppProps) {
                   ) : (
                     <label className="drop-zone">
                       <FileAudio aria-hidden="true" />
-                      <strong>选择音频或视频</strong>
+                      <strong>{t('选择音频或视频')}</strong>
                       <span>MP3、WAV、FLAC、APE、M4A、AAC、OGG、MP4、MOV、WEBM，最大 500 MB</span>
                       <small>加密容器经确认后由 API 服务端临时解码；无内嵌密钥的新版 QMC2 需使用 macOS 桌面版。</small>
                       <input
@@ -3304,14 +4189,14 @@ function App({ application = studioApplication }: AppProps) {
                       onClick={() => void selectDesktopFile('score')}
                     >
                       <FileImage aria-hidden="true" />
-                      <strong>选择吉他谱图片或 PDF</strong>
+                      <strong>{t('选择吉他谱图片或 PDF')}</strong>
                       <span>PNG、JPG、WEBP、PDF，最多 24 页</span>
                       <small>使用系统原生文件窗口；导入后可逐音修改并直接合成播放。</small>
                     </button>
                   ) : (
                     <label className="drop-zone">
                       <FileImage aria-hidden="true" />
-                      <strong>选择吉他谱图片或 PDF</strong>
+                      <strong>{t('选择吉他谱图片或 PDF')}</strong>
                       <span>PNG、JPG、WEBP、PDF，最多 24 页</span>
                       <small>识别六线谱、小节、品位、和弦与歌词；导入后可逐音修改并直接合成播放。</small>
                       <input
@@ -3327,7 +4212,7 @@ function App({ application = studioApplication }: AppProps) {
                 ) : (
                   <div className="link-import">
                     <label>
-                      <span>歌曲链接</span>
+                      <span>{t('歌曲链接')}</span>
                       <div>
                         <Link2 aria-hidden="true" />
                         <input
@@ -3335,6 +4220,7 @@ function App({ application = studioApplication }: AppProps) {
                           onChange={(event) => {
                             setLinkValue(event.target.value)
                             setError('')
+                            setMediaSessionRecovery(null)
                           }}
                           onKeyDown={(event) => {
                             if (
@@ -3367,13 +4253,13 @@ function App({ application = studioApplication }: AppProps) {
                       disabled={!linkValue.trim() || !detectedPlatform}
                       onClick={() => void requestLinkImport()}
                     >
-                      开始分析
+                      {t('开始分析')}
                     </button>
                     {linkValue.trim() ? (
                       <p className={`source-detection${detectedPlatform ? ' is-valid' : ''}`}>
                         {detectedPlatform
                           ? `已识别：${detectedPlatform.label}`
-                          : '尚未识别链接来源'}
+                          : t('尚未识别链接来源')}
                       </p>
                     ) : null}
                     <p className="policy-copy">
@@ -3386,6 +4272,81 @@ function App({ application = studioApplication }: AppProps) {
             {error ? (
               <>
                 <p className="dialog-error">{error}</p>
+                {mediaSessionRecovery ? (
+                  <div className="media-session-recovery">
+                    <Cookie aria-hidden="true" />
+                    {mediaSessionRecovery.browser ? (
+                      <>
+                        <div>
+                          <strong>
+                            {t('使用系统默认浏览器登录状态')}
+                          </strong>
+                          <p>
+                            {language === 'en-US'
+                              ? `Read ${mediaSessionRecovery.browser.label}'s default profile cookies for this retry only. Cookies are not stored or uploaded.`
+                              : `仅为本次重试读取 ${mediaSessionRecovery.browser.label} 默认配置中的站点 Cookie，不保存也不上传。`}
+                          </p>
+                        </div>
+                        <div className="media-session-actions">
+                          {desktopControls.openExternalUrl ? (
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              onClick={() =>
+                                void desktopControls.openExternalUrl?.(
+                                  mediaSessionRecovery.url,
+                                )
+                              }
+                            >
+                              <ExternalLink aria-hidden="true" />
+                              {t('打开原链接登录')}
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            onClick={() => setMediaSessionRecovery(null)}
+                          >
+                            {t('取消')}
+                          </button>
+                          <button
+                            type="button"
+                            className="primary-button"
+                            onClick={() =>
+                              void retryWithDefaultBrowserSession()
+                            }
+                          >
+                            {t('确认并重试')}
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div>
+                          <strong>{t('此链接需要登录或验证')}</strong>
+                          <p>
+                            {t(
+                              '应用尚未读取任何浏览器数据。确认后将识别系统默认浏览器，再由你决定是否仅为本次任务读取登录状态。',
+                            )}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={mediaSessionRecovery.detecting}
+                          onClick={() => void detectMediaSessionForRetry()}
+                        >
+                          {mediaSessionRecovery.detecting ? (
+                            <LoaderCircle className="spin" aria-hidden="true" />
+                          ) : (
+                            <Cookie aria-hidden="true" />
+                          )}
+                          {t('使用默认浏览器登录状态重试')}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                ) : null}
                 {error.includes('完全磁盘访问权限') &&
                 desktopControls.openFullDiskAccessSettings ? (
                   <button
@@ -3409,6 +4370,87 @@ function App({ application = studioApplication }: AppProps) {
                 ) : null}
               </>
             ) : null}
+          </section>
+        </div>
+      ) : null}
+
+      {settingsOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            className="settings-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t('应用设置')}
+          >
+            <header>
+              <div>
+                <span className="eyebrow">Guitar Tab Studio</span>
+                <h2>{t('应用设置')}</h2>
+              </div>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label={t('关闭窗口')}
+                onClick={() => setSettingsOpen(false)}
+              >
+                <X aria-hidden="true" />
+              </button>
+            </header>
+            <div className="settings-language">
+              <div>
+                <Languages aria-hidden="true" />
+                <span>
+                  <strong>{t('界面语言')}</strong>
+                  <small>
+                    {t('系统语言')}:{' '}
+                    {detectedSystemLanguage === 'zh-CN'
+                      ? t('简体中文')
+                      : 'English'}
+                  </small>
+                </span>
+              </div>
+              <div
+                className="language-segmented"
+                role="group"
+                aria-label={t('界面语言')}
+              >
+                {(
+                  [
+                    ['system', '跟随系统'],
+                    ['zh-CN', '简体中文'],
+                    ['en-US', 'English'],
+                  ] as const
+                ).map(([preference, label]) => (
+                  <button
+                    type="button"
+                    className={
+                      languagePreference === preference ? 'is-active' : ''
+                    }
+                    aria-pressed={languagePreference === preference}
+                    disabled={settingsBusy}
+                    onClick={() => void changeLanguage(preference)}
+                    key={preference}
+                  >
+                    {t(label)}
+                  </button>
+                ))}
+              </div>
+              <p>{t('设置会立即应用并在下次启动时保留。')}</p>
+              {settingsError ? (
+                <p className="settings-error" role="alert">
+                  {settingsError}
+                </p>
+              ) : null}
+            </div>
+            <footer>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => setSettingsOpen(false)}
+              >
+                {t('完成')}
+              </button>
+            </footer>
           </section>
         </div>
       ) : null}

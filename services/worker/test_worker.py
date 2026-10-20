@@ -11,13 +11,18 @@ from unittest.mock import patch
 from worker import (
     AudioFeature,
     NoteEvent,
+    STANDARD_TUNING,
     acquire_url,
+    align_beats_to_downbeats,
     align_lyrics_to_melody,
     annotate_techniques,
     assign_fingering_group,
+    assign_fingering_sequence,
+    beat_grid_irregularity,
     classify_guitar_part_roles,
     confirm_independent_guitar_parts,
     collapse_harmonic_stacks,
+    collapse_inaudible_rearticulations,
     collapse_note_fragments,
     complete_vocal_melody_for_lyrics,
     emit_muscriptor_progress,
@@ -34,17 +39,20 @@ from worker import (
     prepare_noise2fret_model,
     prepare_transcription_provider,
     prepare_yourmt3_model,
+    prepend_pickup_beats,
     refine_positions_with_noise2fret,
     regularize_beat_times,
     run,
     run_with_percent_progress,
     select_harmonic_position,
     select_quarter_note_grid,
+    select_timing_grid,
     separate_audio,
     separate_guitar_parts,
     stabilize_beat_times,
     suppress_guitar_stem_leakage,
     suppress_vocal_leakage_in_guitar_part,
+    tempo_map_from_beats,
     transcribe_guitar,
 )
 
@@ -535,6 +543,35 @@ class RuntimeGuardTest(unittest.TestCase):
                 ["--js-runtimes", "node"],
             )
 
+    def test_url_acquisition_can_use_an_explicit_browser_session(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def create_download(_arguments: list[str]) -> None:
+                (root / "source.m4a").write_bytes(b"audio")
+
+            with (
+                patch("worker.ffmpeg_command", return_value="/bin/ffmpeg"),
+                patch("worker.shutil.which", return_value="/usr/bin/node"),
+                patch("worker.run", side_effect=create_download) as command,
+            ):
+                acquire_url(
+                    "https://www.bilibili.com/video/BV1fixture",
+                    root,
+                    "edge",
+                )
+
+            arguments = command.call_args.args[0]
+            self.assertEqual(
+                arguments[
+                    arguments.index("--cookies-from-browser") :
+                    arguments.index("--cookies-from-browser") + 2
+                ],
+                ["--cookies-from-browser", "edge"],
+            )
+
     def test_normalize_rejects_insufficient_space_and_removes_partial_output(
         self,
     ) -> None:
@@ -703,6 +740,94 @@ class TechniqueInferenceTest(unittest.TestCase):
             0.025,
         )
 
+    def test_percussion_grid_rejects_an_isolated_false_opening_beat(
+        self,
+    ) -> None:
+        drums = [0.94 + index * 0.61 for index in range(48)]
+        mixture = [0.20, *drums]
+
+        selected, source = select_timing_grid(
+            98.0,
+            mixture,
+            98.1,
+            drums,
+        )
+
+        self.assertEqual(source, "drums")
+        self.assertEqual(selected, drums)
+        self.assertLess(
+            beat_grid_irregularity(drums),
+            beat_grid_irregularity(mixture),
+        )
+
+    def test_harmonic_changes_align_the_first_complete_downbeat(self) -> None:
+        beats = [index * 0.5 for index in range(42)]
+        notes: list[NoteEvent] = []
+        for index, start in enumerate(beats[:-1]):
+            measure = (index - 2) // 4
+            root = 0 if measure % 2 == 0 else 5
+            for string, interval in enumerate((0, 4, 7), start=1):
+                notes.append(
+                    NoteEvent(
+                        start,
+                        start + 0.45,
+                        60 + root + interval,
+                        80,
+                        string,
+                        3,
+                        "pick",
+                        0.9,
+                    )
+                )
+
+        aligned, shift, confidence = align_beats_to_downbeats(
+            beats,
+            notes,
+        )
+
+        self.assertEqual(shift, 2)
+        self.assertEqual(aligned[0], 1.0)
+        self.assertGreater(confidence, 0.04)
+
+    def test_reconstructs_one_pickup_beat_before_the_downbeat(self) -> None:
+        beats = [1.0 + index * 0.5 for index in range(12)]
+        notes = [
+            NoteEvent(0.51, 0.8, 64, 80, 2, 5, "pick", 0.9),
+            NoteEvent(1.02, 1.4, 67, 80, 1, 3, "pick", 0.9),
+        ]
+
+        reconstructed, pickup_beats = prepend_pickup_beats(beats, notes)
+
+        self.assertEqual(pickup_beats, 1)
+        self.assertEqual(reconstructed[0], 0.5)
+        self.assertEqual(reconstructed[1:], beats)
+
+    def test_tempo_map_preserves_a_real_slowdown(self) -> None:
+        result = tempo_map_from_beats(
+            [0.0, 0.5, 1.0, 1.5, 2.0, 2.55, 3.15, 3.8, 4.5],
+            120.0,
+        )
+
+        self.assertEqual(result["mode"], "variable")
+        self.assertEqual(
+            [point["at"] for point in result["points"]],
+            [0.0, 0.5, 1.0, 1.5, 2.0, 2.55, 3.15, 3.8, 4.5],
+        )
+        self.assertGreater(
+            result["points"][0]["bpm"],
+            result["points"][-1]["bpm"],
+        )
+        self.assertGreaterEqual(result["variation"], 0.04)
+
+    def test_tempo_map_treats_small_human_timing_drift_as_steady(self) -> None:
+        result = tempo_map_from_beats(
+            [0.0, 0.501, 1.0, 1.502, 2.001, 2.5],
+            120.0,
+        )
+
+        self.assertEqual(result["mode"], "steady")
+        self.assertAlmostEqual(result["median_bpm"], 120.0, delta=0.5)
+
     def test_tempo_octave_uses_the_slower_grid_only_with_accent_evidence(
         self,
     ) -> None:
@@ -805,6 +930,35 @@ class TechniqueInferenceTest(unittest.TestCase):
         self.assertEqual(len({string for string, _fret in positions}), 6)
         self.assertGreaterEqual(confidence, 0.9)
 
+    def test_sequence_fingering_uses_context_without_chord_collisions(self) -> None:
+        pitch_groups = [
+            [52],
+            [59, 64, 67],
+            [54],
+            [61, 66, 69],
+        ]
+
+        assignments = assign_fingering_sequence(pitch_groups)
+
+        self.assertEqual(assignments[0][0], [(4, 2)])
+        for pitches, (positions, confidence) in zip(
+            pitch_groups,
+            assignments,
+            strict=True,
+        ):
+            self.assertEqual(
+                [
+                    STANDARD_TUNING[string] + fret
+                    for string, fret in positions
+                ],
+                pitches,
+            )
+            self.assertEqual(
+                len({string for string, _fret in positions}),
+                len(positions),
+            )
+            self.assertGreater(confidence, 0.5)
+
     def test_harmonic_pitch_maps_to_the_touch_node(self) -> None:
         self.assertEqual(natural_harmonic_positions(59), [(6, 7)])
         self.assertEqual(
@@ -875,6 +1029,45 @@ class TechniqueInferenceTest(unittest.TestCase):
 
         self.assertEqual(len(collapsed), 2)
 
+    def test_merges_a_contiguous_pitch_fragment_without_an_audible_onset(
+        self,
+    ) -> None:
+        first = NoteEvent(1.0, 1.2, 53, 70, 4, 3, "pick", 0.82)
+        fragment = NoteEvent(1.2, 1.48, 53, 76, 4, 3, "pick", 0.86)
+        features = [
+            AudioFeature(0.72, 1200, 0.08, 0.05),
+            AudioFeature(0.21, 1180, 0.07, 0.05),
+        ]
+
+        collapsed, retained_features = collapse_inaudible_rearticulations(
+            [first, fragment],
+            features,
+        )
+
+        self.assertEqual(len(collapsed), 1)
+        self.assertEqual(collapsed[0].start, 1.0)
+        self.assertEqual(collapsed[0].end, 1.48)
+        self.assertEqual(collapsed[0].velocity, 76)
+        self.assertEqual(retained_features, [features[0]])
+
+    def test_keeps_a_contiguous_same_pitch_attack_with_acoustic_evidence(
+        self,
+    ) -> None:
+        first = NoteEvent(1.0, 1.2, 53, 70, 4, 3, "pick", 0.82)
+        repeated = NoteEvent(1.2, 1.48, 53, 76, 4, 3, "pick", 0.86)
+        features = [
+            AudioFeature(0.72, 1200, 0.08, 0.05),
+            AudioFeature(0.68, 1180, 0.07, 0.05),
+        ]
+
+        collapsed, retained_features = collapse_inaudible_rearticulations(
+            [first, repeated],
+            features,
+        )
+
+        self.assertEqual(collapsed, [first, repeated])
+        self.assertEqual(retained_features, features)
+
     def test_single_pitch_does_not_fabricate_a_chord(self) -> None:
         notes = [
             NoteEvent(0.0, 1.0, 59, 76, 6, 7, "harmonic", 0.88),
@@ -883,6 +1076,47 @@ class TechniqueInferenceTest(unittest.TestCase):
         chords = infer_chords(notes, 120)
 
         self.assertEqual(chords[0]["chord"], "N.C.")
+
+    def test_chord_windows_follow_the_performed_beat_grid(self) -> None:
+        notes = [
+            NoteEvent(1.0, 1.4, 55, 80, 3, 0, "pick", 0.9),
+            NoteEvent(1.0, 1.4, 59, 80, 2, 0, "pick", 0.9),
+            NoteEvent(1.0, 1.4, 62, 80, 2, 3, "pick", 0.9),
+            NoteEvent(3.2, 3.7, 52, 80, 4, 2, "pick", 0.9),
+            NoteEvent(3.2, 3.7, 55, 80, 3, 0, "pick", 0.9),
+            NoteEvent(3.2, 3.7, 59, 80, 2, 0, "pick", 0.9),
+        ]
+        beats = [0.2, 0.7, 1.2, 1.7, 2.2, 2.75, 3.35, 4.0, 4.7]
+
+        chords = infer_chords(notes, 120, beats)
+
+        self.assertEqual(
+            [(chord["start"], chord["duration"]) for chord in chords],
+            [(0.2, 2.0), (2.2, 2.5)],
+        )
+
+    def test_chord_windows_keep_the_pickup_separate_from_full_measures(
+        self,
+    ) -> None:
+        notes = [
+            NoteEvent(0.5, 0.9, 60, 80, 2, 1, "pick", 0.9),
+            NoteEvent(0.5, 0.9, 64, 80, 1, 0, "pick", 0.9),
+            NoteEvent(1.0, 4.4, 55, 80, 3, 0, "pick", 0.9),
+            NoteEvent(1.0, 4.4, 59, 80, 2, 0, "pick", 0.9),
+        ]
+        beats = [0.5 + index * 0.5 for index in range(9)]
+
+        chords = infer_chords(
+            notes,
+            120,
+            beats,
+            pickup_beats=1,
+        )
+
+        self.assertEqual(
+            [(chord["start"], chord["duration"]) for chord in chords],
+            [(0.5, 0.5), (1.0, 2.0), (3.0, 2.0)],
+        )
 
     def test_acoustic_features_distinguish_common_techniques(self) -> None:
         previous = note(0.0, 0.35, 2)

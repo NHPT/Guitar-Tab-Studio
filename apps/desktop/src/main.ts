@@ -13,15 +13,21 @@ import {
   screen,
   session,
   shell,
+  Tray,
   type MenuItemConstructorOptions,
 } from 'electron'
 import {
   migrateStudioProject,
+  type AppLanguage,
+  type AppLanguagePreference,
   type AuthorizedMediaConsent,
+  type DesktopApplicationSettings,
+  type DesktopBackgroundJobState,
   type DesktopInvokeRequest,
   type DesktopLocalFileSource,
   type DesktopRuntimeStatus,
   type DesktopSelectedFile,
+  type MediaBrowserSession,
   type ProjectRevision,
   type ProjectRevisionKind,
   type StorageCleanupConfig,
@@ -38,6 +44,7 @@ import {
   type StudioApiTransport,
 } from './local-api.js'
 import { desktopDataRoot } from './data-root.js'
+import { detectDefaultMediaBrowser } from './default-browser.js'
 import {
   desktopMediaSourceLabels,
   desktopMediaSources,
@@ -84,11 +91,47 @@ let transcriptionManager: DesktopTranscriptionManager | undefined
 let huggingFaceOAuth: HuggingFaceOAuth | undefined
 let maintenance: DesktopMaintenance | undefined
 let updater: DesktopUpdater | undefined
+let tray: Tray | undefined
 let quitting = false
 let cloudConfigurationError: string | undefined
+let backgroundJobState: DesktopBackgroundJobState = { active: false }
 const localFileDirectories = new Map<string, string>()
 const openedTranscriptionUrls = new Set<string>()
 let latestTranscriptionAuthorizationUrl: string | undefined
+const mediaBrowserIds = new Set<MediaBrowserSession['browser']>([
+  'brave',
+  'chrome',
+  'chromium',
+  'edge',
+  'firefox',
+  'opera',
+  'safari',
+  'vivaldi',
+])
+
+function systemLanguage(): AppLanguage {
+  return app.getLocale().toLowerCase().startsWith('zh') ? 'zh-CN' : 'en-US'
+}
+
+function applicationSettings(): DesktopApplicationSettings {
+  const languagePreference =
+    stateStore?.languagePreference() ?? 'system'
+  const resolvedSystemLanguage = systemLanguage()
+  return {
+    languagePreference,
+    systemLanguage: resolvedSystemLanguage,
+    language:
+      languagePreference === 'system'
+        ? resolvedSystemLanguage
+        : languagePreference,
+  }
+}
+
+function desktopIconPath(): string {
+  return app.isPackaged
+    ? resolve(process.resourcesPath, 'icon.ico')
+    : resolve(repositoryRoot, 'apps/desktop/build-resources/icon.ico')
+}
 
 function sendTranscriptionProgress(
   progress: TranscriptionSetupProgress,
@@ -267,7 +310,7 @@ function authorizedMediaConsent(
 }
 
 async function restartLocalApi(): Promise<void> {
-  if (!modelPackages || !transcriptionManager) {
+  if (!modelPackages || !transcriptionManager || !stateStore) {
     throw new Error('Model runtime is not ready')
   }
   await modelPackages.recoverActive()
@@ -446,9 +489,28 @@ async function invoke(request: DesktopInvokeRequest): Promise<unknown> {
     }
     case 'submit-link': {
       const mode = stateStore.runtimeMode()
+      const requestedSession =
+        payload.mediaSession &&
+        typeof payload.mediaSession === 'object' &&
+        !Array.isArray(payload.mediaSession)
+          ? (payload.mediaSession as Record<string, unknown>)
+          : undefined
+      const browser = requestedSession?.browser
+      const mediaSession =
+        typeof browser === 'string' &&
+        mediaBrowserIds.has(browser as MediaBrowserSession['browser'])
+          ? { browser: browser as MediaBrowserSession['browser'] }
+          : undefined
+      if (requestedSession && !mediaSession) {
+        throw new Error('Invalid media browser session')
+      }
+      if (mediaSession && mode !== 'local') {
+        throw new Error('浏览器登录态仅可用于本机媒体获取')
+      }
       const job = await activeApi().submitLink(
         requiredText(payload, 'url'),
         authorizedMediaConsent(payload.authorizedMedia),
+        mediaSession,
       )
       stateStore.saveJob(job)
       stateStore.setRuntimeMode(mode, job.id)
@@ -1058,21 +1120,216 @@ async function invoke(request: DesktopInvokeRequest): Promise<unknown> {
       )
       return { exported: true }
     }
+    case 'application-settings':
+      return applicationSettings()
+    case 'set-language': {
+      const preference = requiredText(payload, 'preference', 16)
+      if (
+        preference !== 'system' &&
+        preference !== 'zh-CN' &&
+        preference !== 'en-US'
+      ) {
+        throw new Error('Invalid application language')
+      }
+      return setLanguagePreference(preference)
+    }
+    case 'detect-default-media-browser':
+      return detectDefaultMediaBrowser()
+    case 'open-external-url': {
+      const url = new URL(requiredText(payload, 'url', 4096))
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+        throw new Error('Only HTTP media links can be opened externally')
+      }
+      await shell.openExternal(url.toString())
+      return { opened: true }
+    }
+    case 'set-background-job-state': {
+      const active = payload.active === true
+      backgroundJobState = active
+        ? {
+            active: true,
+            ...(typeof payload.jobId === 'string'
+              ? { jobId: payload.jobId.slice(0, 128) }
+              : {}),
+            ...(typeof payload.progress === 'number' &&
+            Number.isFinite(payload.progress)
+              ? {
+                  progress: Math.max(
+                    0,
+                    Math.min(100, payload.progress),
+                  ),
+                }
+              : {}),
+            ...(typeof payload.stageLabel === 'string'
+              ? { stageLabel: payload.stageLabel.slice(0, 160) }
+              : {}),
+          }
+        : { active: false }
+      if (mainWindow?.isVisible()) {
+        if (!active) destroyTray()
+      } else if (active || tray) {
+        ensureTray()
+      }
+      updateTrayMenu()
+      return backgroundJobState
+    }
   }
 }
 
+function menuLabels(language = applicationSettings().language) {
+  if (language === 'en-US') {
+    return {
+      file: 'File',
+      openMedia: 'Open Media...',
+      importProject: 'Import Project...',
+      close: 'Close Window',
+      quit: 'Quit Guitar Tab Studio',
+      edit: 'Edit',
+      undo: 'Undo',
+      redo: 'Redo',
+      cut: 'Cut',
+      copy: 'Copy',
+      paste: 'Paste',
+      selectAll: 'Select All',
+      view: 'View',
+      reload: 'Reload',
+      developerTools: 'Toggle Developer Tools',
+      actualSize: 'Actual Size',
+      zoomIn: 'Zoom In',
+      zoomOut: 'Zoom Out',
+      fullscreen: 'Toggle Full Screen',
+      settings: 'Settings',
+      openSettings: 'Open Settings...',
+      language: 'Language',
+      followSystem: 'Follow System',
+      chinese: 'Simplified Chinese',
+      english: 'English',
+      help: 'Help',
+      checkUpdates: 'Check for Updates',
+      currentVersion: `Version ${app.getVersion()}`,
+      showApplication: 'Open Guitar Tab Studio',
+      backgroundTask: 'Analysis running in background',
+    }
+  }
+  return {
+    file: '文件',
+    openMedia: '打开媒体…',
+    importProject: '导入项目…',
+    close: '关闭窗口',
+    quit: '退出 Guitar Tab Studio',
+    edit: '编辑',
+    undo: '撤销',
+    redo: '重做',
+    cut: '剪切',
+    copy: '复制',
+    paste: '粘贴',
+    selectAll: '全选',
+    view: '视图',
+    reload: '重新加载',
+    developerTools: '切换开发者工具',
+    actualSize: '实际大小',
+    zoomIn: '放大',
+    zoomOut: '缩小',
+    fullscreen: '切换全屏',
+    settings: '设置',
+    openSettings: '打开设置…',
+    language: '语言',
+    followSystem: '跟随系统',
+    chinese: '简体中文',
+    english: 'English',
+    help: '帮助',
+    checkUpdates: '检查更新',
+    currentVersion: `当前版本 ${app.getVersion()}`,
+    showApplication: '打开 Guitar Tab Studio',
+    backgroundTask: '分析任务正在后台运行',
+  }
+}
+
+function showMainWindow(): void {
+  if (!mainWindow) {
+    void createWindow()
+    return
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+function updateTrayMenu(): void {
+  if (!tray) return
+  const labels = menuLabels()
+  const progress =
+    typeof backgroundJobState.progress === 'number'
+      ? ` · ${Math.round(backgroundJobState.progress)}%`
+      : ''
+  tray.setToolTip(
+    backgroundJobState.active
+      ? `${labels.backgroundTask}${progress}`
+      : 'Guitar Tab Studio',
+  )
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: labels.showApplication,
+        click: showMainWindow,
+      },
+      ...(backgroundJobState.active
+        ? [
+            {
+              label: `${backgroundJobState.stageLabel ?? labels.backgroundTask}${progress}`,
+              enabled: false,
+            } satisfies MenuItemConstructorOptions,
+          ]
+        : []),
+      { type: 'separator' },
+      {
+        label: labels.quit,
+        click: () => app.quit(),
+      },
+    ]),
+  )
+}
+
+function ensureTray(): void {
+  if (process.platform !== 'win32') return
+  if (!tray) {
+    tray = new Tray(desktopIconPath())
+    tray.on('click', showMainWindow)
+  }
+  updateTrayMenu()
+}
+
+function destroyTray(): void {
+  tray?.destroy()
+  tray = undefined
+}
+
+function setLanguagePreference(
+  preference: AppLanguagePreference,
+): DesktopApplicationSettings {
+  if (!stateStore) throw new Error('Desktop state is unavailable')
+  stateStore.setLanguagePreference(preference)
+  const settings = applicationSettings()
+  installMenu()
+  updateTrayMenu()
+  mainWindow?.webContents.send('studio:language-changed', settings)
+  return settings
+}
+
 function installMenu(): void {
+  const settings = applicationSettings()
+  const labels = menuLabels(settings.language)
   const template: MenuItemConstructorOptions[] = [
     {
-      label: '文件',
+      label: labels.file,
       submenu: [
         {
-          label: '打开媒体',
+          label: labels.openMedia,
           accelerator: 'CmdOrCtrl+O',
           click: () => mainWindow?.webContents.send('studio:open-media'),
         },
         {
-          label: '导入项目',
+          label: labels.importProject,
           click: () =>
             void invoke({ method: 'import-project' }).then((project) => {
               if (
@@ -1086,45 +1343,82 @@ function installMenu(): void {
             }),
         },
         { type: 'separator' },
-        { role: process.platform === 'darwin' ? 'close' : 'quit' },
+        {
+          role: process.platform === 'darwin' ? 'close' : 'quit',
+          label: process.platform === 'darwin' ? labels.close : labels.quit,
+        },
       ],
     },
     {
-      label: '编辑',
+      label: labels.edit,
       submenu: [
-        { role: 'undo', label: '撤销' },
-        { role: 'redo', label: '重做' },
+        { role: 'undo', label: labels.undo },
+        { role: 'redo', label: labels.redo },
         { type: 'separator' },
-        { role: 'cut', label: '剪切' },
-        { role: 'copy', label: '复制' },
-        { role: 'paste', label: '粘贴' },
+        { role: 'cut', label: labels.cut },
+        { role: 'copy', label: labels.copy },
+        { role: 'paste', label: labels.paste },
         { type: 'separator' },
-        { role: 'selectAll', label: '全选' },
+        { role: 'selectAll', label: labels.selectAll },
       ],
     },
     {
-      label: '视图',
+      label: labels.view,
       submenu: [
-        { role: 'reload' },
-        { role: 'toggleDevTools' },
+        { role: 'reload', label: labels.reload },
+        { role: 'toggleDevTools', label: labels.developerTools },
         { type: 'separator' },
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
+        { role: 'resetZoom', label: labels.actualSize },
+        { role: 'zoomIn', label: labels.zoomIn },
+        { role: 'zoomOut', label: labels.zoomOut },
         { type: 'separator' },
-        { role: 'togglefullscreen' },
+        { role: 'togglefullscreen', label: labels.fullscreen },
       ],
     },
     {
-      label: '帮助',
+      label: labels.settings,
       submenu: [
         {
-          label: '检查更新',
+          label: labels.openSettings,
+          accelerator: 'CmdOrCtrl+,',
+          click: () => mainWindow?.webContents.send('studio:open-settings'),
+        },
+        { type: 'separator' },
+        {
+          label: labels.language,
+          submenu: [
+            {
+              label: labels.followSystem,
+              type: 'radio',
+              checked: settings.languagePreference === 'system',
+              click: () => setLanguagePreference('system'),
+            },
+            {
+              label: labels.chinese,
+              type: 'radio',
+              checked: settings.languagePreference === 'zh-CN',
+              click: () => setLanguagePreference('zh-CN'),
+            },
+            {
+              label: labels.english,
+              type: 'radio',
+              checked: settings.languagePreference === 'en-US',
+              click: () => setLanguagePreference('en-US'),
+            },
+          ],
+        },
+      ],
+    },
+    {
+      label: labels.help,
+      submenu: [
+        {
+          label: labels.checkUpdates,
           click: () => updater?.checkManually(),
         },
         { type: 'separator' },
         {
-          label: `当前版本 ${app.getVersion()}`,
+          label: labels.currentVersion,
           enabled: false,
         },
       ],
@@ -1145,6 +1439,7 @@ async function createWindow(): Promise<void> {
     minHeight: 640,
     show: false,
     backgroundColor: '#f2f3f1',
+    ...(process.platform === 'win32' ? { icon: desktopIconPath() } : {}),
     webPreferences: {
       preload: resolve(moduleDirectory, 'preload.cjs'),
       contextIsolation: true,
@@ -1156,13 +1451,19 @@ async function createWindow(): Promise<void> {
   mainWindow = window
   if (saved.maximized) window.maximize()
   window.once('ready-to-show', () => window.show())
-  window.on('close', () => {
-    if (!stateStore) return
-    const bounds = window.getNormalBounds()
-    stateStore.saveWindowState({
-      ...bounds,
-      maximized: window.isMaximized(),
-    })
+  window.on('close', (event) => {
+    if (stateStore) {
+      const bounds = window.getNormalBounds()
+      stateStore.saveWindowState({
+        ...bounds,
+        maximized: window.isMaximized(),
+      })
+    }
+    if (!quitting && backgroundJobState.active) {
+      event.preventDefault()
+      window.hide()
+      ensureTray()
+    }
   })
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = undefined
@@ -1275,7 +1576,18 @@ async function startDesktop(): Promise<void> {
     },
   )
   session.defaultSession.setPermissionRequestHandler(
-    (_webContents, _permission, callback) => callback(false),
+    (webContents, permission, callback, details) => {
+      const mediaTypes =
+        'mediaTypes' in details ? details.mediaTypes ?? [] : []
+      const trustedAudioRequest = Boolean(
+        mainWindow &&
+          webContents.id === mainWindow.webContents.id &&
+          permission === 'media' &&
+          mediaTypes.includes('audio') &&
+          !mediaTypes.includes('video'),
+      )
+      callback(trustedAudioRequest)
+    },
   )
   installMenu()
   updater.start()
@@ -1284,9 +1596,23 @@ async function startDesktop(): Promise<void> {
     const smokeWindow = mainWindow
     if (!smokeWindow) throw new Error('Desktop window was not created')
     await new Promise((resolveWait) => setTimeout(resolveWait, 1200))
+    const scoreBridgeError =
+      await smokeWindow.webContents.executeJavaScript(`
+        window.gtsDesktop.invoke({
+          method: 'submit-score',
+          payload: {},
+        }).then(
+          () => '',
+          (error) => String(error?.message ?? error),
+        )
+      `)
+    if (!String(scoreBridgeError).includes('Invalid score pages')) {
+      throw new Error('Desktop score import IPC method is not available')
+    }
     await smokeWindow.webContents.executeJavaScript(
       `Array.from(document.querySelectorAll('button'))
-        .find((button) => button.getAttribute('aria-label') === '桌面运行时')
+        .find((button) => ['桌面运行时', 'Desktop runtime']
+          .includes(button.getAttribute('aria-label')))
         ?.click()`,
     )
     await new Promise((resolveWait) => setTimeout(resolveWait, 500))
@@ -1426,7 +1752,8 @@ async function startDesktop(): Promise<void> {
       new Promise((resolve) => {
         document.querySelector('.runtime-dialog button[aria-label="关闭"]')?.click()
         Array.from(document.querySelectorAll('button'))
-          .find((button) => button.textContent?.trim() === '导入歌曲')
+          .find((button) => ['导入歌曲', 'Import song']
+            .includes(button.textContent?.trim()))
           ?.click()
         setTimeout(() => {
           const picker = document.querySelector('.import-dialog .drop-zone')
@@ -1463,7 +1790,9 @@ async function startDesktop(): Promise<void> {
       !pickerState ||
       pickerState.tag !== 'BUTTON' ||
       pickerState.hasBrowserInput !== false ||
-      !String(pickerState.text).includes('选择音频或视频') ||
+      !['选择音频或视频', 'Choose audio or video'].some((label) =>
+        String(pickerState.text).includes(label)
+      ) ||
       !Array.isArray(pickerState.sourceShortcuts) ||
       expectedSourceShortcuts.some(
         (source) =>
@@ -1495,11 +1824,7 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock()
 if (!hasSingleInstanceLock) {
   app.quit()
 } else {
-  app.on('second-instance', () => {
-    if (!mainWindow) return
-    if (mainWindow.isMinimized()) mainWindow.restore()
-    mainWindow.focus()
-  })
+  app.on('second-instance', showMainWindow)
   app.whenReady().then(startDesktop).catch((error: unknown) => {
     const message =
       error instanceof Error ? error.stack ?? error.message : 'Desktop startup failed'
@@ -1517,11 +1842,15 @@ if (!hasSingleInstanceLock) {
 }
 
 app.on('window-all-closed', () => {
+  if (backgroundJobState.active) {
+    ensureTray()
+    return
+  }
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('activate', () => {
-  if (!mainWindow) void createWindow()
+  showMainWindow()
 })
 
 app.on('before-quit', (event) => {
@@ -1530,6 +1859,7 @@ app.on('before-quit', (event) => {
   quitting = true
   const stopping = localApi?.stop() ?? Promise.resolve()
   void stopping.finally(() => {
+    destroyTray()
     stateStore?.close()
     stateStore = undefined
     localApi = undefined

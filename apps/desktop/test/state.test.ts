@@ -68,6 +68,7 @@ test('persists projects, recoverable jobs, recents and window state in SQLite', 
     store.setRuntimeMode('local', project.id)
     store.setCloudApiRoot('https://cloud.example.test')
     store.setHuggingFaceOAuthClientId('desktop-oauth-client')
+    store.setLanguagePreference('en-US')
     store.setTranscriptionPreference({
       providerId: 'muscriptor',
       selectionMode: 'manual',
@@ -125,6 +126,9 @@ test('persists projects, recoverable jobs, recents and window state in SQLite', 
       reopened.huggingFaceOAuthClientId(),
       'desktop-oauth-client',
     )
+    assert.equal(reopened.languagePreference(), 'en-US')
+    reopened.setLanguagePreference('system')
+    assert.equal(reopened.languagePreference(), 'system')
     assert.deepEqual(reopened.transcriptionPreference(), {
       providerId: 'muscriptor',
       selectionMode: 'manual',

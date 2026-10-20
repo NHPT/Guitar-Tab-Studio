@@ -9,6 +9,7 @@ const MAX_RESPONSE_BYTES = 1024 * 1024
 const REQUEST_TIMEOUT_MS = 10_000
 const MAX_SERIALIZED_VALUE_BYTES = 128 * 1024
 const MAX_PLUTIL_ERROR_BYTES = 32 * 1024
+const PLUTIL_TIMEOUT_MS = 10_000
 
 const musicIdKeys = new Set([
   'musicid',
@@ -323,7 +324,7 @@ function runPlutil(
     const timer = setTimeout(() => {
       forcedError = new Error('plutil timed out')
       child.kill('SIGKILL')
-    }, 3000)
+    }, PLUTIL_TIMEOUT_MS)
 
     child.stdout.on('data', (chunk: Buffer) => {
       stdoutBytes += chunk.byteLength

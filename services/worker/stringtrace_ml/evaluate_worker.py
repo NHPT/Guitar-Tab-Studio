@@ -5,8 +5,9 @@ import json
 from pathlib import Path
 
 from .evaluate import model_identity
-from .metrics import evaluate_events
+from .metrics import evaluate_beats, evaluate_chords, evaluate_events
 from .schema import (
+    ChordRegion,
     LabeledEvent,
     load_manifest,
     reject_quarantined_references,
@@ -56,6 +57,19 @@ def main() -> None:
         if source_start <= float(note["start"]) < source_end
         and float(note["end"]) > source_start
     ]
+    predicted_chords = [
+        ChordRegion(
+            start=max(0.0, float(chord["start"]) - source_start),
+            end=min(
+                annotation.duration,
+                float(chord["start"]) + float(chord["duration"]) - source_start,
+            ),
+            chord=str(chord["chord"]),
+        )
+        for chord in analysis.get("chords", [])
+        if float(chord["start"]) < source_end
+        and float(chord["start"]) + float(chord["duration"]) > source_start
+    ]
     report = {
         "track_id": annotation.track_id,
         "model": model_identity(
@@ -70,6 +84,23 @@ def main() -> None:
         ),
         "reference_events": len(annotation.events),
         "predicted_events": len(predictions),
+        "beat_metrics": (
+            evaluate_beats(
+                annotation.beats,
+                [
+                    float(beat) - source_start
+                    for beat in analysis.get("beats", [])
+                    if source_start <= float(beat) < source_end
+                ],
+            )
+            if len(annotation.beats) >= 2
+            else None
+        ),
+        "chord_metrics": (
+            evaluate_chords(annotation.chords, predicted_chords)
+            if annotation.chords
+            else None
+        ),
         "metrics": evaluate_events(
             annotation.events,
             predictions,

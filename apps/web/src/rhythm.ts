@@ -54,6 +54,134 @@ interface InternalAttack extends ScoreAttack {
 const GRID = 0.125
 const EPSILON = 0.000_001
 const NOTATED_DURATIONS = [4, 3, 2, 1.5, 1, 0.75, 0.5, 0.375, 0.25, 0.125]
+const BINARY_SIXTEENTHS = [0, 0.25, 0.5, 0.75]
+const BINARY_THIRTY_SECONDS = [
+  0,
+  0.125,
+  0.25,
+  0.375,
+  0.5,
+  0.625,
+  0.75,
+  0.875,
+]
+const TRIPLETS = [0, 1 / 3, 2 / 3]
+
+interface BeatQuantization {
+  positions: number[]
+  assignments: number[]
+  tuplet?: 3
+  unit?: number
+}
+
+interface BeatQuantizationCandidate {
+  positions: number[]
+  tolerance: number
+  penalty: number
+  merged?: boolean
+  tuplet?: 3
+  unit?: number
+}
+
+function combinations(values: readonly number[], size: number): number[][] {
+  if (size === 0) return [[]]
+  if (size > values.length) return []
+  return values.flatMap((value, index) =>
+    combinations(values.slice(index + 1), size - 1).map((tail) => [
+      value,
+      ...tail,
+    ]),
+  )
+}
+
+function quantizeBeatPositions(
+  observed: readonly number[],
+  validAssignments: (assignments: readonly number[]) => boolean,
+): BeatQuantization | undefined {
+  if (observed.length === 0 || observed.length > BINARY_THIRTY_SECONDS.length) {
+    return undefined
+  }
+  const exactTemplates: BeatQuantizationCandidate[] = [
+    ...(observed.length <= BINARY_SIXTEENTHS.length
+      ? combinations(BINARY_SIXTEENTHS, observed.length).map((positions) => ({
+          positions,
+          tolerance: 0.18,
+          penalty: 0,
+        }))
+      : []),
+    ...(observed.length <= TRIPLETS.length
+      ? combinations(TRIPLETS, observed.length).map((positions) => ({
+          positions,
+          tolerance: 0.14,
+          penalty: 0.002,
+          tuplet: 3 as const,
+          unit: 1 / 3,
+        }))
+      : []),
+    ...combinations(BINARY_THIRTY_SECONDS, observed.length).map((positions) => ({
+      positions,
+      tolerance: 0.1,
+      penalty: 0.005 + Math.max(0, observed.length - 2) * 0.015,
+    })),
+  ]
+  const mergedTemplates: BeatQuantizationCandidate[] = observed.length > 2
+    ? Array.from(
+        { length: Math.min(BINARY_SIXTEENTHS.length, observed.length - 1) - 1 },
+        (_, index) => index + 2,
+      ).flatMap((size) =>
+        combinations(BINARY_SIXTEENTHS, size).map((positions) => ({
+          positions,
+          tolerance: 0.18,
+          penalty: (observed.length - size) * 0.01,
+          merged: true,
+        }))
+      )
+    : []
+  const candidates = [...exactTemplates, ...mergedTemplates].flatMap(
+    (candidate) => {
+      const assignments = candidate.merged
+        ? observed.map((position) =>
+            candidate.positions.reduce(
+              (best, target, index) =>
+                Math.abs(target - position) <
+                Math.abs(candidate.positions[best] - position)
+                  ? index
+                  : best,
+              0,
+            )
+          )
+        : observed.map((_position, index) => index)
+      if (
+        candidate.positions.some((_, index) => !assignments.includes(index)) ||
+        !validAssignments(assignments)
+      ) {
+        return []
+      }
+      const errors = observed.map((position, index) =>
+        Math.abs(position - candidate.positions[assignments[index]])
+      )
+      const maximumError = Math.max(...errors)
+      if (maximumError > candidate.tolerance) return []
+      return [{
+        ...candidate,
+        score:
+          errors.reduce((sum, error) => sum + error * error, 0) /
+          errors.length +
+          candidate.penalty,
+        assignments,
+      }]
+    }
+  )
+  const best = candidates.sort((left, right) => left.score - right.score)[0]
+  return best
+    ? {
+        positions: best.assignments.map((index) => best.positions[index]),
+        assignments: best.assignments,
+        tuplet: best.tuplet,
+        unit: best.unit,
+      }
+    : undefined
+}
 
 function valueForDuration(beats: number): RhythmValue {
   const canonical = NOTATED_DURATIONS.find(
@@ -71,9 +199,12 @@ function valueForDuration(beats: number): RhythmValue {
 export function scoreTiming(tab: TabDocument): ScoreTiming {
   const beats = tab.measures.flatMap((measure) => measure.beats)
   const quarterScale = 4 / tab.timeSignature[1]
-  const capacity = tab.timeSignature[0] * quarterScale
   let offset = 0
   const ranges = tab.measures.map((measure) => {
+    const capacity = Math.max(
+      quarterScale,
+      measure.beats.length * quarterScale,
+    )
     const range = {
       measure,
       start: offset,
@@ -168,98 +299,46 @@ export function scoreTiming(tab: TabDocument): ScoreTiming {
     for (let beatIndex = 0; beatIndex < range.measure.beats.length; beatIndex += 1) {
       const beatGroups = rawGroups.filter((group) => group.beatIndex === beatIndex)
       const beat = range.measure.beats[beatIndex]
-      if (
-        beatGroups.length === 3 &&
-        beatGroups.every((group, index) =>
-          Math.abs((group.at - beat.at) / beat.duration - index / 3) <= 0.07
-        )
-      ) {
-        const unit = range.quarterScale / 3
-        beatGroups.forEach((group, index) => {
-          group.targetPosition = beatIndex * range.quarterScale + index * unit
-          group.tuplet = 3
-          group.tripletUnit = unit
-        })
-        continue
-      }
-      const patterns = [
-        [0, 0.5],
-        [0, 0.75],
-        [0, 0.25],
-        [0, 0.5, 0.75],
-        [0, 0.25, 0.5],
-        [0, 0.25, 0.75],
-        [0, 0.25, 0.5, 0.75],
-      ].filter((pattern) => pattern.length <= beatGroups.length)
       const observed = beatGroups.map(
         (group) => (group.at - beat.at) / beat.duration,
       )
-      const bestPattern = patterns
-        .flatMap((pattern) => {
-          const assignments =
-            pattern.length === observed.length
-              ? observed.map((_position, index) => index)
-              : observed.map((position) =>
-                  pattern.reduce(
-                    (best, candidate, index) =>
-                      Math.abs(candidate - position) <
-                      Math.abs(pattern[best] - position)
-                        ? index
-                        : best,
-                    0,
-                  ),
-                )
-          if (
-            pattern.some((_, index) => !assignments.includes(index))
-          ) {
-            return []
-          }
-          const buckets = pattern.map((_, patternIndex) =>
-            beatGroups.filter(
-              (_group, groupIndex) =>
-                assignments[groupIndex] === patternIndex,
-            ),
-          )
-          const hasStringCollision = buckets.some((bucket) => {
-            const strings = bucket.flatMap((group) =>
-              group.notes.map((note) => note.string),
+      const quantization = quantizeBeatPositions(
+        observed,
+        (assignments) => {
+          const buckets = new Map<number, TabNote[]>()
+          assignments.forEach((assignment, index) => {
+            buckets.set(
+              assignment,
+              [
+                ...(buckets.get(assignment) ?? []),
+                ...beatGroups[index].notes,
+              ],
             )
-            return new Set(strings).size !== strings.length
           })
-          if (hasStringCollision) return []
-          const maximumError = Math.max(
-            ...observed.map((position, index) =>
-              Math.abs(position - pattern[assignments[index]]),
-            ),
+          return [...buckets.values()].every((notes) =>
+            new Set(notes.map((note) => note.string)).size === notes.length
           )
-          const tolerance =
-            pattern.length === 4 ? 0.15 : pattern.length === 3 ? 0.1 : 0.08
-          if (maximumError > tolerance) return []
-          return [{
-            pattern,
-            assignments,
-            maximumError,
-          }]
+        },
+      )
+      if (quantization) {
+        beatGroups.forEach((group, index) => {
+          group.targetPosition =
+            beatIndex * range.quarterScale +
+            quantization.positions[index] * range.quarterScale
+          if (quantization.tuplet && quantization.unit) {
+            group.tuplet = quantization.tuplet
+            group.tripletUnit = quantization.unit * range.quarterScale
+          }
         })
-        .sort((left, right) => left.maximumError - right.maximumError)[0]
-      if (bestPattern) {
-        const mergedGroups = bestPattern.pattern.map(
-          (position, patternIndex) => {
-            const bucket = beatGroups.filter(
-              (_group, groupIndex) =>
-                bestPattern.assignments[groupIndex] === patternIndex,
-            )
-            const primary = bucket[0]
-            primary.notes = bucket.flatMap((group) => group.notes)
-            primary.targetPosition =
-              beatIndex * range.quarterScale +
-              position * range.quarterScale
-            return primary
-          },
-        )
-        beatGroups.forEach((group) => {
-          if (!mergedGroups.includes(group)) {
+        const retainedGroups = new Map<number, typeof beatGroups[number]>()
+        beatGroups.forEach((group, index) => {
+          const assignment = quantization.assignments[index]
+          const retained = retainedGroups.get(assignment)
+          if (retained) {
+            retained.notes.push(...group.notes)
             rawGroups.splice(rawGroups.indexOf(group), 1)
+          } else {
+            retainedGroups.set(assignment, group)
           }
         })
       }

@@ -57,7 +57,9 @@ test('places notes on the playhead at their notation time across unequal measure
 test('marks three evenly spaced subdivisions as a triplet and rejects uneven attacks', async ({ page }) => {
   const response = await page.request.get('http://localhost:8787/api/projects/demo')
   const project = await response.json() as StudioProject
-  const measure = project.tab.measures[0]
+  const measure = project.tab.measures.find((candidate) =>
+    candidate.beats.length >= 3
+  )!
   const baseNote = measure.beats[0].notes[0]
   const patterns = [[0, 1 / 3, 2 / 3], [0, 0.25, 0.5], [0.23, 0.33, 0.69]]
   patterns.forEach((positions, index) => {
@@ -74,10 +76,67 @@ test('marks three evenly spaced subdivisions as a triplet and rejects uneven att
   })
   await page.route('**/api/projects/demo', route => route.fulfill({ json: project }))
   await page.goto('/')
-  const slots = page.locator('[data-measure="1"] .rhythm-beat-slot')
+  const slots = page.locator(
+    `[data-measure="${measure.number}"] .rhythm-beat-slot`,
+  )
   await expect(slots.nth(0)).toHaveAttribute('data-tuplet', '3')
   await expect(slots.nth(1)).not.toHaveAttribute('data-tuplet', '3')
   await expect(slots.nth(2)).not.toHaveAttribute('data-tuplet', '3')
+})
+
+test('quantizes expressive attacks as an ordered beat pattern with leading rests', async ({
+  page,
+}) => {
+  const response = await page.request.get('http://localhost:8787/api/projects/demo')
+  const project = await response.json() as StudioProject
+  const measure = project.tab.measures.find((candidate) =>
+    candidate.beats.length >= 2
+  )!
+  const base = measure.beats.flatMap((beat) => beat.notes)[0]
+  expect(base).toBeTruthy()
+  measure.beats.forEach((beat) => {
+    beat.notes = []
+    beat.style = 'pick'
+  })
+  const patterns = [
+    [0.07, 0.40, 0.66, 0.81],
+    [0.24, 0.51, 0.76],
+  ]
+  patterns.forEach((positions, beatIndex) => {
+    const beat = measure.beats[beatIndex]
+    beat.notes = positions.map((position, noteIndex) => {
+      const at = beat.at + position * beat.duration
+      return {
+        ...base,
+        id: `expressive-${beatIndex}-${noteIndex}`,
+        at,
+        notationAt: at,
+        duration: 0.05,
+        technique: 'pick' as const,
+      }
+    })
+  })
+  await page.route('**/api/projects/demo', route => route.fulfill({ json: project }))
+  await page.goto('/')
+
+  const expectedFractions = [
+    [0, 0.25, 0.5, 0.75],
+    [0.25, 0.5, 0.75],
+  ]
+  for (const [beatIndex, fractions] of expectedFractions.entries()) {
+    const beat = measure.beats[beatIndex]
+    for (const [noteIndex, fraction] of fractions.entries()) {
+      const glyph = page.locator(
+        `[data-note-id="expressive-${beatIndex}-${noteIndex}"]`,
+      )
+      await expect(glyph).toBeVisible()
+      const notationAt = Number(await glyph.getAttribute('data-notation-at'))
+      expect(notationAt).toBeCloseTo(
+        beat.at + fraction * beat.duration,
+        6,
+      )
+    }
+  }
 })
 
 test('shows an inferred strum with every fret and preserves its distinct performance times', async ({ page }) => {
@@ -136,7 +195,9 @@ test('shows an inferred strum with every fret and preserves its distinct perform
 test('notates attack spacing as quarters and dotted eighths independently of short decay', async ({ page }) => {
   const response = await page.request.get('http://localhost:8787/api/projects/demo')
   const project = await response.json() as StudioProject
-  const measure = project.tab.measures[0]
+  const measure = project.tab.measures.find((candidate) =>
+    candidate.beats.length >= 4
+  )!
   const base = measure.beats[0].notes[0]
   measure.beats.forEach(b => { b.notes = []; b.style = 'pick' })
   const attacks = [measure.beats[0].at, measure.beats[1].at,
@@ -159,7 +220,9 @@ test('notates attack spacing as quarters and dotted eighths independently of sho
   }
   await page.route('**/api/projects/demo', route => route.fulfill({ json: project }))
   await page.goto('/')
-  const slots = page.locator('[data-measure="1"] .rhythm-beat-slot')
+  const slots = page.locator(
+    `[data-measure="${measure.number}"] .rhythm-beat-slot`,
+  )
   await expect(slots.nth(0).locator('.rhythm-event')).toHaveAttribute('data-duration-beats', '1')
   await expect(slots.nth(0).locator('.rhythm-event')).toHaveAttribute('data-flags', '0')
   await expect(slots.nth(1).locator('.rhythm-event').nth(0)).toHaveAttribute('data-duration-beats', '0.75')
@@ -189,7 +252,9 @@ test('notates attack spacing as quarters and dotted eighths independently of sho
 test('keeps sustained beats distinct from a following silent beat', async ({ page }) => {
   const response = await page.request.get('http://localhost:8787/api/projects/demo')
   const project = await response.json() as StudioProject
-  const measure = project.tab.measures[0]
+  const measure = project.tab.measures.find((candidate) =>
+    candidate.beats.length >= 4
+  )!
   const base = measure.beats[0].notes[0]
   measure.beats.forEach(b => { b.notes = []; b.style = 'pick' })
   const at = measure.beats[0].at
@@ -197,7 +262,9 @@ test('keeps sustained beats distinct from a following silent beat', async ({ pag
     duration: measure.beats[2].at + measure.beats[2].duration * 0.9 - at }]
   await page.route('**/api/projects/demo', route => route.fulfill({ json: project }))
   await page.goto('/')
-  const slots = page.locator('[data-measure="1"] .rhythm-beat-slot')
+  const slots = page.locator(
+    `[data-measure="${measure.number}"] .rhythm-beat-slot`,
+  )
   for (const index of [1, 2]) {
     await expect(slots.nth(index)).toHaveClass(/is-sustain/)
     await expect(slots.nth(index).locator('.rhythm-rest')).toHaveCount(0)
@@ -207,13 +274,18 @@ test('keeps sustained beats distinct from a following silent beat', async ({ pag
 })
 
 test('keeps each opening 4/4 measure at four beats including continuations and rests', async ({ page }) => {
+  const response = await page.request.get('http://localhost:8787/api/projects/demo')
+  const project = await response.json() as StudioProject
+  const fullMeasures = project.tab.measures
+    .filter((measure) => measure.beats.length === 4)
+    .slice(0, 3)
   await page.goto('/')
   await expect(page.locator('.tab-glyph').first()).toBeVisible()
-  for (const measure of [1, 2, 3]) {
+  for (const measure of fullMeasures) {
     const durations = await page.locator(
-      `[data-measure="${measure}"] .rhythm-event, ` +
-      `[data-measure="${measure}"] .rhythm-continuation, ` +
-      `[data-measure="${measure}"] .rhythm-rest-event`,
+      `[data-measure="${measure.number}"] .rhythm-event, ` +
+      `[data-measure="${measure.number}"] .rhythm-continuation, ` +
+      `[data-measure="${measure.number}"] .rhythm-rest-event`,
     ).evaluateAll(elements => elements.map(el => Number(el.getAttribute('data-duration-beats'))))
     expect(durations.reduce((sum, duration) => sum + duration, 0)).toBeCloseTo(4, 6)
   }
@@ -266,9 +338,8 @@ test('closes every repaired project measure at four beats without horizontal rew
       }
     }),
   )
-  expect(measures.map(measure => measure.total)).toEqual(
-    Array.from({ length: 12 }, () => 4),
-  )
+  expect(measures).toHaveLength(12)
+  measures.forEach((measure) => expect(measure.total).toBeCloseTo(4, 9))
   for (const measure of measures) {
     for (let index = 1; index < measure.positions.length; index += 1) {
       expect(
@@ -346,9 +417,8 @@ test('uses the corrected quarter-note grid for the repaired country project', as
       }
     }),
   )
-  expect(measures.map(measure => measure.total)).toEqual(
-    Array.from({ length: 65 }, () => 4),
-  )
+  expect(measures).toHaveLength(65)
+  measures.forEach((measure) => expect(measure.total).toBeCloseTo(4, 9))
   expect(measures.filter(measure => measure.rewinds > 0)).toEqual([])
 
   const scoreVelocities = await page.locator('.score-track').evaluate(

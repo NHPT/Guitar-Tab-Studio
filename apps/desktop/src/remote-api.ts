@@ -3,6 +3,7 @@ import {
   type AnalysisJob,
   type AuthorizedMediaConsent,
   type CapabilityState,
+  type MediaBrowserSession,
   type PlatformDescriptor,
   type ProjectRevision,
   type ProjectRevisionKind,
@@ -123,6 +124,7 @@ export class RemoteApiService implements StudioApiTransport {
   submitLink(
     url: string,
     authorizedMedia?: AuthorizedMediaConsent,
+    _mediaSession?: MediaBrowserSession,
   ): Promise<AnalysisJob> {
     return this.request('/api/import/link', {
       method: 'POST',

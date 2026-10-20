@@ -237,6 +237,14 @@ test('recovers from a closed transcription authorization page', async ({
               return []
             case 'demo-project':
               return demoProject
+            case 'application-settings':
+              return {
+                language: 'zh-CN',
+                languagePreference: 'system',
+                systemLanguage: 'zh-CN',
+              }
+            case 'set-background-job-state':
+              return request.payload
             case 'runtime-status': {
               const providerMode =
                 runtimeMode === 'cloud' && cloudApiRoot ? 'cloud' : 'local'
@@ -345,6 +353,12 @@ test('recovers from a closed transcription authorization page', async ({
         onOpenProject() {
           return () => undefined
         },
+        onOpenSettings() {
+          return () => undefined
+        },
+        onLanguageChanged() {
+          return () => undefined
+        },
         onTranscriptionProgress(listener: typeof progressListener) {
           progressListener = listener
           return () => {
@@ -443,9 +457,9 @@ test('recovers from a closed transcription authorization page', async ({
   ).toBeEnabled()
 
   await dialog.getByRole('button', { name: '下载并启用' }).click()
-  await expect(dialog.getByText('已启用高精度 · SMALL')).toBeVisible()
+  await expect(dialog.getByText('已启用研究融合 · SMALL')).toBeVisible()
   await expect(
-    dialog.getByRole('button', { name: '高精度已启用' }),
+    dialog.getByRole('button', { name: '研究融合已启用' }),
   ).toBeDisabled()
 
   await dialog.getByLabel('模型档位').selectOption('medium')

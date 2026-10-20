@@ -8,8 +8,11 @@ import {
   countInBeatDurations,
   CoreValidationError,
   createEasyArrangement,
+  detectFundamentalFrequency,
   detectStandardAudioSignature,
+  guitarPositionForPitch,
   MemoryProjectRepository,
+  notationPositionAt,
   parseModelPackageManifest,
   parseProjectRevision,
   PRACTICE_RHYTHMS,
@@ -21,6 +24,8 @@ import {
   rhythmCompatibility,
   rhythmCompatibilityForTempoProfile,
   rhythmEventPosition,
+  tempoMapFromBeats,
+  tunerReading,
   uploadContentValidationError,
   uploadPrefilterError,
 } from '../src/index.js'
@@ -252,6 +257,72 @@ test('preserves explicit time signatures and filters incompatible rhythms', () =
   )
 })
 
+test('keeps performed timing separate from quantized notation positions', () => {
+  const beats = [0, 0.5, 1.01, 1.53, 2.06]
+  const draggedEighth = notationPositionAt(0.27, beats)
+  const freeTiming = notationPositionAt(0.21, beats)
+
+  assert.equal(draggedEighth.beatIndex, 0)
+  assert.equal(draggedEighth.notationAt, 0.25)
+  assert.equal(draggedEighth.notationBeat, 0.5)
+  assert.equal(draggedEighth.snapped, true)
+  assert.equal(freeTiming.notationAt, 0.21)
+  assert.equal(freeTiming.snapped, false)
+})
+
+test('builds a variable tempo map without flattening performed beats', () => {
+  const map = tempoMapFromBeats(
+    [0, 0.5, 1, 1.5, 2, 2.55, 3.15, 3.8, 4.5],
+    120,
+  )
+
+  assert.equal(map.mode, 'variable')
+  assert.equal(map.points.length, 9)
+  assert.deepEqual(
+    map.points.map((point) => point.at),
+    [0, 0.5, 1, 1.5, 2, 2.55, 3.15, 3.8, 4.5],
+  )
+  assert.ok(map.points[0].bpm > map.points.at(-1)!.bpm)
+  assert.ok(map.variation >= 0.04)
+})
+
+test('detects a guitar pitch and maps it to a playable position', () => {
+  const sampleRate = 48_000
+  const frequency = 82.4069
+  const samples = Float32Array.from(
+    { length: 8192 },
+    (_, index) =>
+      Math.sin((2 * Math.PI * frequency * index) / sampleRate) * 0.35,
+  )
+
+  const detection = detectFundamentalFrequency(samples, sampleRate)
+  assert.ok(detection)
+  assert.ok(Math.abs(detection.frequency - frequency) < 0.5)
+  assert.ok(detection.confidence > 0.8)
+  const reading = tunerReading(detection)
+  assert.equal(reading?.note, 'E')
+  assert.equal(reading?.octave, 2)
+  assert.ok(Math.abs(reading?.cents ?? 100) < 1)
+  assert.deepEqual(guitarPositionForPitch(reading!.midi), {
+    string: 6,
+    fret: 0,
+  })
+})
+
+test('provides advanced drum fills with cymbal or tom transitions', () => {
+  const fills = PRACTICE_RHYTHMS.filter((rhythm) =>
+    rhythm.id.endsWith('-fill'),
+  )
+  assert.equal(fills.length, 6)
+  assert.ok(
+    fills.every((rhythm) =>
+      rhythm.hits.some((hit) =>
+        ['crash', 'tom-high', 'tom-low'].includes(hit.voice),
+      ),
+    ),
+  )
+})
+
 test('anchors rhythm steps to the detected beat grid within each measure', () => {
   const rock = PRACTICE_RHYTHMS.find((rhythm) => rhythm.id === 'rock-basic')
   assert.ok(rock)
@@ -458,6 +529,16 @@ test('normalizes supported legacy analysis documents to schema version 10', () =
     version: 8,
     bpm: 120,
     time_signature: [6, 8],
+    pickup_beats: 2,
+    tempo_map: {
+      mode: 'variable',
+      median_bpm: 118.5,
+      variation: 0.08,
+      points: [
+        { at: 0.2, beat: 0, bpm: 120, confidence: 0.9 },
+        { at: 0.71, beat: 1, bpm: 117.6, confidence: 0.85 },
+      ],
+    },
     vocal_melody: [
       { start: 1, end: 1.5, pitch: 69, confidence: 0.9 },
     ],
@@ -519,6 +600,9 @@ test('normalizes supported legacy analysis documents to schema version 10', () =
   assert.equal(analysis.transcription_model?.kind, 'trained')
   assert.equal(analysis.transcription_model?.version, '5')
   assert.deepEqual(analysis.time_signature, [6, 8])
+  assert.equal(analysis.pickup_beats, 2)
+  assert.equal(analysis.tempo_map?.mode, 'variable')
+  assert.equal(analysis.tempo_map?.medianBpm, 118.5)
   assert.equal(analysis.vocal_melody?.[0].pitch, 69)
   assert.equal(analysis.lyrics?.[0].text, 'sample')
   assert.equal(analysis.notes[0].string, 3)
@@ -560,6 +644,16 @@ test('rejects future analysis versions and invalid guitar strings', () => {
         ],
       }),
     /analysis\.notes\[0\]\.string/,
+  )
+  assert.throws(
+    () =>
+      parseAnalysisDocument({
+        version: 10,
+        bpm: 120,
+        pickup_beats: 4,
+        notes: [],
+      }),
+    /analysis\.pickup_beats/,
   )
 })
 

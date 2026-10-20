@@ -51,6 +51,20 @@ export function guitarGestures(
       if (directions.size > 1) break
       const spread = note.at - notes[first].at
       if (directions.size !== 1 || resolvedPairs < 2 || spread <= 0.025) continue
+      const onsetClusters = group.reduce(
+        (count, item, index) =>
+          index > 0 && item.at - group[index - 1].at > 0.01
+            ? count + 1
+            : count,
+        1,
+      )
+      const orderedStrings = [...strings].sort((a, b) => a - b)
+      const contiguousStrings =
+        orderedStrings.at(-1)! - orderedStrings[0] + 1 ===
+        orderedStrings.length
+      // With only two observed onset layers, skipped strings can manufacture a
+      // direction from a simultaneous dyad and an unrelated following note.
+      if (onsetClusters < 3 && !contiguousStrings) continue
       const maximumGap = Math.max(...group.slice(1).map((item, index) => item.at - group[index].at))
       best = {
         at: group[0].at,

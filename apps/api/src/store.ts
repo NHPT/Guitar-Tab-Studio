@@ -168,9 +168,9 @@ const defaultInferenceProvider = new PipelineInferenceProvider()
 
 const demo = createStudioProject(
   {
-    kind: 'netease',
-    label: 'John Denver · Take Me Home, Country Roads',
-    url: 'https://music.163.com/#/song?id=1478037',
+    kind: 'upload',
+    label: '唐朝 · 国际歌',
+    filename: 'internationale.ogg',
   },
 )
 
@@ -376,6 +376,15 @@ export function createJob(
       if (jobs.get(job.id)?.status === 'cancelled') return
       job.status = 'failed'
       job.error = error instanceof Error ? error.message : '处理失败'
+      const errorCode =
+        error &&
+        typeof error === 'object' &&
+        'errorCode' in error &&
+        (error.errorCode === 'media-auth-required' ||
+          error.errorCode === 'media-session-unavailable')
+          ? error.errorCode
+          : undefined
+      job.errorCode = errorCode
       job.stageLabel = '处理失败'
       job.updatedAt = new Date().toISOString()
       jobs.set(job.id, { ...job })

@@ -6,6 +6,7 @@ export type {
   BeatStyle,
   CapabilityState,
   JobStatus,
+  MediaBrowserSession,
   PlatformDescriptor,
   PlatformId,
   ProjectRevision,

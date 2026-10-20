@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import math
 from bisect import bisect_right
 from dataclasses import asdict, dataclass
 from typing import Callable
 
-from .schema import ExcludedRange, LabeledEvent, STANDARD_TUNING_LIST
+from .schema import (
+    ChordRegion,
+    ExcludedRange,
+    LabeledEvent,
+    STANDARD_TUNING_LIST,
+)
 
 
 @dataclass(frozen=True)
@@ -243,6 +249,146 @@ def evaluate_beat_relative_onsets(
     }
 
 
+def evaluate_beats(
+    reference: list[float],
+    predicted: list[float],
+    *,
+    tolerance: float = 0.07,
+) -> dict[str, int | float | None]:
+    eligible_reference = sorted(
+        float(beat)
+        for beat in reference
+        if math.isfinite(float(beat)) and float(beat) >= 0
+    )
+    eligible_predicted = sorted(
+        float(beat)
+        for beat in predicted
+        if math.isfinite(float(beat)) and float(beat) >= 0
+    )
+    unmatched = set(range(len(eligible_reference)))
+    errors: list[float] = []
+    for prediction in eligible_predicted:
+        candidates = [
+            index
+            for index in unmatched
+            if abs(eligible_reference[index] - prediction) <= tolerance
+        ]
+        if not candidates:
+            continue
+        matched = min(
+            candidates,
+            key=lambda index: abs(eligible_reference[index] - prediction),
+        )
+        unmatched.remove(matched)
+        errors.append(abs(eligible_reference[matched] - prediction) * 1000)
+    true_positive = len(errors)
+    false_positive = len(eligible_predicted) - true_positive
+    false_negative = len(eligible_reference) - true_positive
+    precision = true_positive / max(1, true_positive + false_positive)
+    recall = true_positive / max(1, true_positive + false_negative)
+    sorted_errors = sorted(errors)
+
+    def percentile(fraction: float) -> float | None:
+        if not sorted_errors:
+            return None
+        position = (len(sorted_errors) - 1) * fraction
+        lower = int(position)
+        upper = min(len(sorted_errors) - 1, lower + 1)
+        weight = position - lower
+        return (
+            sorted_errors[lower] * (1 - weight)
+            + sorted_errors[upper] * weight
+        )
+
+    return {
+        "true_positive": true_positive,
+        "false_positive": false_positive,
+        "false_negative": false_negative,
+        "precision": precision,
+        "recall": recall,
+        "f1": (
+            2 * precision * recall / (precision + recall)
+            if precision + recall
+            else 0.0
+        ),
+        "mean_error_ms": (
+            sum(sorted_errors) / len(sorted_errors)
+            if sorted_errors
+            else None
+        ),
+        "median_error_ms": percentile(0.5),
+        "p95_error_ms": percentile(0.95),
+        "tolerance_ms": tolerance * 1000,
+    }
+
+
+def _chord_root(chord: str) -> str:
+    normalized = chord.strip()
+    if normalized in {"", "N.C.", "NC"}:
+        return "N.C."
+    if len(normalized) >= 2 and normalized[1] in {"#", "b"}:
+        return normalized[:2]
+    return normalized[:1]
+
+
+def evaluate_chords(
+    reference: list[ChordRegion],
+    predicted: list[ChordRegion],
+) -> dict[str, int | float]:
+    boundaries = sorted(
+        {
+            boundary
+            for region in [*reference, *predicted]
+            for boundary in (region.start, region.end)
+        }
+    )
+    reference_duration = 0.0
+    predicted_duration = 0.0
+    exact_duration = 0.0
+    root_duration = 0.0
+    for start, end in zip(boundaries, boundaries[1:]):
+        if end <= start:
+            continue
+        midpoint = (start + end) / 2
+        reference_chord = next(
+            (
+                region.chord
+                for region in reference
+                if region.start <= midpoint < region.end
+            ),
+            None,
+        )
+        predicted_chord = next(
+            (
+                region.chord
+                for region in predicted
+                if region.start <= midpoint < region.end
+            ),
+            None,
+        )
+        duration = end - start
+        if reference_chord is not None:
+            reference_duration += duration
+        if predicted_chord is not None:
+            predicted_duration += duration
+        if reference_chord is None or predicted_chord is None:
+            continue
+        if reference_chord == predicted_chord:
+            exact_duration += duration
+        if _chord_root(reference_chord) == _chord_root(predicted_chord):
+            root_duration += duration
+    overlap_denominator = max(reference_duration, predicted_duration, 1e-8)
+    return {
+        "reference_regions": len(reference),
+        "predicted_regions": len(predicted),
+        "reference_duration": reference_duration,
+        "predicted_duration": predicted_duration,
+        "coverage": min(1.0, predicted_duration / max(reference_duration, 1e-8)),
+        "exact_accuracy": exact_duration / overlap_denominator,
+        "root_accuracy": root_duration / overlap_denominator,
+    }
+
+
 def evaluate_events(
     reference: list[LabeledEvent],
     predicted: list[LabeledEvent],
@@ -270,6 +416,11 @@ def evaluate_events(
             and 0 < event.onset - previous.onset <= 0.75
             for previous in eligible_reference[:index]
         )
+    ]
+    technique_reference = [
+        event
+        for event in eligible_reference
+        if event.technique != "unknown"
     ]
     metrics: dict[str, object] = {
         "exclusions": {
@@ -310,6 +461,16 @@ def evaluate_events(
             lambda reference_event, predicted_event: (
                 reference_event.string == predicted_event.string
                 and reference_event.fret == predicted_event.fret
+            ),
+            onset_tolerance,
+        ).to_dict(),
+        "technique": _match(
+            technique_reference,
+            eligible_predicted,
+            lambda reference_event, predicted_event: (
+                reference_event.string == predicted_event.string
+                and reference_event.fret == predicted_event.fret
+                and reference_event.technique == predicted_event.technique
             ),
             onset_tolerance,
         ).to_dict(),

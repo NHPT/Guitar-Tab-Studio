@@ -79,6 +79,8 @@ export interface TranscriptionModelInfo {
   name: string
   version: string
   kind: 'baseline' | 'trained'
+  timingModel?: string
+  positionOptimizer?: string
 }
 
 export interface CapabilityState {
@@ -110,12 +112,32 @@ export interface PlatformDescriptor {
   note: string
 }
 
+export type MediaBrowserId =
+  | 'brave'
+  | 'chrome'
+  | 'chromium'
+  | 'edge'
+  | 'firefox'
+  | 'opera'
+  | 'safari'
+  | 'vivaldi'
+
+export interface MediaBrowserDescriptor {
+  id: MediaBrowserId
+  label: string
+}
+
+export interface MediaBrowserSession {
+  browser: MediaBrowserId
+}
+
 export interface SourceDescriptor {
   kind: PlatformId
   label: string
   url?: string
   filename?: string
   authorizedMedia?: AuthorizedMediaGrant
+  mediaSession?: MediaBrowserSession
 }
 
 export interface StemTrack {
@@ -138,12 +160,27 @@ export interface VisualizationPoint {
   impact: number
 }
 
+export interface TempoMapPoint {
+  at: number
+  beat: number
+  bpm: number
+  confidence: number
+}
+
+export interface TempoMap {
+  mode: 'steady' | 'variable'
+  medianBpm: number
+  variation: number
+  points: TempoMapPoint[]
+}
+
 export interface TabNote {
   id: string
   string: 1 | 2 | 3 | 4 | 5 | 6
   fret: number
   at: number
   notationAt?: number
+  notationBeat?: number
   duration: number
   technique: Technique
   harmonicType?: 'natural' | 'artificial'
@@ -197,6 +234,7 @@ export interface TabDocument {
   tuning: ['E4', 'B3', 'G3', 'D3', 'A2', 'E2']
   capo: number
   timeSignature: TimeSignature
+  tempoMap?: TempoMap
   vocalMelody?: VocalMelodyNote[]
   lyrics?: TimedLyric[]
   measures: TabMeasure[]
@@ -281,6 +319,7 @@ export interface AnalysisJob {
   updatedAt: string
   projectId?: string
   error?: string
+  errorCode?: 'media-auth-required' | 'media-session-unavailable'
   deployment?: {
     mode: 'baseline' | 'shadow' | 'canary' | 'champion'
     modelVersion?: string

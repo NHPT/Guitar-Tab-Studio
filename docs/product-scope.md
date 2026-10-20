@@ -12,7 +12,7 @@ mode.
 ## Visual thesis
 
 A quiet studio console: neutral surfaces, waveform-led hierarchy, compact
-controls, and ten selectable color systems with vermilion as the default.
+controls, and eighteen selectable color systems with amber as the default.
 
 ## Content plan
 
@@ -24,6 +24,8 @@ controls, and ten selectable color systems with vermilion as the default.
 ## Platform plan
 
 - Web remains the zero-install client and future collaboration surface.
+- Android, iPhone and iPad use the responsive Web client with a deployed
+  same-origin API; mobile browsers do not run the desktop Python Worker.
 - Windows and macOS use an Electron shell around the shared React workspace.
 - The first desktop development build reuses the existing Node application
   service and Python Worker.
@@ -45,6 +47,8 @@ controls, and ten selectable color systems with vermilion as the default.
 - The compact score automatically follows the active measure during playback.
 - Mixer changes are immediate and preserve layout while tracks mute or solo.
 - The correction inspector opens only after selecting a chord or individual note.
+- The tuner and live-transcription workspaces are independent tools and stop
+  microphone capture when the user returns to the analysis workspace.
 - Community tasks present one short audio question at a time and always allow
   the user to skip an uncertain answer.
 
@@ -57,10 +61,16 @@ controls, and ten selectable color systems with vermilion as the default.
 - Only stems with detected signal energy are shown in the mixer.
 - Playback supports seeking, speed control, and an opt-in measure loop that
   defaults to the complete score and allows selectable start and end measures.
+- Drum stems can be soloed in the mixer. Generated rhythm and metronome
+  patterns use the project playback speed and have an independent volume.
 - The complete score shows chord names, fingering diagrams, pick/strum rhythm,
   continuous tablature, rhythm beams, technique marks, sections, and optional lyrics.
 - Capo recommendations prefer easier open-chord shapes and remain optional and editable.
 - TAB notes expose string, fret, duration, technique, and confidence.
+- Performed note timing remains immutable for playback and evaluation. Readable
+  notation positions are derived separately from the per-beat tempo map.
+- The microphone tuner reports frequency and cent offset. First-stage live
+  transcription records stable monophonic notes with string/fret suggestions.
 - Generated results remain editable because automatic transcription is imperfect.
 - Personal corrections remain private unless the user separately consents and
   the audio rights permit community review and training.
@@ -86,8 +96,19 @@ controls, and ten selectable color systems with vermilion as the default.
 - Proprietary QMC, MFLAC, MGG, NCM, KWM, KGM and VPR files require explicit
   rights-and-processing confirmation before the ephemeral API decoder runs.
 - Public-link adapters only process media that the user is authorized to use.
+- Desktop browser sessions are never scanned implicitly. Public links are
+  acquired anonymously first. After an authentication-classified failure, the
+  user may explicitly approve a one-time retry using the system default
+  browser profile; the selection is not persisted.
+- Song rhythm backing follows playback. The standalone practice tool runs its
+  own metronome or drum-machine clock with independent BPM, meter, subdivision,
+  kit, volume, pattern, and drum-lane mute controls.
+- Native Android/iOS packages are not current release artifacts. Store builds
+  require cloud-runtime, signing, privacy-manifest and review gates.
 - Fine guitar-technique labels combine note transitions with acoustic features,
   remain experimental suggestions, and require confirmation.
+- Live transcription is a monophonic first stage. Polyphonic chord recognition,
+  reviewed notation export, and production accuracy claims remain future gates.
 - Import jobs never fall back to demo audio or demo notation.
 - The repository builds unsigned desktop candidates and defines the frozen
   offline Worker pipeline; official releases still require platform signing,

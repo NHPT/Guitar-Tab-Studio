@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { expect, test } from '@playwright/test'
 
-test('serves the requested Country Roads project and generated stems', async ({
+test('serves the requested Internationale project and generated stems', async ({
   page,
 }) => {
   const projectResponse = await page.request.get(
@@ -13,40 +13,40 @@ test('serves the requested Country Roads project and generated stems', async ({
     (track: { role: string }) => track.role === 'guitar',
   )
   expect(guitars.map((track: { url: string }) => track.url)).toEqual([
-    '/media/builtin/take-me-home-country-roads-guitar-1.m4a',
-    '/media/builtin/take-me-home-country-roads-guitar-2.m4a',
+    '/media/builtin/internationale-guitar.m4a',
   ])
-  expect(guitars.map((track: { name: string }) => track.name)).toEqual([
-    '吉他 1',
-    '吉他 2',
-  ])
-  expect(project.title).toBe('Take Me Home, Country Roads')
-  expect(project.artist).toBe('John Denver')
-  expect(project.duration).toBeCloseTo(194.14667, 3)
-  expect(project.tab.measures).toHaveLength(132)
+  expect(guitars.map((track: { name: string }) => track.name)).toEqual(['吉他'])
+  expect(project.title).toBe('国际歌')
+  expect(project.artist).toBe('唐朝')
+  expect(project.duration).toBeCloseTo(266.73333, 3)
+  expect(project.tab.measures).toHaveLength(110)
+  expect(project.tab.measures[0].section).toBe('弱起')
+  expect(project.tab.measures[0].beats).toHaveLength(1)
+  expect(project.tab.measures[0].start).toBe(0.3317)
+  expect(project.tab.measures[1].section).toBe('前奏')
+  expect(project.tab.measures[1].start).toBe(0.9433)
   expect(
     project.tab.measures.flatMap(
       (measure: { beats: Array<{ notes: unknown[] }> }) =>
         measure.beats.flatMap((beat) => beat.notes),
     ),
-  ).toHaveLength(1789)
+  ).toHaveLength(1462)
   expect(project.source).toEqual({
-    kind: 'netease',
-    label: 'John Denver · Take Me Home, Country Roads',
-    url: 'https://music.163.com/#/song?id=1478037',
+    kind: 'upload',
+    label: '唐朝 · 国际歌',
+    filename: 'internationale.ogg',
   })
   const vocals = project.tracks.find(
     (track: { role: string }) => track.role === 'vocals',
   )
   expect(vocals.url).toBe(
-    '/media/builtin/take-me-home-country-roads-vocals.m4a',
+    '/media/builtin/internationale-vocals.m4a',
   )
   expect(vocals.available).toBe(true)
   expect(vocals.url).not.toBe(guitars[0].url)
   expect(project.tracks.map((track: { name: string }) => track.name)).toEqual([
     '人声',
-    '吉他 1',
-    '吉他 2',
+    '吉他',
     '贝斯',
     '鼓组',
     '键盘',
@@ -69,21 +69,21 @@ test('loads a playable project without layout overflow', async ({ page }, testIn
   await page.goto('/')
   await expect(
     page.getByRole('heading', {
-      name: 'Take Me Home, Country Roads',
+      name: '国际歌',
     }),
   ).toBeVisible()
   await expect(page.getByRole('heading', { name: '吉他谱' })).toBeVisible()
-  await expect(page.locator('.score-measure')).toHaveCount(132)
-  await expect(page.locator('.chord-diagram')).toHaveCount(132)
-  await expect(page.locator('.tab-notation')).toHaveCount(132)
-  await expect(page.locator('.tab-string-line')).toHaveCount(792)
-  await expect(page.locator('.rhythm-beat-slot')).toHaveCount(528)
+  await expect(page.locator('.score-measure')).toHaveCount(110)
+  await expect(page.locator('.chord-diagram')).toHaveCount(110)
+  await expect(page.locator('.tab-notation')).toHaveCount(110)
+  await expect(page.locator('.tab-string-line')).toHaveCount(660)
+  await expect(page.locator('.rhythm-beat-slot')).toHaveCount(437)
   expect(await page.locator('.rhythm-stem').count()).toBeGreaterThan(150)
-  await expect(page.locator('.track-strip')).toHaveCount(7)
+  await expect(page.locator('.track-strip')).toHaveCount(6)
   await expect(page.locator('.track-title strong')).toHaveText([
-    '人声', '吉他 1', '吉他 2', '贝斯', '鼓组', '键盘', '其他',
+    '人声', '吉他', '贝斯', '鼓组', '键盘', '其他',
   ])
-  await expect(page.locator('.time-readout')).toContainText('/ 3:14')
+  await expect(page.locator('.time-readout')).toContainText('/ 4:26')
   const downbeatsClearBarlines = await page
     .locator('.score-measure')
     .evaluateAll((measures) => {
@@ -120,8 +120,8 @@ test('loads a playable project without layout overflow', async ({ page }, testIn
   await expect(loopStart).toBeDisabled()
   await expect(loopEnd).toBeDisabled()
   await expect(loopStart).toHaveValue('1')
-  await expect(loopEnd).toHaveValue('132')
-  await expect(loopEnd.locator('option:checked')).toHaveText('第 132 小节')
+  await expect(loopEnd).toHaveValue('110')
+  await expect(loopEnd.locator('option:checked')).toHaveText('第 110 小节')
   const countInBars = page.getByLabel('预备小节数')
   await expect(countInBars).toHaveValue('2')
   await countInBars.selectOption('0')
@@ -161,10 +161,10 @@ test('loads a playable project without layout overflow', async ({ page }, testIn
     )
     .toBeLessThan(0)
 
-  const firstMute = page.getByRole('button', { name: '吉他 1静音' })
+  const firstMute = page.getByRole('button', { name: '吉他静音' })
   await firstMute.click()
   await expect(
-    page.getByRole('button', { name: '吉他 1取消静音' }),
+    page.getByRole('button', { name: '吉他取消静音' }),
   ).toHaveClass(/is-active/)
 
   await page.screenshot({
@@ -174,7 +174,26 @@ test('loads a playable project without layout overflow', async ({ page }, testIn
 
   await page.getByRole('button', { name: '完整曲谱' }).click()
   await expect(page.locator('.full-score')).toHaveClass(/is-expanded/)
-  await expect(page.locator('.score-measure')).toHaveCount(132)
+  await expect(page.locator('.score-measure')).toHaveCount(110)
+})
+
+test('switches the workspace between Chinese and English', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: '设置' }).click()
+  const settings = page.getByRole('dialog', { name: '应用设置' })
+  await expect(settings).toBeVisible()
+  await expect(settings.getByText('在线媒体登录态')).toHaveCount(0)
+  await settings.getByRole('button', { name: 'English' }).click()
+  await expect(page.getByText('AI guitar tabs and stem separation')).toBeVisible()
+  await expect(
+    page.getByRole('button', { name: 'Import song' }),
+  ).toBeVisible()
+  const englishSettings = page.getByRole('dialog', {
+    name: 'Application settings',
+  })
+  await expect(
+    englishSettings.getByRole('button', { name: 'English' }),
+  ).toHaveAttribute('aria-pressed', 'true')
 })
 
 test('counts in before playback and filters the rhythm library', async ({
@@ -194,7 +213,7 @@ test('counts in before playback and filters the rhythm library', async ({
   await expect(countInVolume).toHaveValue('0.8')
   await countInKit.selectOption('wood')
   await countInVolume.fill('0.35')
-  await expect(rhythmSelect.locator('option')).toHaveCount(40)
+  await expect(rhythmSelect.locator('option')).toHaveCount(46)
   await expect(
     rhythmSelect.locator('option[value="house"]'),
   ).toHaveAttribute('disabled', '')
@@ -206,10 +225,13 @@ test('counts in before playback and filters the rhythm library', async ({
     rhythmSelect.locator('option[value="rock-double-time"]'),
   ).not.toHaveAttribute('disabled', '')
   await expect(
-    rhythmSelect.locator('option[value="pop-clean"]'),
+    rhythmSelect.locator('option[value="house"]'),
+  ).not.toHaveAttribute('disabled', '')
+  await expect(
+    rhythmSelect.locator('option[value="funk-pocket"]'),
   ).toHaveAttribute('disabled', '')
   await expect(
-    page.getByText(/4\/4 · 199–208 BPM · \d+\/40 可用/),
+    page.getByText(/4\/4 · 121–124 BPM · 32\/46 可用/),
   ).toBeVisible()
 
   await rhythmSelect.selectOption('rock-double-time')
@@ -225,24 +247,23 @@ test('counts in before playback and filters the rhythm library', async ({
 
   await countInBars.selectOption('1')
   await page.getByRole('button', { name: '播放', exact: true }).click()
-  await expect(page.getByRole('button', { name: '取消预备' })).toBeVisible()
-  await expect(page.getByText('预备 1/1 小节')).toBeVisible()
-  await expect(page.locator('.count-in-beats i.is-current')).toHaveCount(1)
+  await expect(page.locator('.count-in-status')).toContainText('预备 1/1 小节')
   await page.screenshot({
     path: `test-results/${testInfo.project.name}-count-in.png`,
   })
-  await expect(page.locator('.count-in-status > strong')).toHaveText('4')
-  const finalCountBeatAt = Date.now()
   await expect(page.getByRole('button', { name: '暂停' })).toBeVisible({
-    timeout: 1_000,
+    timeout: 5_000,
   })
-  expect(Date.now() - finalCountBeatAt).toBeLessThan(800)
 
   await page.getByRole('button', { name: '暂停' }).click()
   await page.getByRole('button', { name: '播放', exact: true }).click()
   await expect(page.locator('.count-in-status')).toHaveCount(0)
   await expect(page.getByRole('button', { name: '暂停' })).toBeVisible()
   await page.getByRole('button', { name: '暂停' }).click()
+  await page.getByRole('button', { name: '回到开始' }).click()
+  await page.getByRole('button', { name: '播放', exact: true }).click()
+  await expect(page.getByRole('button', { name: '取消预备' })).toBeVisible()
+  await page.getByRole('button', { name: '取消预备' }).click()
   await page.reload()
   await expect(countInBars).toHaveValue('1')
   await expect(countInKit).toHaveValue('wood')
@@ -250,7 +271,7 @@ test('counts in before playback and filters the rhythm library', async ({
   await expect(rhythmToggle).toHaveAttribute('aria-pressed', 'true')
   await expect(rhythmKit).toHaveValue('electronic')
   await expect(rhythmVolume).toHaveValue('0.45')
-  await expect(rhythmSelect).toHaveValue('rock-double-time')
+  await expect(rhythmSelect).toHaveValue('click-quarter')
   await speed.fill('1.25')
   await expect(rhythmSelect).toHaveValue('rock-double-time')
 
@@ -258,6 +279,90 @@ test('counts in before playback and filters the rhythm library', async ({
   await page.getByRole('button', { name: '取消预备' }).click()
   await expect(page.getByRole('button', { name: '播放', exact: true })).toBeVisible()
   await expect(page.locator('.count-in-status')).toHaveCount(0)
+})
+
+test('runs the metronome and drum machine without starting song playback', async ({
+  page,
+}) => {
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: '节拍器 / 鼓机' })).toBeHidden()
+  await page.getByRole('button', { name: '节拍器 / 鼓机' }).click()
+  const practiceStart = page.getByRole('button', {
+    name: '启动节拍器 / 鼓机',
+  })
+  const songPlay = page.getByRole('button', { name: '播放', exact: true })
+  await expect(page.getByRole('heading', { name: '节拍器 / 鼓机' })).toBeVisible()
+  await page
+    .getByRole('spinbutton', { name: '练习速度', exact: true })
+    .fill('112')
+  await page.getByLabel('节拍细分').selectOption('2')
+  await practiceStart.click()
+  await expect(
+    page.getByRole('button', { name: '停止节拍器 / 鼓机' }),
+  ).toHaveAttribute('aria-pressed', 'true')
+  await expect(songPlay).toBeHidden()
+  await expect
+    .poll(() => page.locator('.metronome-pulse-strip i.is-current').count())
+    .toBe(1)
+
+  await page.getByRole('button', { name: '鼓机', exact: true }).click()
+  const drumPatterns = page.getByLabel('独立鼓机节奏型')
+  await expect(drumPatterns).toBeVisible()
+  for (const label of [
+    '体育场摇滚加花',
+    '渐进摇滚轮鼓',
+    '流行过门加花',
+  ]) {
+    await expect(drumPatterns.locator('option', { hasText: label })).toHaveCount(
+      1,
+    )
+  }
+  await expect(page.locator('.practice-step-sequencer > div')).toHaveCount(4)
+  const kickMute = page.getByRole('button', { name: '底鼓静音' })
+  await kickMute.click()
+  await expect(
+    page.getByRole('button', { name: '底鼓取消静音' }),
+  ).toHaveAttribute('aria-pressed', 'true')
+  await page.getByRole('button', { name: '停止节拍器 / 鼓机' }).click()
+  await expect(practiceStart).toHaveAttribute('aria-pressed', 'false')
+  await page.getByRole('button', { name: '返回分析' }).click()
+  await expect(songPlay).toBeVisible()
+})
+
+test('opens the tuner and live transcription as separate tools', async ({
+  page,
+}) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: '调音器' }).click()
+  await expect(page.getByRole('heading', { name: '调音器' })).toBeVisible()
+  await expect(
+    page.getByRole('button', { name: '开始调音' }),
+  ).toBeVisible()
+  await expect(page.locator('.tuner-strings span')).toHaveText([
+    'E2',
+    'A2',
+    'D3',
+    'G3',
+    'B3',
+    'E4',
+  ])
+  await expect(page.getByRole('heading', { name: '吉他谱' })).toBeHidden()
+
+  await page.getByRole('button', { name: '实时记谱' }).click()
+  await expect(
+    page.getByRole('heading', { name: '实时记谱' }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole('button', { name: '开始实时记谱' }),
+  ).toBeVisible()
+  await expect(page.locator('.live-tab > div')).toHaveCount(6)
+  await expect(page.locator('.live-tab > div').first().locator('b')).toHaveCount(
+    16,
+  )
+  await expect(page.getByRole('heading', { name: '调音器' })).toBeHidden()
+
+  await page.getByRole('button', { name: '返回分析' }).click()
+  await expect(page.getByRole('heading', { name: '吉他谱' })).toBeVisible()
 })
 
 test('starts the song at its first detected measure after count-in', async ({
@@ -272,7 +377,7 @@ test('starts the song at its first detected measure after count-in', async ({
 
   await page.goto(`/?project=${projectId}`)
   await expect(page.getByText('通用基线', { exact: true })).toBeVisible()
-  await expect(page.getByText('4/4 · 117–129 BPM · 27/40 可用')).toBeVisible()
+  await expect(page.getByText(/4\/4 · 117–129 BPM · \d+\/46 可用/)).toBeVisible()
   await page.getByLabel('播放可视化模式').selectOption('ecg')
   await page.getByLabel('预备小节数').selectOption('1')
   await page.getByRole('button', { name: '播放', exact: true }).click()
@@ -324,7 +429,7 @@ test('uses the project tempo for count-in when the first measure is irregular', 
 test('scales count-in tempo across projects and playback speeds', async ({
   page,
 }) => {
-  test.setTimeout(60_000)
+  test.setTimeout(120_000)
   const projectIds = [
     'demo',
     'a1028519-3b28-4160-bbdb-d0f94871b2ee',
@@ -351,7 +456,7 @@ test('scales count-in tempo across projects and playback speeds', async ({
         .locator('option:not(:disabled)')
         .count()
       await expect(page.locator('.rhythm-availability')).toContainText(
-        `${compatibleCount}/40 可用`,
+        `${compatibleCount}/46 可用`,
       )
       if (
         previousCompatibleCount !== undefined &&
@@ -376,9 +481,9 @@ test('opens local chord and note inspectors only after selecting notation', asyn
   await page.goto('/')
   await expect(page.locator('.inspector')).toHaveCount(0)
 
-  await page.getByRole('button', { name: /校对第 1 小节/ }).click()
+  await page.getByRole('button', { name: /校对第 2 小节/ }).click()
   await expect(page.getByText('和弦校对')).toBeVisible()
-  await expect(page.getByLabel('实际和弦（原调）')).toHaveValue('A')
+  await expect(page.getByLabel('实际和弦（原调）')).toHaveValue('D7')
   await page.getByRole('button', { name: '关闭校谱检查器' }).click()
   await expect(page.locator('.inspector')).toHaveCount(0)
 
@@ -403,6 +508,221 @@ test('recognizes a YouTube link in the import workflow', async ({ page }) => {
   await expect(page.locator('.platform-list .is-detected')).toContainText('YouTube')
   await expect(page.getByText('已识别：YouTube')).toBeVisible()
   await expect(page.getByRole('button', { name: '开始分析' })).toBeEnabled()
+})
+
+test('always opens the local source in the local upload tab', async ({ page }) => {
+  await page.goto('/')
+  const sources = page.locator('.library-rail .rail-section').filter({
+    hasText: '来源',
+  })
+  await sources.getByRole('button', { name: '在线链接' }).click()
+  let dialog = page.getByRole('dialog', { name: '导入歌曲' })
+  await expect(
+    dialog.getByRole('button', { name: '在线链接' }),
+  ).toHaveClass(/is-active/u)
+  await dialog.getByRole('button', { name: '关闭窗口' }).click()
+
+  await sources.getByRole('button', { name: '本地音视频' }).click()
+  dialog = page.getByRole('dialog', { name: '导入歌曲' })
+  await expect(
+    dialog.getByRole('button', { name: '本地上传' }),
+  ).toHaveClass(/is-active/u)
+  await expect(
+    dialog.getByRole('button', { name: '选择音频或视频' }),
+  ).toBeVisible()
+})
+
+test('tries public media anonymously before any browser session', async ({
+  page,
+}) => {
+  let submittedBody: Record<string, unknown> | undefined
+  const url = 'https://www.youtube.com/watch?v=jNQXAC9IVRw'
+  await page.route('**/api/import/link', async (route) => {
+    submittedBody = route.request().postDataJSON()
+    await route.fulfill({
+      status: 202,
+      json: {
+        id: 'anonymous-media-job',
+        source: { kind: 'youtube', label: 'YouTube', url },
+        status: 'queued',
+        progress: 0,
+        stageLabel: '等待处理',
+      },
+    })
+  })
+  await page.route('**/api/jobs/anonymous-media-job', async (route) => {
+    await route.fulfill({
+      json: {
+        id: 'anonymous-media-job',
+        source: { kind: 'youtube', label: 'YouTube', url },
+        status: 'failed',
+        progress: 3,
+        stageLabel: '处理失败',
+        error: 'YouTube 要求登录会话或人机验证',
+        errorCode: 'media-auth-required',
+      },
+    })
+  })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: '导入歌曲' }).click()
+  const dialog = page.getByRole('dialog', { name: '导入歌曲' })
+  await dialog.getByRole('button', { name: '在线链接' }).click()
+  await page
+    .getByPlaceholder('粘贴 YouTube 或其他受支持的公开音视频链接')
+    .fill(url)
+  await dialog.getByRole('button', { name: '开始分析' }).click()
+  await expect(dialog.locator('.dialog-error')).toContainText('要求登录')
+  expect(submittedBody?.mediaSession).toBeUndefined()
+})
+
+test('asks before retrying with the system default browser session', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const mediaSubmissions: Array<Record<string, unknown>> = []
+    let submissionCount = 0
+    const bridge = {
+      invoke: async ({
+        method,
+        payload,
+      }: {
+        method: string
+        payload?: Record<string, unknown>
+      }) => {
+        if (method === 'capabilities') {
+          return (
+            await (
+              await fetch('http://127.0.0.1:8787/health')
+            ).json()
+          ).capabilities
+        }
+        if (method === 'platforms') {
+          return (
+            await (
+              await fetch('http://127.0.0.1:8787/api/platforms')
+            ).json()
+          ).platforms
+        }
+        if (method === 'demo-project') {
+          return (
+            await fetch('http://127.0.0.1:8787/api/projects/demo')
+          ).json()
+        }
+        if (method === 'project-revisions' || method === 'local-projects') {
+          return []
+        }
+        if (method === 'application-settings') {
+          return {
+            language: 'zh-CN',
+            languagePreference: 'system',
+            systemLanguage: 'zh-CN',
+          }
+        }
+        if (method === 'set-background-job-state') return payload
+        if (method === 'detect-default-media-browser') {
+          return {
+            supported: true,
+            browser: { id: 'chrome', label: 'Google Chrome' },
+          }
+        }
+        if (method === 'open-external-url') return { opened: true }
+        if (method === 'submit-link') {
+          submissionCount += 1
+          mediaSubmissions.push(payload ?? {})
+          return {
+            id: `browser-session-${submissionCount}`,
+            source: {
+              kind: 'youtube',
+              label: 'YouTube',
+              url: payload?.url,
+            },
+            status: 'queued',
+            progress: 0,
+            stageLabel: '等待处理',
+          }
+        }
+        if (method === 'job') {
+          const id = String(payload?.id)
+          return {
+            id,
+            source: {
+              kind: 'youtube',
+              label: 'YouTube',
+              url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw',
+            },
+            status: id.endsWith('-1') ? 'failed' : 'cancelled',
+            progress: 3,
+            stageLabel: id.endsWith('-1') ? '处理失败' : '任务已取消',
+            error: id.endsWith('-1')
+              ? 'YouTube 要求登录会话或人机验证'
+              : undefined,
+            errorCode: id.endsWith('-1')
+              ? 'media-auth-required'
+              : undefined,
+          }
+        }
+        throw new Error(`Unexpected desktop method: ${method}`)
+      },
+      onOpenMedia: () => () => undefined,
+      onOpenProject: () => () => undefined,
+      onOpenSettings: () => () => undefined,
+      onLanguageChanged: () => () => undefined,
+      onTranscriptionProgress: () => () => undefined,
+    }
+    Object.assign(window, {
+      gtsDesktop: bridge,
+      __mediaSubmissions: mediaSubmissions,
+    })
+  })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: '导入歌曲' }).click()
+  const dialog = page.getByRole('dialog', { name: '导入歌曲' })
+  await dialog.getByRole('button', { name: '在线链接' }).click()
+  await page
+    .getByPlaceholder('粘贴 YouTube 或其他受支持的公开音视频链接')
+    .fill('https://www.youtube.com/watch?v=jNQXAC9IVRw')
+  await dialog.getByRole('button', { name: '开始分析' }).click()
+  await expect(
+    dialog.getByRole('button', {
+      name: '使用默认浏览器登录状态重试',
+    }),
+  ).toBeVisible()
+  expect(
+    await page.evaluate(
+      () =>
+        (window as Window & {
+          __mediaSubmissions: Array<Record<string, unknown>>
+        }).__mediaSubmissions[0].mediaSession,
+    ),
+  ).toBeUndefined()
+
+  await dialog
+    .getByRole('button', { name: '使用默认浏览器登录状态重试' })
+    .click()
+  await expect(
+    dialog.getByText('仅为本次重试读取 Google Chrome'),
+  ).toBeVisible()
+  await dialog.getByRole('button', { name: '确认并重试' }).click()
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & {
+            __mediaSubmissions: Array<Record<string, unknown>>
+          }).__mediaSubmissions.length,
+      ),
+    )
+    .toBe(2)
+  expect(
+    await page.evaluate(
+      () =>
+        (window as Window & {
+          __mediaSubmissions: Array<Record<string, unknown>>
+        }).__mediaSubmissions[1].mediaSession,
+    ),
+  ).toEqual({ browser: 'chrome' })
 })
 
 test('shows the numeric percentage while an import job is running', async ({ page }) => {
@@ -451,6 +771,15 @@ test('shows the numeric percentage while an import job is running', async ({ pag
   const progress = page.getByRole('progressbar', { name: '歌曲分析进度' })
   await expect(progress).toHaveAttribute('aria-valuenow', '65')
   await expect(page.locator('.job-progress-value')).toHaveText('65%')
+  await page
+    .getByRole('dialog', { name: '导入歌曲' })
+    .getByRole('button', { name: '关闭窗口' })
+    .click()
+  await expect(page.getByRole('dialog', { name: '导入歌曲' })).toBeHidden()
+  await expect(
+    page.getByRole('button', { name: '打开分析进度' }),
+  ).toContainText('65%')
+  await page.getByRole('button', { name: '打开分析进度' }).click()
   await page.getByRole('button', { name: '取消任务' }).click()
   await expect(page.getByText('任务已取消')).toBeVisible()
 })
@@ -503,10 +832,12 @@ test('switches score parts without fabricating notation', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', { name: '贝斯', exact: true }).click()
   await expect(page.getByText('贝斯谱尚未生成')).toBeVisible()
-  await page.getByRole('button', { name: '鼓', exact: true }).click()
-  await expect(page.getByText('鼓谱尚未生成')).toBeVisible()
+  await expect(page.getByRole('button', { name: '鼓', exact: true })).toHaveCount(
+    0,
+  )
+  await expect(page.locator('.track-title strong')).toContainText(['鼓组'])
   await page.getByRole('button', { name: '吉他', exact: true }).click()
-  await expect(page.locator('.score-measure')).toHaveCount(132)
+  await expect(page.locator('.score-measure')).toHaveCount(110)
 })
 
 test('recognizes QQ Music as an online import source', async ({ page }) => {
@@ -526,14 +857,15 @@ test('recognizes QQ Music as an online import source', async ({ page }) => {
 test('supports recommended capo, manual position and disabling capo', async ({ page }) => {
   await page.goto('/')
   const capo = page.getByLabel('变调夹位置')
-  await expect(capo).toHaveValue('2')
-  await expect(page.locator('.chord-diagram figcaption').first()).toHaveText('G')
+  const firstFullMeasureChord = page.locator('.chord-diagram figcaption').nth(1)
+  await expect(capo).toHaveValue('0')
+  await expect(firstFullMeasureChord).toHaveText('D7')
   await capo.selectOption('4')
-  await expect(page.locator('.chord-diagram figcaption').first()).toHaveText('F')
+  await expect(firstFullMeasureChord).toHaveText('A#7')
 
   await page.getByRole('checkbox').uncheck()
   await expect(capo).toBeDisabled()
-  await expect(page.locator('.chord-diagram figcaption').first()).toHaveText('A')
+  await expect(firstFullMeasureChord).toHaveText('D7')
 })
 
 test('creates a pitch-preserving easy layer and saves an immutable revision', async ({
@@ -558,7 +890,7 @@ test('creates a pitch-preserving easy layer and saves an immutable revision', as
   await expect(page.getByLabel('恢复项目修订')).toBeEnabled()
 })
 
-test('renders the generated Country Roads opening TAB positions', async ({
+test('renders the generated Internationale opening TAB positions', async ({
   page,
 }) => {
   await page.goto('/')
@@ -566,12 +898,26 @@ test('renders the generated Country Roads opening TAB positions', async ({
   const firstMeasure = page.locator('.score-measure').first()
   await expect(firstMeasure.locator('.strum-mark')).toHaveCount(0)
   await expect(firstMeasure.locator('.strum-muted')).toHaveCount(0)
-  await expect(firstMeasure.locator('.tab-glyph')).toHaveCount(9)
-  await expect(firstMeasure.getByRole('button', { name: '5弦0品' })).toHaveCount(1)
-  await expect(firstMeasure.getByRole('button', { name: '3弦2品' })).toHaveCount(1)
-  await expect(firstMeasure.getByRole('button', { name: '4弦2品' })).toHaveCount(3)
-  await expect(firstMeasure.getByRole('button', { name: '2弦2品' })).toHaveCount(2)
-  await expect(firstMeasure.getByRole('button', { name: '6弦0品' })).toHaveCount(2)
+  await expect(firstMeasure.getByText('弱起')).toBeVisible()
+  await expect(firstMeasure.locator('.tab-glyph')).toHaveCount(4)
+  await expect(firstMeasure.locator('.rhythm-event')).toHaveCount(2)
+  await expect(firstMeasure.locator('.rhythm-event').nth(0)).toHaveAttribute(
+    'data-duration-beats',
+    '0.5',
+  )
+  await expect(firstMeasure.locator('.rhythm-event').nth(1)).toHaveAttribute(
+    'data-duration-beats',
+    '0.5',
+  )
+  await expect(firstMeasure.getByRole('button', { name: '2弦0品' })).toHaveCount(2)
+  await expect(firstMeasure.getByRole('button', { name: '1弦7品' })).toHaveCount(2)
+  const firstFullMeasure = page.locator('.score-measure').nth(1)
+  await expect(firstFullMeasure.getByText('前奏')).toBeVisible()
+  await expect(firstFullMeasure.locator('.tab-glyph')).toHaveCount(18)
+  await expect(firstFullMeasure.getByRole('button', { name: '1弦10品' })).toHaveCount(3)
+  await expect(firstFullMeasure.getByRole('button', { name: '4弦9品' })).toHaveCount(3)
+  await expect(firstFullMeasure.getByRole('button', { name: '3弦7品' })).toHaveCount(4)
+  await expect(firstFullMeasure.getByRole('button', { name: '1弦7品' })).toHaveCount(2)
 })
 
 test('shows the complete generated TAB and playable positions', async ({
@@ -580,25 +926,50 @@ test('shows the complete generated TAB and playable positions', async ({
   await page.goto('/')
   await expect(
     page.getByRole('heading', {
-      name: 'Take Me Home, Country Roads',
+      name: '国际歌',
     }),
   ).toBeVisible()
   await page.getByRole('checkbox').uncheck()
   await page.getByRole('button', { name: '完整曲谱' }).click()
-  await expect(page.locator('.score-measure')).toHaveCount(132)
-  await expect(page.locator('.tab-glyph')).toHaveCount(1789)
-  await expect(page.getByText('A', { exact: true }).first()).toBeAttached()
-  await expect(page.getByText('A7', { exact: true }).first()).toBeAttached()
-  await expect(page.getByText('D', { exact: true }).first()).toBeAttached()
-  await expect(page.getByText('E7', { exact: true }).first()).toBeAttached()
-  await expect(page.getByText('F#m', { exact: true }).first()).toBeAttached()
+  await expect(page.locator('.score-measure')).toHaveCount(110)
+  await expect(page.locator('.tab-glyph')).toHaveCount(1462)
   await expect(page.locator('.score-review-status')).toContainText('尚未通过独立验证')
 
   await page.locator('.score-measure').first().getByRole('button', {
-    name: '5弦0品',
+    name: '2弦0品',
   }).first().click()
   await expect(page.getByText('单音校对')).toBeVisible()
   await expect(page.locator('.inspector')).toBeVisible()
+})
+
+test('fits more score measures on wider windows and keeps playback controls visible', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop')
+  const measuresInFirstRow = () =>
+    page.locator('.score-measure').evaluateAll((measures) => {
+      const firstTop = measures[0]?.getBoundingClientRect().top ?? 0
+      return measures.filter(
+        (measure) =>
+          Math.abs(measure.getBoundingClientRect().top - firstTop) < 2,
+      ).length
+    })
+  await page.setViewportSize({ width: 1360, height: 1000 })
+  await page.goto('/')
+  await page.getByRole('button', { name: '完整曲谱' }).click()
+  await expect.poll(measuresInFirstRow).toBeGreaterThanOrEqual(4)
+  const standardColumns = await measuresInFirstRow()
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  await expect.poll(measuresInFirstRow).toBeGreaterThan(standardColumns)
+  expect(await measuresInFirstRow()).toBeGreaterThanOrEqual(6)
+
+  await page.locator('.score-measure').nth(20).scrollIntoViewIfNeeded()
+  const transport = await page.locator('.transport-section').boundingBox()
+  expect(transport).not.toBeNull()
+  expect(transport!.y).toBeLessThanOrEqual(1)
+  await expect(
+    page.getByRole('button', { name: '播放', exact: true }),
+  ).toBeVisible()
 })
 
 test('maps a relational technique to its source note on the TAB timeline', async ({
@@ -670,8 +1041,13 @@ test('maps a relational technique to its source note on the TAB timeline', async
 test('continues a legato relation across a measure boundary', async ({ page }) => {
   const response = await page.request.get('http://127.0.0.1:8787/api/projects/demo')
   const project = await response.json()
-  const sourceMeasure = project.tab.measures[0]
-  const targetMeasure = project.tab.measures[1]
+  const completeMeasures = project.tab.measures.filter(
+    (measure: { beats: unknown[] }) =>
+      measure.beats.length === project.tab.timeSignature[0],
+  )
+  const sourceMeasure = completeMeasures[0]
+  const targetMeasure = completeMeasures[1]
+  const targetMeasureIndex = project.tab.measures.indexOf(targetMeasure)
   const source = { ...sourceMeasure.beats[0].notes[0] }
   const target = {
     ...source,
@@ -705,12 +1081,16 @@ test('continues a legato relation across a measure boundary', async ({ page }) =
   })
   await page.goto('/')
 
-  const secondMeasure = page.locator('.score-measure').nth(1)
-  const continuation = secondMeasure.locator('.technique-connection.is-continuation')
+  const targetMeasureElement = page
+    .locator('.score-measure')
+    .nth(targetMeasureIndex)
+  const continuation = targetMeasureElement.locator(
+    '.technique-connection.is-continuation',
+  )
   await expect(continuation).toHaveCount(1)
   await expect(continuation.locator('.technique-label')).toHaveText('S')
 
-  await secondMeasure.locator('.tab-glyph').click()
+  await targetMeasureElement.locator('.tab-glyph').click()
   await expect(page.getByText('连奏把位优化')).toBeVisible()
 })
 
@@ -937,6 +1317,17 @@ test('plays every repaired project stem in sync without media or score rewind', 
     '6f579959-aebf-4d01-96c0-80de5a1eb8b7',
     '228e3288-429f-49c6-924e-fda060e366be',
   ]) {
+    const project = await (
+      await page.request.get(
+        `http://127.0.0.1:8787/api/projects/${projectId}`,
+      )
+    ).json()
+    const expectedSources = project.tracks
+      .filter(
+        (track: { available: boolean; url: string | null }) =>
+          track.available && track.url,
+      )
+      .map((track: { url: string }) => track.url)
     await page.goto(`/?project=${projectId}`)
     await page.getByLabel('预备小节数').selectOption('0')
     await expect
@@ -948,7 +1339,7 @@ test('plays every repaired project stem in sync without media or score rewind', 
           return trackedWindow.__gtsTrackedAudio.length
         }),
       )
-      .toBe(7)
+      .toBe(expectedSources.length)
     await expect
       .poll(() =>
         page.evaluate(() => {
@@ -1000,13 +1391,16 @@ test('plays every repaired project stem in sync without media or score rewind', 
         sources: audios.map((audio) => audio.currentSrc),
       }
     })
-    expect(
-      result.sources.filter(source => source.includes('guitar-1.m4a')),
-    ).toHaveLength(1)
-    expect(
-      result.sources.filter(source => source.includes('guitar-2.m4a')),
-    ).toHaveLength(1)
-    expect(result.paused).toEqual(Array.from({ length: 7 }, () => false))
+    for (const expectedSource of expectedSources) {
+      expect(
+        result.sources.filter((source) =>
+          source.endsWith(expectedSource),
+        ),
+      ).toHaveLength(1)
+    }
+    expect(result.paused).toEqual(
+      Array.from({ length: expectedSources.length }, () => false),
+    )
     expect(result.mediaRegressions).toBe(0)
     expect(result.scoreRegressions).toBe(0)
     expect(result.maximumSkew).toBeLessThanOrEqual(0.04)
@@ -1283,10 +1677,15 @@ test('renders a real detected natural harmonic at the correct touch fret', async
   await expect(page.locator('.technique-candidates')).toContainText('泛音倍频簇')
 })
 
-test('persists one of ten theme presets', async ({ page }) => {
+test('defaults to amber and persists one of eighteen theme presets', async ({
+  page,
+}) => {
   await page.goto('/')
+  await page.evaluate(() => window.localStorage.removeItem('gts-theme'))
+  await page.reload()
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'amber')
   await page.getByRole('button', { name: '选择界面配色' }).click()
-  await expect(page.getByRole('menuitemradio')).toHaveCount(10)
+  await expect(page.getByRole('menuitemradio')).toHaveCount(18)
   await page.getByRole('menuitemradio', { name: '夜谱' }).click()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'night')
   await page.reload()

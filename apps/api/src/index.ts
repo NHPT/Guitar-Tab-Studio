@@ -36,6 +36,7 @@ import {
 import { PipelineInferenceProvider } from './inference.js'
 import { getCapabilities, platforms, sourceFromLink } from './pipeline.js'
 import { importScoreImages } from './score-import.js'
+import { unlinkIfExists } from './managed-files.js'
 import {
   approveReview,
   defaultReviewRoot,
@@ -72,6 +73,16 @@ const dataRoot = runtimeDataRoot()
 const uploadRoot = resolve(dataRoot, 'uploads')
 const trainingArtifactRoot = resolve(dataRoot, 'community', 'artifacts')
 const trainingArtifactIncomingRoot = resolve(trainingArtifactRoot, '.incoming')
+const mediaBrowserIds = [
+  'brave',
+  'chrome',
+  'chromium',
+  'edge',
+  'firefox',
+  'opera',
+  'safari',
+  'vivaldi',
+] as const
 mkdirSync(uploadRoot, { recursive: true })
 mkdirSync(trainingArtifactIncomingRoot, { recursive: true })
 
@@ -1044,6 +1055,26 @@ app.post('/api/import/link', (request, response) => {
 
   try {
     const source = sourceFromLink(url)
+    const requestedBrowser = request.body?.mediaSession?.browser
+    if (requestedBrowser !== undefined) {
+      if (process.env.GTS_DESKTOP_LOCAL !== '1') {
+        throw new Error('浏览器登录态仅可用于本机媒体获取')
+      }
+      if (
+        typeof requestedBrowser !== 'string' ||
+        !mediaBrowserIds.some((browser) => browser === requestedBrowser)
+      ) {
+        throw new Error('不支持该浏览器登录态')
+      }
+      Object.defineProperty(source, 'mediaSession', {
+        value: {
+          browser: requestedBrowser as (typeof mediaBrowserIds)[number],
+        },
+        enumerable: false,
+        configurable: false,
+        writable: false,
+      })
+    }
     const authorizedProcessing =
       request.body?.authorizedProcessingConsent === true &&
       request.body?.authorizationPolicyVersion === 2
@@ -1098,7 +1129,7 @@ app.post('/api/import/upload', upload.single('media'), (request, response) => {
       header.subarray(0, bytesRead),
     ) ?? 'unknown'
   if (requiresAuthorizedDecode && !authorizedProcessing) {
-    unlinkSync(request.file.path)
+    unlinkIfExists(request.file.path)
     response.status(409).json({
       error: '该文件需要确认版权与处理声明后才能临时解码',
       code: 'authorized_media_consent_required',
@@ -1107,7 +1138,7 @@ app.post('/api/import/upload', upload.single('media'), (request, response) => {
     return
   }
   if (validationError && !requiresAuthorizedDecode) {
-    unlinkSync(request.file.path)
+    unlinkIfExists(request.file.path)
     response.status(400).json({ error: validationError })
     return
   }
@@ -1117,7 +1148,7 @@ app.post('/api/import/upload', upload.single('media'), (request, response) => {
     })
   }
   if (!hasAnalysisCapacity(request.file.size)) {
-    unlinkSync(request.file.path)
+    unlinkIfExists(request.file.path)
     response.status(507).json({
       error: '可用磁盘空间不足，自动清理后仍无法安全完成分轨与转录',
     })

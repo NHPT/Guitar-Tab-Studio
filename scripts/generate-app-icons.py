@@ -73,7 +73,7 @@ def vertical_gradient(
 def render_icon(size: int, platform: str) -> Image.Image:
     scale = 4
     canvas_size = size * scale
-    margin_ratio = 0.09 if platform == "mac" else 0.12
+    margin_ratio = 0.09 if platform == "mac" else 0.04
     margin = round(canvas_size * margin_ratio)
     radius = round(canvas_size * (0.19 if platform == "mac" else 0.17))
 
@@ -100,7 +100,7 @@ def render_icon(size: int, platform: str) -> Image.Image:
     symbol = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
     symbol_draw = ImageDraw.Draw(symbol)
     ink = (24, 26, 32, 255)
-    ring_radius = canvas_size * (0.09 if size <= 48 else 0.115)
+    ring_radius = canvas_size * 0.115
     ring_center = (canvas_size * 0.5, canvas_size * 0.43)
     ring_box = (
         ring_center[0] - ring_radius,
@@ -108,23 +108,14 @@ def render_icon(size: int, platform: str) -> Image.Image:
         ring_center[0] + ring_radius,
         ring_center[1] + ring_radius,
     )
-    if size > 24:
-        symbol_draw.ellipse(
-            ring_box,
-            outline=ink,
-            width=max(scale, round(canvas_size * 0.025)),
-        )
+    symbol_draw.ellipse(
+        ring_box,
+        outline=ink,
+        width=max(scale, round(canvas_size * 0.025)),
+    )
 
-    string_positions = (
-        (0.29, 0.374, 0.458, 0.542, 0.626, 0.71)
-        if size <= 24
-        else (0.33, 0.398, 0.466, 0.534, 0.602, 0.67)
-    )
-    string_widths = (
-        (0.01,) * 6
-        if size <= 48
-        else (0.012, 0.011, 0.010, 0.009, 0.008, 0.007)
-    )
+    string_positions = (0.33, 0.398, 0.466, 0.534, 0.602, 0.67)
+    string_widths = (0.012, 0.011, 0.010, 0.009, 0.008, 0.007)
     for position, width in zip(string_positions, string_widths, strict=True):
         x = round(canvas_size * position)
         symbol_draw.line(
@@ -150,42 +141,7 @@ def render_icon(size: int, platform: str) -> Image.Image:
     symbol.putalpha(ImageChops.multiply(symbol.getchannel("A"), pick_mask))
     image.alpha_composite(symbol)
 
-    result = image.resize((size, size), Image.Resampling.LANCZOS)
-    if size <= 48:
-        crisp = ImageDraw.Draw(result)
-        positions = (0.27, 0.36, 0.44, 0.56, 0.64, 0.73)
-        width = 1 if size < 40 else 2
-        for position in positions:
-            x = round(size * position)
-            crisp.line(
-                (x, round(size * 0.25), x, round(size * 0.69)),
-                fill=ink,
-                width=width,
-            )
-        if size > 24:
-            radius = round(size * 0.09)
-            center = (round(size * 0.5), round(size * 0.43))
-            crisp.ellipse(
-                (
-                    center[0] - radius,
-                    center[1] - radius,
-                    center[0] + radius,
-                    center[1] + radius,
-                ),
-                outline=ink,
-                width=width,
-            )
-        crisp.line(
-            (
-                round(size * 0.3),
-                round(size * 0.62),
-                round(size * 0.7),
-                round(size * 0.62),
-            ),
-            fill=ink,
-            width=max(1, width + 1),
-        )
-    return result
+    return image.resize((size, size), Image.Resampling.LANCZOS)
 
 
 def build_ico() -> None:

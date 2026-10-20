@@ -7,20 +7,17 @@ import {
 } from '@gts/core'
 
 export const builtinDemoAudioFilename =
-  'take-me-home-country-roads.mp3'
+  'internationale.ogg'
 export const builtinDemoStemFilenames = {
-  vocals: 'take-me-home-country-roads-vocals.m4a',
-  guitar: 'take-me-home-country-roads-guitar.m4a',
-  bass: 'take-me-home-country-roads-bass.m4a',
-  drums: 'take-me-home-country-roads-drums.m4a',
-  piano: 'take-me-home-country-roads-piano.m4a',
-  other: 'take-me-home-country-roads-other.m4a',
+  vocals: 'internationale-vocals.m4a',
+  guitar: 'internationale-guitar.m4a',
+  bass: 'internationale-bass.m4a',
+  drums: 'internationale-drums.m4a',
+  piano: 'internationale-piano.m4a',
+  other: 'internationale-other.m4a',
 } as const
-export const builtinDemoGuitarPartFilenames = [
-  'take-me-home-country-roads-guitar-1.m4a',
-  'take-me-home-country-roads-guitar-2.m4a',
-] as const
-const ANALYSIS_FILENAME = 'take-me-home-country-roads-analysis.json'
+export const builtinDemoGuitarPartFilenames = [] as const
+const ANALYSIS_FILENAME = 'internationale-analysis.json'
 const moduleDirectory = dirname(fileURLToPath(import.meta.url))
 const assetDirectories = [
   resolve(moduleDirectory, '../assets'),

@@ -1,14 +1,19 @@
 import {
   migrateStudioProject,
   type AnalysisJob,
+  type AppLanguagePreference,
   type AuthorizedMediaConsent,
   type CapabilityState,
   type DesktopBridge,
+  type DesktopApplicationSettings,
+  type DesktopBackgroundJobState,
+  type DesktopDefaultMediaBrowser,
   type DesktopLocalFileSource,
   type DesktopRecentProject,
   type DesktopRuntimeStatus,
   type DesktopSelectedFile,
   type InstalledModelPackage,
+  type MediaBrowserSession,
   type PlatformDescriptor,
   type ProjectRevision,
   type ProjectRevisionKind,
@@ -31,6 +36,19 @@ declare global {
 }
 
 export interface DesktopStudioControls {
+  applicationSettings(): Promise<DesktopApplicationSettings>
+  setLanguage(
+    preference: AppLanguagePreference,
+  ): Promise<DesktopApplicationSettings>
+  detectDefaultMediaBrowser(): Promise<DesktopDefaultMediaBrowser>
+  openExternalUrl(url: string): Promise<{ opened: true }>
+  setBackgroundJobState(
+    state: DesktopBackgroundJobState,
+  ): Promise<DesktopBackgroundJobState>
+  onOpenSettings(listener: () => void): () => void
+  onLanguageChanged(
+    listener: (settings: DesktopApplicationSettings) => void,
+  ): () => void
   selectLocalFile(
     kind: 'media' | 'score',
     source?: DesktopLocalFileSource,
@@ -154,8 +172,9 @@ export class DesktopStudioApplication
   submitLink(
     url: string,
     authorizedMedia?: AuthorizedMediaConsent,
+    mediaSession?: MediaBrowserSession,
   ): Promise<AnalysisJob> {
-    return this.invoke('submit-link', { url, authorizedMedia })
+    return this.invoke('submit-link', { url, authorizedMedia, mediaSession })
   }
 
   async submitUpload(
@@ -224,6 +243,40 @@ export class DesktopStudioApplication
 
   runtimeStatus(projectId?: string): Promise<DesktopRuntimeStatus> {
     return this.invoke('runtime-status', { projectId })
+  }
+
+  applicationSettings(): Promise<DesktopApplicationSettings> {
+    return this.invoke('application-settings')
+  }
+
+  setLanguage(
+    preference: AppLanguagePreference,
+  ): Promise<DesktopApplicationSettings> {
+    return this.invoke('set-language', { preference })
+  }
+
+  detectDefaultMediaBrowser(): Promise<DesktopDefaultMediaBrowser> {
+    return this.invoke('detect-default-media-browser')
+  }
+
+  openExternalUrl(url: string): Promise<{ opened: true }> {
+    return this.invoke('open-external-url', { url })
+  }
+
+  setBackgroundJobState(
+    state: DesktopBackgroundJobState,
+  ): Promise<DesktopBackgroundJobState> {
+    return this.invoke('set-background-job-state', state)
+  }
+
+  onOpenSettings(listener: () => void): () => void {
+    return this.bridge.onOpenSettings(listener)
+  }
+
+  onLanguageChanged(
+    listener: (settings: DesktopApplicationSettings) => void,
+  ): () => void {
+    return this.bridge.onLanguageChanged(listener)
   }
 
   setRuntimeMode(

@@ -3,8 +3,10 @@ import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import test from 'node:test'
+import type { AnalysisJob } from '@gts/core'
 import {
   createStudioProject,
+  classifyMediaAcquisitionFailure,
   describeMediaAcquisitionFailure,
   describeWorkerFailure,
   detectPlatform,
@@ -15,6 +17,8 @@ import {
   sourceFromLink,
   tabFromWorker,
   transcriptionWorkerArguments,
+  workerSourceArguments,
+  workerProject,
 } from './pipeline.js'
 import type { WorkerAnalysis } from './pipeline.js'
 
@@ -176,6 +180,33 @@ test('normalizes the selected transcription provider into worker arguments', () 
   )
 })
 
+test('passes a browser session only to the requested URL worker task', () => {
+  const job: AnalysisJob = {
+    id: 'browser-session-job',
+    source: {
+      kind: 'bilibili',
+      label: '哔哩哔哩',
+      url: 'https://www.bilibili.com/video/BV1fixture',
+      mediaSession: { browser: 'edge' },
+    },
+    status: 'queued',
+    progress: 0,
+    stageLabel: '等待处理',
+    createdAt: '2026-10-20T00:00:00.000Z',
+    updatedAt: '2026-10-20T00:00:00.000Z',
+  }
+  assert.deepEqual(workerSourceArguments(job), [
+    '--url',
+    job.source.url,
+    '--cookies-from-browser',
+    'edge',
+  ])
+  assert.deepEqual(workerSourceArguments(job, '/tmp/input.wav'), [
+    '--input',
+    resolve('/tmp/input.wav'),
+  ])
+})
+
 test('turns worker tracebacks into copyable user-facing errors', () => {
   assert.equal(
     describeWorkerFailure(
@@ -215,7 +246,9 @@ test('extracts supported URLs from app share text', () => {
 
 test('reports the actual media acquisition failure category', () => {
   const youtube = detectPlatform('https://youtu.be/example')
+  const bilibili = detectPlatform('https://www.bilibili.com/video/BV1fixture')
   assert.ok(youtube)
+  assert.ok(bilibili)
   assert.match(
     describeMediaAcquisitionFailure(
       youtube,
@@ -231,6 +264,55 @@ test('reports the actual media acquisition failure category', () => {
     describeMediaAcquisitionFailure(youtube, 'ERROR: Unsupported URL'),
     /链接格式/u,
   )
+  assert.match(
+    describeMediaAcquisitionFailure(
+      bilibili,
+      'ERROR: Sign in or provide cookies to continue',
+    ),
+    /系统默认浏览器/u,
+  )
+  assert.equal(
+    classifyMediaAcquisitionFailure(
+      bilibili,
+      'ERROR: Sign in or provide cookies to continue',
+    ).errorCode,
+    'media-auth-required',
+  )
+  assert.match(
+    describeMediaAcquisitionFailure(
+      bilibili,
+      'ERROR: Failed to decrypt Chrome cookies using keyring',
+    ),
+    /无法读取或解密/u,
+  )
+  assert.equal(
+    classifyMediaAcquisitionFailure(
+      bilibili,
+      'ERROR: Failed to decrypt Chrome cookies using keyring',
+    ).errorCode,
+    'media-session-unavailable',
+  )
+  assert.match(
+    describeMediaAcquisitionFailure(
+      bilibili,
+      'ERROR: Unable to download webpage: SSL certificate failed',
+    ),
+    /网络请求失败/u,
+  )
+  assert.match(
+    describeMediaAcquisitionFailure(
+      bilibili,
+      'ERROR: Extractor failed to parse the page',
+    ),
+    /新版 yt-dlp/u,
+  )
+  assert.match(
+    describeMediaAcquisitionFailure(
+      bilibili,
+      'guitar-tab-worker failed (1): unexpected response code 412',
+    ),
+    /unexpected response code 412/u,
+  )
 })
 
 test('rejects unsupported or malformed URLs', () => {
@@ -239,41 +321,59 @@ test('rejects unsupported or malformed URLs', () => {
   assert.throws(() => sourceFromLink('https://example.com/song'))
 })
 
-test('demo project uses the requested Country Roads recording and generated TAB', () => {
+test('demo project keeps aggregate guitar audio aligned with its single generated TAB', () => {
   const project = createStudioProject({
-    kind: 'netease',
-    label: 'John Denver · Take Me Home, Country Roads',
-    url: 'https://music.163.com/#/song?id=1478037',
+    kind: 'upload',
+    label: '唐朝 · 国际歌',
+    filename: 'internationale.ogg',
   })
 
   assert.equal(project.schemaVersion, 2)
   assert.equal(project.guitarParts.length, 1)
   assert.equal(project.primaryGuitarPartId, project.guitarParts[0].id)
   assert.ok(project.tab.measures.length > 100)
-  assert.equal(project.tracks.length, 7)
+  assert.equal(project.tracks.length, 6)
   assert.ok(project.visualization)
-  assert.equal(project.title, 'Take Me Home, Country Roads')
-  assert.equal(project.artist, 'John Denver')
-  assert.equal(project.bpm, 161.5)
-  assert.equal(project.key, 'A major')
+  assert.equal(project.title, '国际歌')
+  assert.equal(project.artist, '唐朝')
+  assert.equal(project.bpm, 98.1)
+  assert.equal(project.key, 'G major')
   assert.equal(project.transcriptionModel?.version, '0.4')
+  assert.equal(
+    project.transcriptionModel?.positionOptimizer,
+    'sequence-optimizer-v3',
+  )
   assert.equal(
     project.techniqueModel?.name,
     'unreviewed-technique-candidates',
   )
-  assert.ok(Math.abs(project.duration - 194.14667) < 0.001)
+  assert.ok(Math.abs(project.duration - 266.73333) < 0.001)
   assert.equal(project.tab.capo, 0)
   assert.deepEqual(
     project.tab.measures.flatMap((measure) =>
       measure.section ? [[measure.number, measure.section]] : [],
     ),
     [
-      [1, '前奏'],
+      [1, '弱起'],
+      [2, '前奏'],
     ],
   )
-  assert.deepEqual(
-    [...new Set(project.tab.measures.map((measure) => measure.chord))].sort(),
-    ['A', 'A7', 'B7', 'C#m', 'D', 'D7', 'E', 'E7', 'F#7', 'F#m', 'N.C.'],
+  assert.equal(project.tab.measures[0].beats.length, 1)
+  assert.equal(project.tab.measures[0].start, 0.3317)
+  assert.equal(project.tab.measures[1].beats.length, 4)
+  assert.equal(project.tab.measures[1].start, 0.9433)
+  assert.equal(project.tab.tempoMap?.mode, 'steady')
+  assert.equal(project.tab.tempoMap?.points.length, 437)
+  const chordLabels = new Set(
+    project.tab.measures.map((measure) => measure.chord),
+  )
+  for (const expected of ['G', 'C', 'D', 'Em', 'N.C.']) {
+    assert.ok(chordLabels.has(expected), expected)
+  }
+  assert.ok(
+    [...chordLabels].every((chord) =>
+      /^(?:N\.C\.|[A-G](?:#|b)?(?:m|7)?)$/u.test(chord),
+    ),
   )
   assert.ok(
     project.tab.measures.flatMap((measure) =>
@@ -284,20 +384,22 @@ test('demo project uses the requested Country Roads recording and generated TAB'
     project.tracks
       .filter((track) => track.available)
       .map((track) => track.id),
-    ['vocals', 'guitar-1', 'guitar-2', 'bass', 'drums', 'piano', 'other'],
+    ['vocals', 'guitar', 'bass', 'drums', 'piano', 'other'],
   )
   assert.equal(
     project.tracks.find((track) => track.role === 'vocals')?.url,
-    '/media/builtin/take-me-home-country-roads-vocals.m4a',
+    '/media/builtin/internationale-vocals.m4a',
   )
   assert.equal(
     project.tracks.find((track) => track.role === 'vocals')?.available,
     true,
   )
   assert.equal(
-    project.tracks.find((track) => track.id === 'guitar-1')?.url,
-    '/media/builtin/take-me-home-country-roads-guitar-1.m4a',
+    project.tracks.find((track) => track.id === 'guitar')?.url,
+    '/media/builtin/internationale-guitar.m4a',
   )
+  assert.equal(project.tracks.some((track) => track.id === 'guitar-1'), false)
+  assert.equal(project.tracks.some((track) => track.id === 'guitar-2'), false)
   assert.ok(
     project.tab.measures.every((measure) =>
       measure.beats.every((beat) =>
@@ -374,6 +476,98 @@ test('builds independently namespaced TAB documents for guitar parts', () => {
 
   assert.equal(notes[0].id, 'guitar-2-1')
   assert.equal(tab.measures[0].chord, 'A')
+})
+
+test('exposes separate guitar tracks only when each track has its own TAB', () => {
+  const dataRoot = resolve(process.cwd(), 'data')
+  const analysis: WorkerAnalysis = {
+    version: 10,
+    bpm: 120,
+    stems: {
+      guitar: resolve(dataRoot, 'jobs/demo/guitar.m4a'),
+    },
+    stem_tracks: [
+      {
+        id: 'guitar-1',
+        name: 'Guitar 1',
+        role: 'guitar',
+        path: resolve(dataRoot, 'jobs/demo/guitar-1.m4a'),
+      },
+      {
+        id: 'guitar-2',
+        name: 'Guitar 2',
+        role: 'guitar',
+        path: resolve(dataRoot, 'jobs/demo/guitar-2.m4a'),
+      },
+    ],
+    notes: [],
+    chords: [],
+    warnings: [],
+    guitar_parts: [
+      {
+        id: 'lead',
+        track_id: 'guitar-1',
+        name: 'Lead guitar',
+        role: 'lead',
+        role_confidence: 0.9,
+        notes: [
+          {
+            start: 0,
+            end: 0.4,
+            pitch: 64,
+            velocity: 84,
+            string: 2,
+            fret: 5,
+            technique: 'pick',
+            confidence: 0.9,
+          },
+        ],
+        chords: [],
+      },
+      {
+        id: 'rhythm',
+        track_id: 'guitar-2',
+        name: 'Rhythm guitar',
+        role: 'rhythm',
+        role_confidence: 0.88,
+        notes: [
+          {
+            start: 0,
+            end: 0.5,
+            pitch: 45,
+            velocity: 78,
+            string: 5,
+            fret: 0,
+            technique: 'strum-down',
+            confidence: 0.86,
+          },
+        ],
+        chords: [{ start: 0, duration: 2, chord: 'A' }],
+      },
+    ],
+  }
+
+  const project = workerProject(
+    analysis,
+    {
+      kind: 'upload',
+      label: 'Two confirmed guitars',
+      filename: 'two-guitars.wav',
+    },
+    'job-two-guitars',
+  )
+
+  assert.deepEqual(
+    project.tracks
+      .filter((track) => track.role === 'guitar')
+      .map((track) => track.id),
+    ['guitar-1', 'guitar-2'],
+  )
+  assert.deepEqual(
+    project.guitarParts.map((part) => part.trackId),
+    ['guitar-1', 'guitar-2'],
+  )
+  assert.notEqual(project.guitarParts[0].tab, project.guitarParts[1].tab)
 })
 
 test('maps worker technique candidates and only valid note relations', () => {
@@ -483,8 +677,63 @@ test('uses the detected beat grid instead of treating recording lead-in as a res
   )
   assert.equal(tab.measures[0].beats[0].notes.length, 1)
   assert.equal(tab.measures[0].beats[3].notes.length, 1)
+  assert.equal(tab.measures[0].beats[0].notes[0].at, 0.61)
   assert.equal(tab.measures[0].beats[0].notes[0].notationAt, 0.6)
+  assert.equal(tab.measures[0].beats[0].notes[0].notationBeat, 0)
   assert.equal(tab.measures[0].beats[3].notes[0].notationAt, 2.1)
+  assert.equal(tab.measures[0].beats[3].notes[0].notationBeat, 3)
+  assert.equal(tab.tempoMap?.points[0].at, 0.6)
+  assert.equal(tab.tempoMap?.points[1].beat, 1)
+})
+
+test('keeps a reconstructed pickup separate from complete measures', () => {
+  const analysis: WorkerAnalysis = {
+    version: 10,
+    bpm: 100,
+    beats: [0.3, 0.9, 1.5, 2.1, 2.7, 3.3, 3.9],
+    pickup_beats: 1,
+    metadata: { duration: 3.8 },
+    stems: {},
+    notes: [
+      {
+        start: 0.31,
+        end: 0.6,
+        pitch: 64,
+        velocity: 80,
+        string: 1,
+        fret: 0,
+        technique: 'pick',
+        confidence: 0.9,
+      },
+      {
+        start: 0.92,
+        end: 1.3,
+        pitch: 67,
+        velocity: 82,
+        string: 1,
+        fret: 3,
+        technique: 'pick',
+        confidence: 0.9,
+      },
+    ],
+    chords: [
+      { start: 0.3, duration: 0.6, chord: 'C' },
+      { start: 0.9, duration: 2.4, chord: 'G' },
+    ],
+    warnings: [],
+  }
+
+  const tab = tabFromWorker(analysis)
+
+  assert.equal(tab.measures[0].section, '弱起')
+  assert.equal(tab.measures[0].start, 0.3)
+  assert.ok(Math.abs(tab.measures[0].duration - 0.6) < 1e-9)
+  assert.equal(tab.measures[0].beats.length, 1)
+  assert.equal(tab.measures[0].beats[0].notes[0].at, 0.31)
+  assert.equal(tab.measures[1].section, '前奏')
+  assert.equal(tab.measures[1].start, 0.9)
+  assert.equal(tab.measures[1].beats.length, 4)
+  assert.equal(tab.measures[1].beats[0].notes[0].at, 0.92)
 })
 
 test('builds complete measures for every supported meter family', () => {
