@@ -26,6 +26,14 @@ const browserMatchers: Array<{
   { id: 'firefox', label: 'Firefox', pattern: /firefox/iu },
   { id: 'safari', label: 'Safari', pattern: /safari/iu },
 ]
+const windowsAppBoundBrowsers = new Set<MediaBrowserDescriptor['id']>([
+  'brave',
+  'chrome',
+  'chromium',
+  'edge',
+  'opera',
+  'vivaldi',
+])
 
 export function mediaBrowserFromIdentifier(
   identifier: string,
@@ -121,7 +129,14 @@ export async function detectDefaultMediaBrowser(
     }
     const browser = mediaBrowserFromIdentifier(identifier)
     return browser
-      ? { supported: true, browser }
+      ? {
+          supported: true,
+          browser,
+          sessionMode:
+            platform === 'win32' && windowsAppBoundBrowsers.has(browser.id)
+              ? 'isolated-login'
+              : 'browser-cookies',
+        }
       : {
           supported: false,
           ...(identifier ? { detectedLabel: identifier } : {}),

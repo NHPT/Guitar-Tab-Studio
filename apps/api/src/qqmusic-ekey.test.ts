@@ -134,6 +134,48 @@ test('loads a UTF-16 Windows QQ Music login fixture from UserData', async () => 
   }
 })
 
+test('loads current Windows QQ Music Qt and binary credential formats', async () => {
+  const homePath = resolve(process.cwd(), '.test-qqmusic-windows-current-home')
+  const configPath = resolve(
+    homePath,
+    'AppData/Roaming/Tencent/QQMusic/QQMusicServiceConfig.ini',
+  )
+  await rm(homePath, { recursive: true, force: true })
+  await mkdir(dirname(configPath), { recursive: true })
+  await writeFile(
+    configPath,
+    [
+      `str_musicid=o00${credential.musicId}`,
+      `qm_keyst=@ByteArray(${encodeURIComponent(credential.musicKey)})`,
+      `tmeLoginType=${credential.loginType}`,
+    ].join('\r\n'),
+    'utf8',
+  )
+  try {
+    assert.deepEqual(
+      await loadQQMusicWindowsCredential(homePath),
+      credential,
+    )
+    await writeFile(
+      configPath,
+      Buffer.concat([
+        Buffer.from('str_musicid\0', 'utf8'),
+        Buffer.from(`o00${credential.musicId}\0`, 'utf8'),
+        Buffer.from('qm_keyst\0', 'utf8'),
+        Buffer.from(`${credential.musicKey}\0`, 'utf8'),
+        Buffer.from('tmeLoginType\0', 'utf8'),
+        Buffer.from(String(credential.loginType), 'utf8'),
+      ]),
+    )
+    assert.deepEqual(
+      await loadQQMusicWindowsCredential(homePath),
+      credential,
+    )
+  } finally {
+    await rm(homePath, { recursive: true, force: true })
+  }
+})
+
 test('extracts the media MID from a MusicEx encrypted filename', () => {
   assert.deepEqual(parseQQMusicMediaName(mediaName), {
     filename: mediaName,

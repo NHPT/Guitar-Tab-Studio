@@ -163,6 +163,8 @@ export type DesktopStudioMethod =
   | 'application-settings'
   | 'set-language'
   | 'detect-default-media-browser'
+  | 'authorize-media-session'
+  | 'authorize-qqmusic'
   | 'open-external-url'
   | 'set-background-job-state'
 
@@ -189,6 +191,16 @@ export interface DesktopDefaultMediaBrowser {
   supported: boolean
   browser?: MediaBrowserDescriptor
   detectedLabel?: string
+  sessionMode?: 'browser-cookies' | 'isolated-login'
+}
+
+export interface DesktopMediaSessionAuthorization {
+  browser: MediaBrowserDescriptor
+  sessionToken: string
+}
+
+export interface DesktopQQMusicAuthorization {
+  credentialSession: string
 }
 
 export interface DesktopRuntimeStatus {
@@ -275,6 +287,16 @@ export interface TranscriptionSetupProgress {
   userCode?: string
 }
 
+export interface DesktopUpdateProgress {
+  phase: 'downloading' | 'ready' | 'failed'
+  version: string
+  percent: number
+  transferredBytes: number
+  totalBytes: number
+  bytesPerSecond: number
+  error?: string
+}
+
 export interface DesktopBridge {
   invoke(request: DesktopInvokeRequest): Promise<unknown>
   onOpenMedia(listener: () => void): () => void
@@ -283,5 +305,8 @@ export interface DesktopBridge {
   onLanguageChanged(listener: (settings: DesktopApplicationSettings) => void): () => void
   onTranscriptionProgress(
     listener: (progress: TranscriptionSetupProgress) => void,
+  ): () => void
+  onUpdateProgress?(
+    listener: (progress: DesktopUpdateProgress) => void,
   ): () => void
 }

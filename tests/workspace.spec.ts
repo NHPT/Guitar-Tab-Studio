@@ -179,20 +179,21 @@ test('loads a playable project without layout overflow', async ({ page }, testIn
 
 test('switches the workspace between Chinese and English', async ({ page }) => {
   await page.goto('/')
-  await page.getByRole('button', { name: '设置' }).click()
-  const settings = page.getByRole('dialog', { name: '应用设置' })
-  await expect(settings).toBeVisible()
-  await expect(settings.getByText('在线媒体登录态')).toHaveCount(0)
-  await settings.getByRole('button', { name: 'English' }).click()
+  await page.getByRole('button', { name: '界面语言' }).click()
+  const languageMenu = page.getByRole('dialog', { name: '语言切换' })
+  await expect(languageMenu).toBeVisible()
+  await expect(page.getByRole('dialog', { name: '应用设置' })).toHaveCount(0)
+  await languageMenu.getByRole('button', { name: 'English' }).click()
   await expect(page.getByText('AI guitar tabs and stem separation')).toBeVisible()
   await expect(
     page.getByRole('button', { name: 'Import song' }),
   ).toBeVisible()
-  const englishSettings = page.getByRole('dialog', {
-    name: 'Application settings',
+  await page.getByRole('button', { name: 'Interface language' }).click()
+  const englishMenu = page.getByRole('dialog', {
+    name: 'Language',
   })
   await expect(
-    englishSettings.getByRole('button', { name: 'English' }),
+    englishMenu.getByRole('button', { name: 'English' }),
   ).toHaveAttribute('aria-pressed', 'true')
 })
 
@@ -667,7 +668,7 @@ test('tries public media anonymously before any browser session', async ({
   expect(submittedBody?.mediaSession).toBeUndefined()
 })
 
-test('asks before retrying with the system default browser session', async ({
+test('uses isolated login when Windows protects Edge cookies', async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -714,7 +715,14 @@ test('asks before retrying with the system default browser session', async ({
         if (method === 'detect-default-media-browser') {
           return {
             supported: true,
-            browser: { id: 'chrome', label: 'Google Chrome' },
+            browser: { id: 'edge', label: 'Microsoft Edge' },
+            sessionMode: 'isolated-login',
+          }
+        }
+        if (method === 'authorize-media-session') {
+          return {
+            browser: { id: 'edge', label: 'Microsoft Edge' },
+            sessionToken: 'isolated-session-token',
           }
         }
         if (method === 'open-external-url') return { opened: true }
@@ -724,8 +732,8 @@ test('asks before retrying with the system default browser session', async ({
           return {
             id: `browser-session-${submissionCount}`,
             source: {
-              kind: 'youtube',
-              label: 'YouTube',
+              kind: 'bilibili',
+              label: '哔哩哔哩',
               url: payload?.url,
             },
             status: 'queued',
@@ -738,18 +746,18 @@ test('asks before retrying with the system default browser session', async ({
           return {
             id,
             source: {
-              kind: 'youtube',
-              label: 'YouTube',
-              url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw',
+              kind: 'bilibili',
+              label: '哔哩哔哩',
+              url: 'https://www.bilibili.com/video/BV1fixture',
             },
             status: id.endsWith('-1') ? 'failed' : 'cancelled',
             progress: 3,
             stageLabel: id.endsWith('-1') ? '处理失败' : '任务已取消',
             error: id.endsWith('-1')
-              ? 'YouTube 要求登录会话或人机验证'
+              ? '哔哩哔哩需要登录，但无法读取或解密系统默认浏览器的 Cookie'
               : undefined,
             errorCode: id.endsWith('-1')
-              ? 'media-auth-required'
+              ? 'media-session-unavailable'
               : undefined,
           }
         }
@@ -773,7 +781,7 @@ test('asks before retrying with the system default browser session', async ({
   await dialog.getByRole('button', { name: '在线链接' }).click()
   await page
     .getByPlaceholder('粘贴 YouTube 或其他受支持的公开音视频链接')
-    .fill('https://www.youtube.com/watch?v=jNQXAC9IVRw')
+    .fill('https://www.bilibili.com/video/BV1fixture')
   await dialog.getByRole('button', { name: '开始分析' }).click()
   await expect(
     dialog.getByRole('button', {
@@ -793,9 +801,9 @@ test('asks before retrying with the system default browser session', async ({
     .getByRole('button', { name: '使用默认浏览器登录状态重试' })
     .click()
   await expect(
-    dialog.getByText('仅为本次重试读取 Google Chrome'),
+    dialog.getByText(/Windows Chromium 登录 Cookie 受系统加密保护/u),
   ).toBeVisible()
-  await dialog.getByRole('button', { name: '确认并重试' }).click()
+  await dialog.getByRole('button', { name: '打开隔离登录窗口' }).click()
   await expect
     .poll(() =>
       page.evaluate(
@@ -813,7 +821,10 @@ test('asks before retrying with the system default browser session', async ({
           __mediaSubmissions: Array<Record<string, unknown>>
         }).__mediaSubmissions[1].mediaSession,
     ),
-  ).toEqual({ browser: 'chrome' })
+  ).toEqual({
+    browser: 'edge',
+    sessionToken: 'isolated-session-token',
+  })
 })
 
 test('shows the numeric percentage while an import job is running', async ({ page }) => {
@@ -1768,19 +1779,47 @@ test('renders a real detected natural harmonic at the correct touch fret', async
   await expect(page.locator('.technique-candidates')).toContainText('泛音倍频簇')
 })
 
-test('defaults to amber and persists one of eighteen theme presets', async ({
+test('separates appearance mode from light and dark color themes', async ({
   page,
 }) => {
   await page.goto('/')
-  await page.evaluate(() => window.localStorage.removeItem('gts-theme'))
+  await page.evaluate(() => {
+    for (const key of [
+      'gts-theme',
+      'gts-appearance',
+      'gts-light-theme',
+      'gts-dark-theme',
+    ]) {
+      window.localStorage.removeItem(key)
+    }
+  })
   await page.reload()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'amber')
-  await page.getByRole('button', { name: '选择界面配色' }).click()
-  await expect(page.getByRole('menuitemradio')).toHaveCount(18)
-  await page.getByRole('menuitemradio', { name: '夜谱' }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-appearance', 'light')
+  await page.getByRole('button', { name: '主题选择' }).click()
+  const themeMenu = page.getByRole('dialog', { name: '主题选择' })
+  await expect(page.getByRole('dialog', { name: '应用设置' })).toHaveCount(0)
+  await themeMenu.getByRole('button', { name: '黑夜模式' }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'graphite')
+
+  await expect(themeMenu.getByLabel('白天配色').locator('button')).toHaveCount(11)
+  await expect(themeMenu.getByLabel('黑夜配色').locator('button')).toHaveCount(9)
+  await page.screenshot({
+    path: 'test-results/desktop-theme-popover.png',
+  })
+  await themeMenu.getByRole('button', { name: '夜谱' }).click()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'night')
+  await page.screenshot({
+    path: 'test-results/desktop-appearance-settings.png',
+  })
   await page.reload()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'night')
+  await page.getByRole('button', { name: '主题选择' }).click()
+  await expect(
+    page
+      .getByRole('dialog', { name: '主题选择' })
+      .getByRole('button', { name: '黑夜模式' }),
+  ).toHaveAttribute('aria-pressed', 'true')
 })
 
 test('requires explicit authorization before protected file or link processing', async ({ page }) => {

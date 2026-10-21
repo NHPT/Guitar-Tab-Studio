@@ -9,9 +9,12 @@ import {
   type DesktopBackgroundJobState,
   type DesktopDefaultMediaBrowser,
   type DesktopLocalFileSource,
+  type DesktopMediaSessionAuthorization,
   type DesktopRecentProject,
   type DesktopRuntimeStatus,
   type DesktopSelectedFile,
+  type DesktopQQMusicAuthorization,
+  type DesktopUpdateProgress,
   type InstalledModelPackage,
   type MediaBrowserSession,
   type PlatformDescriptor,
@@ -41,6 +44,11 @@ export interface DesktopStudioControls {
     preference: AppLanguagePreference,
   ): Promise<DesktopApplicationSettings>
   detectDefaultMediaBrowser(): Promise<DesktopDefaultMediaBrowser>
+  authorizeMediaSession(
+    url: string,
+    browser: MediaBrowserSession['browser'],
+  ): Promise<DesktopMediaSessionAuthorization>
+  authorizeQQMusic(): Promise<DesktopQQMusicAuthorization>
   openExternalUrl(url: string): Promise<{ opened: true }>
   setBackgroundJobState(
     state: DesktopBackgroundJobState,
@@ -87,6 +95,9 @@ export interface DesktopStudioControls {
   removeProject(id: string): Promise<void>
   onTranscriptionProgress(
     listener: (progress: TranscriptionSetupProgress) => void,
+  ): () => void
+  onUpdateProgress?(
+    listener: (progress: DesktopUpdateProgress) => void,
   ): () => void
   modelPackages(): Promise<InstalledModelPackage[]>
   installModelPackage(): Promise<InstalledModelPackage | null>
@@ -259,6 +270,17 @@ export class DesktopStudioApplication
     return this.invoke('detect-default-media-browser')
   }
 
+  authorizeMediaSession(
+    url: string,
+    browser: MediaBrowserSession['browser'],
+  ): Promise<DesktopMediaSessionAuthorization> {
+    return this.invoke('authorize-media-session', { url, browser })
+  }
+
+  authorizeQQMusic(): Promise<DesktopQQMusicAuthorization> {
+    return this.invoke('authorize-qqmusic')
+  }
+
   openExternalUrl(url: string): Promise<{ opened: true }> {
     return this.invoke('open-external-url', { url })
   }
@@ -344,6 +366,12 @@ export class DesktopStudioApplication
     listener: (progress: TranscriptionSetupProgress) => void,
   ): () => void {
     return this.bridge.onTranscriptionProgress(listener)
+  }
+
+  onUpdateProgress(
+    listener: (progress: DesktopUpdateProgress) => void,
+  ): () => void {
+    return this.bridge.onUpdateProgress?.(listener) ?? (() => undefined)
   }
 
   modelPackages(): Promise<InstalledModelPackage[]> {

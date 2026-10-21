@@ -27,6 +27,7 @@ import {
   type DesktopLocalFileSource,
   type DesktopRuntimeStatus,
   type DesktopSelectedFile,
+  type DesktopUpdateProgress,
   type MediaBrowserSession,
   type ProjectRevision,
   type ProjectRevisionKind,
@@ -52,6 +53,7 @@ import {
   type DesktopMediaSource,
 } from './local-files.js'
 import { DesktopMaintenance } from './maintenance.js'
+import { DesktopMediaSessions } from './media-sessions.js'
 import { HuggingFaceOAuth } from './huggingface-oauth.js'
 import { ModelPackageManager } from './model-packages.js'
 import { DesktopTranscriptionManager } from './model-providers.js'
@@ -90,6 +92,7 @@ let modelPackages: ModelPackageManager | undefined
 let transcriptionManager: DesktopTranscriptionManager | undefined
 let huggingFaceOAuth: HuggingFaceOAuth | undefined
 let maintenance: DesktopMaintenance | undefined
+let mediaSessions: DesktopMediaSessions | undefined
 let updater: DesktopUpdater | undefined
 let tray: Tray | undefined
 let quitting = false
@@ -305,7 +308,14 @@ function authorizedMediaConsent(
   }
   const consent = value as Record<string, unknown>
   return consent.accepted === true && consent.policyVersion === 2
-    ? { accepted: true, policyVersion: 2 }
+    ? {
+        accepted: true,
+        policyVersion: 2,
+        ...(typeof consent.credentialSession === 'string' &&
+        /^[0-9a-f-]{36}$/iu.test(consent.credentialSession)
+          ? { credentialSession: consent.credentialSession }
+          : {}),
+      }
     : undefined
 }
 
@@ -321,6 +331,11 @@ async function restartLocalApi(): Promise<void> {
     apiEntry: paths.apiEntry,
     workingDirectory: paths.apiWorkingDirectory,
     dataRoot: resolve(app.getPath('userData'), 'runtime'),
+    mediaSessionRoot: resolve(
+      app.getPath('userData'),
+      'runtime',
+      'media-sessions',
+    ),
     homePath: app.getPath('home'),
     workerCommand:
       (!app.isPackaged ? paths.workerCommand : undefined) ??
@@ -496,7 +511,7 @@ async function invoke(request: DesktopInvokeRequest): Promise<unknown> {
           ? (payload.mediaSession as Record<string, unknown>)
           : undefined
       const browser = requestedSession?.browser
-      const mediaSession =
+      const mediaSession: MediaBrowserSession | undefined =
         typeof browser === 'string' &&
         mediaBrowserIds.has(browser as MediaBrowserSession['browser'])
           ? { browser: browser as MediaBrowserSession['browser'] }
@@ -507,6 +522,17 @@ async function invoke(request: DesktopInvokeRequest): Promise<unknown> {
       if (mediaSession && mode !== 'local') {
         throw new Error('浏览器登录态仅可用于本机媒体获取')
       }
+      const sessionToken =
+        typeof requestedSession?.sessionToken === 'string'
+          ? requestedSession.sessionToken
+          : undefined
+      const cookieFile = sessionToken
+        ? mediaSessions?.consumeCookieSession(sessionToken)
+        : undefined
+      if (sessionToken && !cookieFile) {
+        throw new Error('网页登录授权已过期，请重新登录')
+      }
+      if (mediaSession && cookieFile) mediaSession.cookieFile = cookieFile
       const job = await activeApi().submitLink(
         requiredText(payload, 'url'),
         authorizedMediaConsent(payload.authorizedMedia),
@@ -675,10 +701,21 @@ async function invoke(request: DesktopInvokeRequest): Promise<unknown> {
             : 'application/octet-stream',
         bytes,
       }
+      const consent = authorizedMediaConsent(payload.authorizedMedia)
       const mode = stateStore.runtimeMode()
+      if (consent?.credentialSession && mode !== 'local') {
+        throw new Error('QQ 音乐网页登录授权仅可用于本机媒体处理')
+      }
+      const credentialFile = consent?.credentialSession
+        ? mediaSessions?.consumeCredentialSession(consent.credentialSession)
+        : undefined
+      if (consent?.credentialSession && !credentialFile) {
+        throw new Error('QQ 音乐网页登录授权已过期，请重新登录')
+      }
       const job = await activeApi().submitUpload(
         upload,
-        authorizedMediaConsent(payload.authorizedMedia),
+        consent,
+        credentialFile,
       )
       stateStore.saveJob(job)
       stateStore.setRuntimeMode(mode, job.id)
@@ -1135,6 +1172,24 @@ async function invoke(request: DesktopInvokeRequest): Promise<unknown> {
     }
     case 'detect-default-media-browser':
       return detectDefaultMediaBrowser()
+    case 'authorize-media-session': {
+      if (!mediaSessions) throw new Error('网页登录服务尚未就绪')
+      const browserId = requiredText(payload, 'browser', 32)
+      if (!mediaBrowserIds.has(browserId as MediaBrowserSession['browser'])) {
+        throw new Error('不支持该浏览器登录态')
+      }
+      const detected = await detectDefaultMediaBrowser()
+      if (!detected.browser || detected.browser.id !== browserId) {
+        throw new Error('默认浏览器已变化，请重新检测')
+      }
+      return mediaSessions.authorizeMedia(
+        requiredText(payload, 'url', 4096),
+        detected.browser,
+      )
+    }
+    case 'authorize-qqmusic':
+      if (!mediaSessions) throw new Error('QQ 音乐授权服务尚未就绪')
+      return mediaSessions.authorizeQQMusic()
     case 'open-external-url': {
       const url = new URL(requiredText(payload, 'url', 4096))
       if (url.protocol !== 'https:' && url.protocol !== 'http:') {
@@ -1509,6 +1564,11 @@ async function startDesktop(): Promise<void> {
   stateStore = new DesktopStateStore(
     resolve(app.getPath('userData'), 'state', 'desktop.sqlite'),
   )
+  mediaSessions = new DesktopMediaSessions(
+    resolve(app.getPath('userData'), 'runtime', 'media-sessions'),
+    () => mainWindow,
+  )
+  await mediaSessions.initialize()
   modelPackages = new ModelPackageManager(
     resolve(app.getPath('userData'), 'models'),
     app.getVersion(),
@@ -1608,6 +1668,62 @@ async function startDesktop(): Promise<void> {
       `)
     if (!String(scoreBridgeError).includes('Invalid score pages')) {
       throw new Error('Desktop score import IPC method is not available')
+    }
+    smokeWindow.webContents.send('studio:update-progress', {
+      phase: 'downloading',
+      version: '0.1.0-preview.12',
+      percent: 37.4,
+      transferredBytes: 225 * 1024 ** 2,
+      totalBytes: 600 * 1024 ** 2,
+      bytesPerSecond: 10 * 1024 ** 2,
+    } satisfies DesktopUpdateProgress)
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100))
+    const updateProgressState =
+      await smokeWindow.webContents.executeJavaScript(`
+        (() => {
+          const panel = document.querySelector('.update-progress-panel')
+          const bounds = panel?.getBoundingClientRect()
+          return {
+            visible: Boolean(
+              panel &&
+              bounds &&
+              bounds.width > 300 &&
+              bounds.height > 100 &&
+              bounds.right <= window.innerWidth &&
+              bounds.bottom <= window.innerHeight
+            ),
+            percentage: panel?.querySelector('output')?.textContent?.trim(),
+            metrics: panel?.querySelector('.update-progress-metrics')
+              ?.textContent?.replace(/\\s+/g, ' ').trim(),
+            ariaValue: panel?.querySelector('[role="progressbar"]')
+              ?.getAttribute('aria-valuenow'),
+          }
+        })()
+      `)
+    if (
+      !updateProgressState?.visible ||
+      updateProgressState.percentage !== '37%' ||
+      updateProgressState.ariaValue !== '37' ||
+      !String(updateProgressState.metrics).includes('225.0 MB / 600.0 MB') ||
+      !String(updateProgressState.metrics).includes('10.0 MB/s')
+    ) {
+      throw new Error('Desktop update download progress did not render')
+    }
+    smokeWindow.webContents.send('studio:update-progress', {
+      phase: 'ready',
+      version: '0.1.0-preview.12',
+      percent: 100,
+      transferredBytes: 600 * 1024 ** 2,
+      totalBytes: 600 * 1024 ** 2,
+      bytesPerSecond: 0,
+    } satisfies DesktopUpdateProgress)
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50))
+    const updateProgressDismissed =
+      await smokeWindow.webContents.executeJavaScript(
+        `document.querySelector('.update-progress-panel') === null`,
+      )
+    if (!updateProgressDismissed) {
+      throw new Error('Completed desktop update progress did not dismiss')
     }
     await smokeWindow.webContents.executeJavaScript(
       `Array.from(document.querySelectorAll('button'))
@@ -1857,12 +1973,16 @@ app.on('before-quit', (event) => {
   if (quitting) return
   event.preventDefault()
   quitting = true
-  const stopping = localApi?.stop() ?? Promise.resolve()
+  const stopping = Promise.all([
+    localApi?.stop() ?? Promise.resolve(),
+    mediaSessions?.stop() ?? Promise.resolve(),
+  ])
   void stopping.finally(() => {
     destroyTray()
     stateStore?.close()
     stateStore = undefined
     localApi = undefined
+    mediaSessions = undefined
     updater?.stop()
     updater = undefined
     app.quit()

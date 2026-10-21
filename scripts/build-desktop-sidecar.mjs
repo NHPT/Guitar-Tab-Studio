@@ -114,9 +114,63 @@ if (typeof ffmpegSource !== 'string' || !existsSync(ffmpegSource)) {
   throw new Error('ffmpeg-static did not provide a platform binary')
 }
 const ffmpegName = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
-copyFileSync(ffmpegSource, resolve(outputRoot, ffmpegName))
+const ffmpegPath = resolve(outputRoot, ffmpegName)
+copyFileSync(ffmpegSource, ffmpegPath)
 if (process.platform !== 'win32') chmodSync(resolve(outputRoot, ffmpegName), 0o755)
 copyFileSync(resolve(repositoryRoot, 'LICENSE'), resolve(outputRoot, 'LICENSE.txt'))
+const executableName =
+  process.platform === 'win32' ? 'guitar-tab-worker.exe' : 'guitar-tab-worker'
+const workerExecutable = resolve(outputRoot, executableName)
+const probeEnvironment = {
+  ...process.env,
+  FFMPEG_BINARY: ffmpegPath,
+  PYTHONIOENCODING: 'utf-8',
+  PYTHONUTF8: '1',
+}
+
+function runProbe(command, argumentsList, label) {
+  const probe = spawnSync(command, argumentsList, {
+    cwd: repositoryRoot,
+    env: probeEnvironment,
+    encoding: 'utf8',
+  })
+  if (probe.status !== 0) {
+    throw new Error(
+      `${label} failed (${probe.status ?? 'unknown'}):\n${probe.stderr || probe.stdout}`,
+    )
+  }
+}
+
+runProbe(workerExecutable, ['--runtime-self-test'], 'Worker runtime self-test')
+const smokeRoot = resolve(buildRoot, 'media-smoke')
+const smokeInput = resolve(smokeRoot, 'fixture.mp3')
+const smokeOutput = resolve(smokeRoot, 'output')
+mkdirSync(smokeRoot, { recursive: true })
+runProbe(
+  ffmpegPath,
+  [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-f',
+    'lavfi',
+    '-i',
+    'sine=frequency=440:duration=1',
+    '-ac',
+    '2',
+    '-ar',
+    '44100',
+    '-codec:a',
+    'libmp3lame',
+    smokeInput,
+  ],
+  'MP3 fixture generation',
+)
+runProbe(
+  workerExecutable,
+  ['--input', smokeInput, '--output', smokeOutput, '--media-probe'],
+  'Worker MP3 decode smoke test',
+)
 
 function filesIn(root, prefix = '') {
   return readdirSync(resolve(root, prefix)).flatMap((name) => {
@@ -148,8 +202,6 @@ const files = await Promise.all(
           : 'worker-runtime',
   })),
 )
-const executableName =
-  process.platform === 'win32' ? 'guitar-tab-worker.exe' : 'guitar-tab-worker'
 if (!files.some((file) => file.path === executableName)) {
   throw new Error(`Frozen worker executable is missing: ${executableName}`)
 }

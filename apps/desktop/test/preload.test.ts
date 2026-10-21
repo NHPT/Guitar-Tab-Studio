@@ -14,8 +14,24 @@ test('allows every implemented desktop file import operation', () => {
     'import-media-key-database',
     'open-full-disk-access-settings',
     'detect-default-media-browser',
+    'authorize-media-session',
+    'authorize-qqmusic',
     'open-external-url',
   ]) {
     assert.match(source, new RegExp(`'${method}'`, 'u'))
   }
+})
+
+test('exposes update progress as a removable read-only event listener', () => {
+  const source = readFileSync(
+    resolve(process.cwd(), 'src', 'preload.cts'),
+    'utf8',
+  )
+
+  assert.match(source, /onUpdateProgress/u)
+  assert.match(source, /ipcRenderer\.on\('studio:update-progress'/u)
+  assert.match(
+    source,
+    /ipcRenderer\.removeListener\('studio:update-progress'/u,
+  )
 })

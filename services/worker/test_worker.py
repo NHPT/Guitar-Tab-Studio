@@ -572,6 +572,43 @@ class RuntimeGuardTest(unittest.TestCase):
                 ["--cookies-from-browser", "edge"],
             )
 
+    def test_url_acquisition_prefers_an_ephemeral_cookie_file(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cookies = root / "session.cookies.txt"
+            cookies.write_text(
+                "# Netscape HTTP Cookie File\n"
+                ".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tfixture\n",
+                encoding="utf-8",
+            )
+
+            def create_download(_arguments: list[str]) -> None:
+                (root / "source.m4a").write_bytes(b"audio")
+
+            with (
+                patch("worker.ffmpeg_command", return_value="/bin/ffmpeg"),
+                patch("worker.shutil.which", return_value="/usr/bin/node"),
+                patch("worker.run", side_effect=create_download) as command,
+            ):
+                acquire_url(
+                    "https://www.bilibili.com/video/BV1fixture",
+                    root,
+                    "edge",
+                    cookies,
+                )
+
+            arguments = command.call_args.args[0]
+            self.assertEqual(
+                arguments[
+                    arguments.index("--cookies") :
+                    arguments.index("--cookies") + 2
+                ],
+                ["--cookies", str(cookies.resolve())],
+            )
+            self.assertNotIn("--cookies-from-browser", arguments)
+
     def test_normalize_rejects_insufficient_space_and_removes_partial_output(
         self,
     ) -> None:

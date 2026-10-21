@@ -25,7 +25,9 @@ import {
   Maximize2,
   Minus,
   Minimize2,
+  Monitor,
   Music2,
+  Moon,
   Palette,
   Pause,
   Play,
@@ -36,6 +38,7 @@ import {
   Scissors,
   SkipBack,
   SlidersHorizontal,
+  Sun,
   TimerReset,
   Upload,
   Users,
@@ -64,6 +67,7 @@ import {
   type AppLanguagePreference,
   type DesktopApplicationSettings,
   type AuthorizedMediaProvider,
+  type DesktopUpdateProgress,
   type InstalledModelPackage,
   type MediaBrowserDescriptor,
   type MediaBrowserSession,
@@ -132,9 +136,29 @@ const themePresets = [
   { id: 'wine', label: '酒红', accent: '#FB7185', surface: '#30212A' },
   { id: 'moonstone', label: '月岩', accent: '#60A5FA', surface: '#242B36' },
   { id: 'scarlet-night', label: '赤夜', accent: '#EC4141', surface: '#242424' },
+  { id: 'nocturne', label: '夜曲', accent: '#EAB308', surface: '#25262B' },
+  { id: 'aurora', label: '极光', accent: '#22C55E', surface: '#1E2930' },
 ] as const
 
 type ThemeId = (typeof themePresets)[number]['id']
+type AppearanceMode = 'system' | 'light' | 'dark'
+const darkThemeIds = new Set<ThemeId>([
+  'graphite',
+  'night',
+  'deepsea',
+  'pine',
+  'wine',
+  'moonstone',
+  'scarlet-night',
+  'nocturne',
+  'aurora',
+])
+const lightThemePresets = themePresets.filter(
+  (preset) => !darkThemeIds.has(preset.id),
+)
+const darkThemePresets = themePresets.filter((preset) =>
+  darkThemeIds.has(preset.id),
+)
 const visualizerModes: Array<{ id: VisualizerMode; label: string }> = [
   { id: 'glow', label: '动感波光' },
   { id: 'wave', label: '动态波形' },
@@ -167,7 +191,13 @@ interface MediaSessionRecovery {
   url: string
   authorized: boolean
   detecting: boolean
+  forceIsolatedLogin: boolean
   browser?: MediaBrowserDescriptor
+  sessionMode?: 'browser-cookies' | 'isolated-login'
+}
+interface QQMusicLoginRecovery {
+  authorizing: boolean
+  file: File
 }
 const protectedProviderLabels: Record<AuthorizedMediaProvider, string> = {
   qqmusic: 'QQ 音乐',
@@ -339,9 +369,36 @@ function initialProjectListHeight(): number {
   return Math.min(preferred, projectListMaximumHeight())
 }
 
-function initialTheme(): ThemeId {
-  const stored = window.localStorage.getItem('gts-theme')
-  return themePresets.some((theme) => theme.id === stored) ? (stored as ThemeId) : 'amber'
+function storedTheme(key: string, fallback: ThemeId): ThemeId {
+  const stored = window.localStorage.getItem(key)
+  return themePresets.some((theme) => theme.id === stored)
+    ? (stored as ThemeId)
+    : fallback
+}
+
+function initialAppearanceMode(): AppearanceMode {
+  const stored = window.localStorage.getItem('gts-appearance')
+  if (stored === 'system' || stored === 'light' || stored === 'dark') {
+    return stored
+  }
+  const legacyTheme = storedTheme('gts-theme', 'amber')
+  return darkThemeIds.has(legacyTheme) ? 'dark' : 'system'
+}
+
+function initialLightTheme(): ThemeId {
+  const legacyTheme = storedTheme('gts-theme', 'amber')
+  return storedTheme(
+    'gts-light-theme',
+    darkThemeIds.has(legacyTheme) ? 'amber' : legacyTheme,
+  )
+}
+
+function initialDarkTheme(): ThemeId {
+  const legacyTheme = storedTheme('gts-theme', 'graphite')
+  return storedTheme(
+    'gts-dark-theme',
+    darkThemeIds.has(legacyTheme) ? legacyTheme : 'graphite',
+  )
 }
 
 function initialVisualizer(): VisualizerMode {
@@ -559,6 +616,12 @@ function formatStorageSize(bytes: number): string {
   return `${(bytes / 1024 ** 2).toFixed(0)} MB`
 }
 
+function formatTransferSize(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${Math.round(Math.max(0, bytes) / 1024)} KB`
+}
+
 function initialMixes(project: StudioProject): Record<string, TrackMix> {
   return Object.fromEntries(
     project.tracks.map((track) => [
@@ -641,17 +704,28 @@ function App({ application = studioApplication }: AppProps) {
   const [scoreExpanded, setScoreExpanded] = useState(false)
   const [capoEnabled, setCapoEnabled] = useState(true)
   const [capoFret, setCapoFret] = useState(0)
-  const [theme, setTheme] = useState<ThemeId>(initialTheme)
+  const [appearanceMode, setAppearanceMode] =
+    useState<AppearanceMode>(initialAppearanceMode)
+  const [lightTheme, setLightTheme] = useState<ThemeId>(initialLightTheme)
+  const [darkTheme, setDarkTheme] = useState<ThemeId>(initialDarkTheme)
+  const [systemDark, setSystemDark] = useState(
+    () => window.matchMedia('(prefers-color-scheme: dark)').matches,
+  )
+  const resolvedDark =
+    appearanceMode === 'dark' ||
+    (appearanceMode === 'system' && systemDark)
+  const theme = resolvedDark ? darkTheme : lightTheme
   const [language, setLanguage] = useState<AppLanguage>(initialLanguage)
   const [languagePreference, setLanguagePreference] =
     useState<AppLanguagePreference>('system')
   const [detectedSystemLanguage, setDetectedSystemLanguage] =
     useState<AppLanguage>(() => systemLanguage(window.navigator.language))
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [languageMenuOpen, setLanguageMenuOpen] = useState(false)
+  const [appearanceMenuOpen, setAppearanceMenuOpen] = useState(false)
   const [settingsBusy, setSettingsBusy] = useState(false)
   const [settingsError, setSettingsError] = useState('')
   const [visualizerMode, setVisualizerMode] = useState<VisualizerMode>(initialVisualizer)
-  const [themeOpen, setThemeOpen] = useState(false)
   const [selectedNoteId, setSelectedNoteId] = useState<string>()
   const [selectedMeasureNumber, setSelectedMeasureNumber] = useState<number>()
   const [selectedBeatIndex, setSelectedBeatIndex] = useState<number>()
@@ -678,6 +752,8 @@ function App({ application = studioApplication }: AppProps) {
     useState(false)
   const [transcriptionProgress, setTranscriptionProgress] =
     useState<TranscriptionSetupProgress | null>(null)
+  const [updateProgress, setUpdateProgress] =
+    useState<DesktopUpdateProgress | null>(null)
   const [transcriptionSetupError, setTranscriptionSetupError] = useState('')
   const [storageCleanup, setStorageCleanup] =
     useState<StorageCleanupStatus | null>(null)
@@ -714,6 +790,8 @@ function App({ application = studioApplication }: AppProps) {
     useState<ProtectedImportRequest | null>(null)
   const [mediaSessionRecovery, setMediaSessionRecovery] =
     useState<MediaSessionRecovery | null>(null)
+  const [qqMusicLoginRecovery, setQQMusicLoginRecovery] =
+    useState<QQMusicLoginRecovery | null>(null)
   const [scoreImportBusy, setScoreImportBusy] = useState(false)
   const [error, setError] = useState('')
   const [mediaKeyNotice, setMediaKeyNotice] = useState('')
@@ -865,6 +943,23 @@ function App({ application = studioApplication }: AppProps) {
   }, [projectContextMenu])
 
   useEffect(() => {
+    if (!languageMenuOpen && !appearanceMenuOpen) return
+    const close = () => {
+      setLanguageMenuOpen(false)
+      setAppearanceMenuOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close()
+    }
+    window.addEventListener('pointerdown', close)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('pointerdown', close)
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [appearanceMenuOpen, languageMenuOpen])
+
+  useEffect(() => {
     if (!desktopControls.onTranscriptionProgress) return
     return desktopControls.onTranscriptionProgress((progress) => {
       setTranscriptionProgress(progress)
@@ -873,9 +968,30 @@ function App({ application = studioApplication }: AppProps) {
   }, [desktopControls])
 
   useEffect(() => {
+    if (!desktopControls.onUpdateProgress) return
+    return desktopControls.onUpdateProgress(setUpdateProgress)
+  }, [desktopControls])
+
+  useEffect(() => {
     document.documentElement.dataset.theme = theme
+    document.documentElement.dataset.appearance = resolvedDark ? 'dark' : 'light'
     window.localStorage.setItem('gts-theme', theme)
-  }, [theme])
+    window.localStorage.setItem(
+      resolvedDark ? 'gts-dark-theme' : 'gts-light-theme',
+      theme,
+    )
+  }, [resolvedDark, theme])
+
+  useEffect(() => {
+    window.localStorage.setItem('gts-appearance', appearanceMode)
+  }, [appearanceMode])
+
+  useEffect(() => {
+    const query = window.matchMedia('(prefers-color-scheme: dark)')
+    const update = (event: MediaQueryListEvent) => setSystemDark(event.matches)
+    query.addEventListener('change', update)
+    return () => query.removeEventListener('change', update)
+  }, [])
 
   useEffect(() => {
     document.documentElement.lang = language
@@ -1823,15 +1939,17 @@ function App({ application = studioApplication }: AppProps) {
             url: nextJob.source.url,
             authorized: Boolean(nextJob.source.authorizedMedia),
             detecting: false,
+            forceIsolatedLogin:
+              nextJob.errorCode === 'media-session-unavailable',
           })
         } else {
           setMediaSessionRecovery(null)
         }
         setError(nextJob.error ?? '分析任务失败')
         setJob(null)
-        return
+        return nextJob
       }
-      if (nextJob.status === 'cancelled') return
+      if (nextJob.status === 'cancelled') return nextJob
 
       if (nextJob.projectId) {
         const nextProject = await application.getProject(nextJob.projectId)
@@ -1842,6 +1960,7 @@ function App({ application = studioApplication }: AppProps) {
           setJob(null)
         }, 700)
       }
+      return nextJob
     },
     [application, desktopControls, loadProject],
   )
@@ -1876,16 +1995,36 @@ function App({ application = studioApplication }: AppProps) {
     }
   }
 
-  const startUpload = async (file: File, authorized = false) => {
+  const startUpload = async (
+    file: File,
+    authorized = false,
+    credentialSession?: string,
+  ) => {
     setError('')
+    setQQMusicLoginRecovery(null)
     try {
       const nextJob = await application.submitUpload(
         file,
-        authorized ? authorizedMediaConsent : undefined,
+        authorized
+          ? {
+              ...authorizedMediaConsent,
+              ...(credentialSession
+                ? { credentialSession }
+                : {}),
+            }
+          : undefined,
       )
       setProtectedImport(null)
       setJob(nextJob)
-      await pollJob(nextJob.id)
+      const finalJob = await pollJob(nextJob.id)
+      if (
+        authorized &&
+        finalJob.status === 'failed' &&
+        finalJob.error?.includes('QQ 音乐') &&
+        desktopControls.authorizeQQMusic
+      ) {
+        setQQMusicLoginRecovery({ authorizing: false, file })
+      }
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : '上传失败')
     }
@@ -1954,7 +2093,15 @@ function App({ application = studioApplication }: AppProps) {
       }
       setMediaSessionRecovery((current) =>
         current
-          ? { ...current, detecting: false, browser: result.browser }
+          ? {
+              ...current,
+              detecting: false,
+              browser: result.browser,
+              sessionMode:
+                current.forceIsolatedLogin
+                  ? 'isolated-login'
+                  : result.sessionMode ?? 'browser-cookies',
+            }
           : current,
       )
     } catch (cause) {
@@ -1971,11 +2118,59 @@ function App({ application = studioApplication }: AppProps) {
     if (!mediaSessionRecovery?.browser) return
     const recovery = mediaSessionRecovery
     const browser = mediaSessionRecovery.browser
+    let mediaSession: MediaBrowserSession = { browser: browser.id }
+    if (recovery.sessionMode === 'isolated-login') {
+      if (!desktopControls.authorizeMediaSession) {
+        setError('当前桌面版本不支持应用内隔离登录')
+        return
+      }
+      setMediaSessionRecovery((current) =>
+        current ? { ...current, detecting: true } : current,
+      )
+      try {
+        const authorization =
+          await desktopControls.authorizeMediaSession(
+            recovery.url,
+            browser.id,
+          )
+        mediaSession = {
+          browser: authorization.browser.id,
+          sessionToken: authorization.sessionToken,
+        }
+      } catch (cause) {
+        setMediaSessionRecovery((current) =>
+          current ? { ...current, detecting: false } : current,
+        )
+        setError(
+          cause instanceof Error ? cause.message : '网页登录授权失败',
+        )
+        return
+      }
+    }
     await startLinkImport(
       recovery.authorized,
       recovery.url,
-      { browser: browser.id },
+      mediaSession,
     )
+  }
+
+  const authorizeQQMusicAndRetry = async () => {
+    if (!qqMusicLoginRecovery || !desktopControls.authorizeQQMusic) return
+    const recovery = qqMusicLoginRecovery
+    setQQMusicLoginRecovery({ ...recovery, authorizing: true })
+    try {
+      const authorization = await desktopControls.authorizeQQMusic()
+      await startUpload(
+        recovery.file,
+        true,
+        authorization.credentialSession,
+      )
+    } catch (cause) {
+      setQQMusicLoginRecovery({ ...recovery, authorizing: false })
+      setError(
+        cause instanceof Error ? cause.message : 'QQ 音乐网页登录授权失败',
+      )
+    }
   }
 
   const startScoreUpload = async (file: File) => {
@@ -2332,53 +2527,168 @@ function App({ application = studioApplication }: AppProps) {
           >
             <Users aria-hidden="true" />
           </button>
-          <button
-            className="icon-button"
-            type="button"
-            aria-label={t('设置')}
-            title={t('设置')}
-            onClick={() => setSettingsOpen(true)}
+          <div
+            className="header-menu"
+            onPointerDown={(event) => event.stopPropagation()}
           >
-            <Languages aria-hidden="true" />
-          </button>
-          <div className="theme-picker">
             <button
               className="icon-button"
               type="button"
-              aria-label={t('选择界面配色')}
-              title={t('选择界面配色')}
-              aria-expanded={themeOpen}
-              onClick={() => setThemeOpen((current) => !current)}
+              aria-label={t('界面语言')}
+              title={t('界面语言')}
+              aria-expanded={languageMenuOpen}
+              onClick={() => {
+                setAppearanceMenuOpen(false)
+                setLanguageMenuOpen((current) => !current)
+              }}
             >
-              <Palette aria-hidden="true" />
+              <Languages aria-hidden="true" />
             </button>
-            {themeOpen ? (
-              <div className="theme-menu" role="menu" aria-label={t('界面配色')}>
-                <strong>{t('界面配色')}</strong>
-                <div>
-                  {themePresets.map((preset) => (
+            {languageMenuOpen ? (
+              <div
+                className="header-popover language-popover"
+                role="dialog"
+                aria-label={t('语言切换')}
+              >
+                <header>
+                  <Languages aria-hidden="true" />
+                  <strong>{t('界面语言')}</strong>
+                </header>
+                <div
+                  className="language-segmented"
+                  role="group"
+                  aria-label={t('界面语言')}
+                >
+                  {(
+                    [
+                      ['system', '跟随系统'],
+                      ['zh-CN', '简体中文'],
+                      ['en-US', 'English'],
+                    ] as const
+                  ).map(([preference, label]) => (
                     <button
                       type="button"
-                      role="menuitemradio"
-                      aria-checked={theme === preset.id}
-                      className={theme === preset.id ? 'is-active' : ''}
-                      key={preset.id}
-                      onClick={() => {
-                        setTheme(preset.id)
-                        setThemeOpen(false)
-                      }}
+                      className={
+                        languagePreference === preference ? 'is-active' : ''
+                      }
+                      aria-pressed={languagePreference === preference}
+                      disabled={settingsBusy}
+                      onClick={() =>
+                        void changeLanguage(preference).then(() =>
+                          setLanguageMenuOpen(false),
+                        )
+                      }
+                      key={preference}
                     >
-                      <i
-                        style={{
-                          '--theme-accent': preset.accent,
-                          '--theme-surface': preset.surface,
-                        } as React.CSSProperties}
-                      />
-                      <span>{t(preset.label)}</span>
-                      {theme === preset.id ? <Check aria-hidden="true" /> : null}
+                      {t(label)}
                     </button>
                   ))}
                 </div>
+              </div>
+            ) : null}
+          </div>
+          <div
+            className="header-menu"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              className="icon-button"
+              type="button"
+              aria-label={t('主题选择')}
+              title={t('主题选择')}
+              aria-expanded={appearanceMenuOpen}
+              onClick={() => {
+                setLanguageMenuOpen(false)
+                setAppearanceMenuOpen((current) => !current)
+              }}
+            >
+              {appearanceMode === 'system' ? (
+                <Monitor aria-hidden="true" />
+              ) : appearanceMode === 'light' ? (
+                <Sun aria-hidden="true" />
+              ) : (
+                <Moon aria-hidden="true" />
+              )}
+            </button>
+            {appearanceMenuOpen ? (
+              <div
+                className="header-popover appearance-popover"
+                role="dialog"
+                aria-label={t('主题选择')}
+              >
+                <header>
+                  <Palette aria-hidden="true" />
+                  <strong>{t('外观与配色')}</strong>
+                </header>
+                <div
+                  className="appearance-segmented"
+                  role="group"
+                  aria-label={t('外观模式')}
+                >
+                  {(
+                    [
+                      ['system', '跟随系统', Monitor],
+                      ['light', '白天模式', Sun],
+                      ['dark', '黑夜模式', Moon],
+                    ] as const
+                  ).map(([mode, label, Icon]) => (
+                    <button
+                      type="button"
+                      className={appearanceMode === mode ? 'is-active' : ''}
+                      aria-pressed={appearanceMode === mode}
+                      onClick={() => setAppearanceMode(mode)}
+                      key={mode}
+                    >
+                      <Icon aria-hidden="true" />
+                      {t(label)}
+                    </button>
+                  ))}
+                </div>
+                {(
+                  [
+                    ['白天配色', lightThemePresets, lightTheme, setLightTheme],
+                    ['黑夜配色', darkThemePresets, darkTheme, setDarkTheme],
+                  ] as const
+                ).map(([label, presets, selected, selectTheme]) => (
+                  <div
+                    className="settings-theme-group"
+                    aria-label={t(label)}
+                    key={label}
+                  >
+                    <span>{t(label)}</span>
+                    <div>
+                      {presets.map((preset) => (
+                        <button
+                          type="button"
+                          aria-label={t(preset.label)}
+                          aria-pressed={selected === preset.id}
+                          className={
+                            selected === preset.id ? 'is-active' : ''
+                          }
+                          onClick={() => {
+                            selectTheme(preset.id)
+                            setAppearanceMode(
+                              darkThemeIds.has(preset.id) ? 'dark' : 'light',
+                            )
+                            setAppearanceMenuOpen(false)
+                          }}
+                          key={preset.id}
+                        >
+                          <i
+                            style={{
+                              '--theme-accent': preset.accent,
+                              '--theme-surface': preset.surface,
+                            } as React.CSSProperties}
+                          />
+                          <span>{t(preset.label)}</span>
+                          {selected === preset.id ? (
+                            <Check aria-hidden="true" />
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </div>
             ) : null}
           </div>
@@ -2577,15 +2887,39 @@ function App({ application = studioApplication }: AppProps) {
         <div className="rail-capabilities">
           <span>{t('处理能力')}</span>
           <p>
-            <i className={capabilities?.ffmpeg ? 'ok' : ''} />
+            <i
+              className={
+                !capabilities
+                  ? 'is-pending'
+                  : capabilities.ffmpeg
+                    ? 'is-ready'
+                    : 'is-unavailable'
+              }
+            />
             {t('媒体标准化')}
           </p>
           <p>
-            <i className={capabilities?.ytDlp ? 'ok' : ''} />
+            <i
+              className={
+                !capabilities
+                  ? 'is-pending'
+                  : capabilities.ytDlp
+                    ? 'is-ready'
+                    : 'is-unavailable'
+              }
+            />
             {t('公开链接解析')}
           </p>
           <p>
-            <i className={capabilities?.worker ? 'ok' : ''} />
+            <i
+              className={
+                !capabilities
+                  ? 'is-pending'
+                  : capabilities.worker
+                    ? 'is-ready'
+                    : 'is-unavailable'
+              }
+            />
             {t('AI 推理 Worker')}
           </p>
         </div>
@@ -4481,10 +4815,18 @@ function App({ application = studioApplication }: AppProps) {
                       <>
                         <div>
                           <strong>
-                            {t('使用系统默认浏览器登录状态')}
+                            {mediaSessionRecovery.sessionMode ===
+                            'isolated-login'
+                              ? t('在应用内登录后重试')
+                              : t('使用系统默认浏览器登录状态')}
                           </strong>
                           <p>
-                            {language === 'en-US'
+                            {mediaSessionRecovery.sessionMode ===
+                            'isolated-login'
+                              ? t(
+                                  'Windows Chromium 登录 Cookie 受系统加密保护。将在隔离窗口完成登录，仅导出目标站点 Cookie，并在任务结束后删除。',
+                                )
+                              : language === 'en-US'
                               ? `Read ${mediaSessionRecovery.browser.label}'s default profile cookies for this retry only. Cookies are not stored or uploaded.`
                               : `仅为本次重试读取 ${mediaSessionRecovery.browser.label} 默认配置中的站点 Cookie，不保存也不上传。`}
                           </p>
@@ -4514,11 +4856,20 @@ function App({ application = studioApplication }: AppProps) {
                           <button
                             type="button"
                             className="primary-button"
+                            disabled={mediaSessionRecovery.detecting}
                             onClick={() =>
                               void retryWithDefaultBrowserSession()
                             }
                           >
-                            {t('确认并重试')}
+                            {mediaSessionRecovery.detecting ? (
+                              <LoaderCircle className="spin" aria-hidden="true" />
+                            ) : (
+                              <Cookie aria-hidden="true" />
+                            )}
+                            {mediaSessionRecovery.sessionMode ===
+                            'isolated-login'
+                              ? t('打开隔离登录窗口')
+                              : t('确认并重试')}
                           </button>
                         </div>
                       </>
@@ -4547,6 +4898,41 @@ function App({ application = studioApplication }: AppProps) {
                         </button>
                       </>
                     )}
+                  </div>
+                ) : null}
+                {qqMusicLoginRecovery ? (
+                  <div className="media-session-recovery">
+                    <KeyRound aria-hidden="true" />
+                    <div>
+                      <strong>{t('使用 QQ 音乐网页登录授权')}</strong>
+                      <p>
+                        {t(
+                          '新版 Windows 客户端未提供可读取的登录凭据。登录信息仅用于本次官方授权验证，任务结束后立即删除。',
+                        )}
+                      </p>
+                    </div>
+                    <div className="media-session-actions">
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => setQQMusicLoginRecovery(null)}
+                      >
+                        {t('取消')}
+                      </button>
+                      <button
+                        type="button"
+                        className="primary-button"
+                        disabled={qqMusicLoginRecovery.authorizing}
+                        onClick={() => void authorizeQQMusicAndRetry()}
+                      >
+                        {qqMusicLoginRecovery.authorizing ? (
+                          <LoaderCircle className="spin" aria-hidden="true" />
+                        ) : (
+                          <KeyRound aria-hidden="true" />
+                        )}
+                        {t('登录并重试')}
+                      </button>
+                    </div>
                   </div>
                 ) : null}
                 {error.includes('完全磁盘访问权限') &&
@@ -4643,6 +5029,76 @@ function App({ application = studioApplication }: AppProps) {
                   {settingsError}
                 </p>
               ) : null}
+            </div>
+            <div className="settings-appearance">
+              <header>
+                <Palette aria-hidden="true" />
+                <span>
+                  <strong>{t('外观与配色')}</strong>
+                  <small>{t('明暗模式与具体配色分别保存')}</small>
+                </span>
+              </header>
+              <div
+                className="appearance-segmented"
+                role="group"
+                aria-label={t('外观模式')}
+              >
+                {(
+                  [
+                    ['system', '跟随系统', Monitor],
+                    ['light', '白天模式', Sun],
+                    ['dark', '黑夜模式', Moon],
+                  ] as const
+                ).map(([mode, label, Icon]) => (
+                  <button
+                    type="button"
+                    className={appearanceMode === mode ? 'is-active' : ''}
+                    aria-pressed={appearanceMode === mode}
+                    onClick={() => setAppearanceMode(mode)}
+                    key={mode}
+                  >
+                    <Icon aria-hidden="true" />
+                    {t(label)}
+                  </button>
+                ))}
+              </div>
+              {(
+                [
+                  ['白天配色', lightThemePresets, lightTheme, setLightTheme],
+                  ['黑夜配色', darkThemePresets, darkTheme, setDarkTheme],
+                ] as const
+              ).map(([label, presets, selected, selectTheme]) => (
+                <div
+                  className="settings-theme-group"
+                  aria-label={t(label)}
+                  key={label}
+                >
+                  <span>{t(label)}</span>
+                  <div>
+                    {presets.map((preset) => (
+                      <button
+                        type="button"
+                        aria-label={t(preset.label)}
+                        aria-pressed={selected === preset.id}
+                        className={selected === preset.id ? 'is-active' : ''}
+                        onClick={() => selectTheme(preset.id)}
+                        key={preset.id}
+                      >
+                        <i
+                          style={{
+                            '--theme-accent': preset.accent,
+                            '--theme-surface': preset.surface,
+                          } as React.CSSProperties}
+                        />
+                        <span>{t(preset.label)}</span>
+                        {selected === preset.id ? (
+                          <Check aria-hidden="true" />
+                        ) : null}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
             <footer>
               <button
@@ -5478,19 +5934,61 @@ function App({ application = studioApplication }: AppProps) {
             >
               <div>
                 <dt>本地 API</dt>
-                <dd>{runtimeStatus?.apiReady ? '可用' : '检查中'}</dd>
+                <dd
+                  className={
+                    !runtimeStatus
+                      ? 'is-pending'
+                      : runtimeStatus.apiReady
+                        ? 'is-ready'
+                        : 'is-unavailable'
+                  }
+                >
+                  <i />
+                  {runtimeStatus?.apiReady ? '可用' : '检查中'}
+                </dd>
               </div>
               <div>
                 <dt>项目存储</dt>
-                <dd>{runtimeStatus?.storageReady ? 'SQLite' : '检查中'}</dd>
+                <dd
+                  className={
+                    !runtimeStatus
+                      ? 'is-pending'
+                      : runtimeStatus.storageReady
+                        ? 'is-ready'
+                        : 'is-unavailable'
+                  }
+                >
+                  <i />
+                  {runtimeStatus?.storageReady ? 'SQLite' : '检查中'}
+                </dd>
               </div>
               <div>
                 <dt>推理 Worker</dt>
-                <dd>{runtimeStatus?.workerReady ? '可用' : '未安装'}</dd>
+                <dd
+                  className={
+                    !runtimeStatus
+                      ? 'is-pending'
+                      : runtimeStatus.workerReady
+                        ? 'is-ready'
+                        : 'is-unavailable'
+                  }
+                >
+                  <i />
+                  {runtimeStatus?.workerReady ? '可用' : '未安装'}
+                </dd>
               </div>
               <div>
                 <dt>活动模型</dt>
-                <dd>
+                <dd
+                  className={
+                    runtimeStatus?.activeModel?.releaseChannel === 'production'
+                      ? 'is-ready'
+                      : runtimeStatus?.activeModel
+                        ? 'is-warning'
+                        : 'is-neutral'
+                  }
+                >
+                  <i />
                   {runtimeStatus?.activeModel
                     ? `${runtimeStatus.activeModel.id} ${runtimeStatus.activeModel.version} · ${
                         runtimeStatus.activeModel.releaseChannel === 'production'
@@ -5910,6 +6408,49 @@ function App({ application = studioApplication }: AppProps) {
             {runtimeError && <p className="dialog-error">{runtimeError}</p>}
           </section>
         </div>
+      ) : null}
+      {updateProgress?.phase === 'downloading' ? (
+        <section
+          className="update-progress-panel"
+          role="status"
+          aria-live="polite"
+          aria-label={t('应用更新下载进度')}
+        >
+          <header className="update-progress-header">
+            <span className="update-progress-icon">
+              <Download aria-hidden="true" />
+            </span>
+            <div>
+              <strong>{t('正在下载应用更新')}</strong>
+              <span>Guitar Tab Studio {updateProgress.version}</span>
+            </div>
+            <output>{Math.round(updateProgress.percent)}%</output>
+          </header>
+          <div className="update-progress-metrics">
+            <span>
+              {formatTransferSize(updateProgress.transferredBytes)}
+              {updateProgress.totalBytes > 0
+                ? ` / ${formatTransferSize(updateProgress.totalBytes)}`
+                : ''}
+            </span>
+            {updateProgress.bytesPerSecond > 0 ? (
+              <span>
+                {formatTransferSize(updateProgress.bytesPerSecond)}/s
+              </span>
+            ) : null}
+          </div>
+          <div
+            className="update-progress-track"
+            role="progressbar"
+            aria-label={t('应用更新下载进度')}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(updateProgress.percent)}
+          >
+            <span style={{ width: `${updateProgress.percent}%` }} />
+          </div>
+          <small>{t('下载完成后可选择立即重启安装')}</small>
+        </section>
       ) : null}
     </div>
   )

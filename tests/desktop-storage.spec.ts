@@ -204,6 +204,18 @@ test('lets a desktop administrator configure and run automatic cleanup', async (
   const dialog = page.getByRole('dialog', { name: '桌面运行时' })
   await expect(dialog.getByText('自动清理', { exact: true })).toBeVisible()
   await expect(dialog.getByText('可用 6.3 GB · 可回收 1.5 GB')).toBeVisible()
+  await expect(
+    dialog
+      .locator('.runtime-status-local > div')
+      .filter({ hasText: '本地 API' })
+      .locator('dd'),
+  ).toHaveClass(/is-ready/u)
+  await expect(
+    dialog
+      .locator('.runtime-status-local > div')
+      .filter({ hasText: '推理 Worker' })
+      .locator('dd'),
+  ).toHaveClass(/is-ready/u)
 
   await dialog.locator('.runtime-cleanup-toggle').click()
   await dialog.getByLabel('启动阈值').fill('6')

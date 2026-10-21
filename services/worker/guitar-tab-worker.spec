@@ -43,7 +43,10 @@ analysis = Analysis(
     [str(worker_root / "worker.py")],
     pathex=[str(worker_root)],
     binaries=[],
-    datas=collect_data_files("basic_pitch"),
+    datas=(
+        collect_data_files("basic_pitch")
+        + collect_data_files("demucs")
+    ),
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},

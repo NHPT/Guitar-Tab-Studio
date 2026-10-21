@@ -95,6 +95,7 @@ export interface CapabilityState {
 export interface AuthorizedMediaConsent {
   accepted: true
   policyVersion: 2
+  credentialSession?: string
 }
 
 export interface AuthorizedMediaGrant {
@@ -129,6 +130,8 @@ export interface MediaBrowserDescriptor {
 
 export interface MediaBrowserSession {
   browser: MediaBrowserId
+  sessionToken?: string
+  cookieFile?: string
 }
 
 export interface SourceDescriptor {

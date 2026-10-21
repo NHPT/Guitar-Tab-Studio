@@ -7,6 +7,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -133,8 +134,38 @@ const mediaBrowserIds = [
   'safari',
   'vivaldi',
 ] as const
+const mediaSessionRoot = process.env.GTS_MEDIA_SESSION_ROOT
 mkdirSync(uploadRoot, { recursive: true })
 mkdirSync(trainingArtifactIncomingRoot, { recursive: true })
+
+function desktopSessionFile(
+  value: unknown,
+  suffix: string,
+  maximumBytes: number,
+): string | undefined {
+  if (value === undefined) return undefined
+  if (
+    process.env.GTS_DESKTOP_LOCAL !== '1' ||
+    !mediaSessionRoot ||
+    typeof value !== 'string' ||
+    !value.endsWith(suffix)
+  ) {
+    throw new Error('无效的一次性登录授权')
+  }
+  const root = realpathSync(mediaSessionRoot)
+  const path = realpathSync(value)
+  const relativePath = relative(root, path)
+  const stats = statSync(path)
+  if (
+    !relativePath ||
+    relativePath.startsWith('..') ||
+    stats.size <= 0 ||
+    stats.size > maximumBytes
+  ) {
+    throw new Error('一次性登录授权文件无效')
+  }
+  return path
+}
 
 const deploymentAlertUrl = process.env.GTS_DEPLOYMENT_ALERT_URL
 const deploymentAlertSecret = process.env.GTS_DEPLOYMENT_ALERT_SECRET
@@ -1514,9 +1545,15 @@ app.post('/api/import/link', (request, response) => {
     return
   }
 
+  let cookieFile: string | undefined
   try {
     const source = sourceFromLink(url)
     const requestedBrowser = request.body?.mediaSession?.browser
+    cookieFile = desktopSessionFile(
+      request.body?.mediaSession?.cookieFile,
+      '.cookies.txt',
+      2 * 1024 * 1024,
+    )
     if (requestedBrowser !== undefined) {
       if (process.env.GTS_DESKTOP_LOCAL !== '1') {
         throw new Error('浏览器登录态仅可用于本机媒体获取')
@@ -1530,6 +1567,7 @@ app.post('/api/import/link', (request, response) => {
       Object.defineProperty(source, 'mediaSession', {
         value: {
           browser: requestedBrowser as (typeof mediaBrowserIds)[number],
+          ...(cookieFile ? { cookieFile } : {}),
         },
         enumerable: false,
         configurable: false,
@@ -1552,10 +1590,14 @@ app.post('/api/import/link', (request, response) => {
       }
     }
     const job = createJob(source, undefined, inferenceProvider, {
-      onSettled: () => storageCleanup.run('job-settled'),
+      onSettled: () => {
+        if (cookieFile) unlinkIfExists(cookieFile)
+        storageCleanup.run('job-settled')
+      },
     })
     response.status(202).json(job)
   } catch (error) {
+    if (cookieFile) unlinkIfExists(cookieFile)
     response.status(400).json({
       error: error instanceof Error ? error.message : '链接无效',
     })
@@ -1616,25 +1658,55 @@ app.post('/api/import/upload', upload.single('media'), (request, response) => {
     return
   }
 
+  let qqMusicCredentialFile: string | undefined
+  try {
+    qqMusicCredentialFile = desktopSessionFile(
+      request.body?.qqMusicCredentialFile,
+      '.qqmusic.json',
+      64 * 1024,
+    )
+    if (qqMusicCredentialFile && protectedProvider !== 'qqmusic') {
+      throw new Error('QQ 音乐授权只能用于 QQ 音乐文件')
+    }
+  } catch (error) {
+    unlinkIfExists(request.file.path)
+    if (qqMusicCredentialFile) unlinkIfExists(qqMusicCredentialFile)
+    response.status(400).json({
+      error: error instanceof Error ? error.message : '一次性登录授权无效',
+    })
+    return
+  }
+  const source = {
+    kind: 'upload' as const,
+    label: '本地上传',
+    filename: request.file.originalname,
+    authorizedMedia: requiresAuthorizedDecode
+      ? {
+          provider: protectedProvider,
+          purpose: 'analysis-and-score-generation' as const,
+          decodedOutput: 'ephemeral' as const,
+          policyVersion: 2 as const,
+        }
+      : undefined,
+  }
+  if (qqMusicCredentialFile) {
+    Object.defineProperty(source, 'qqMusicCredentialFile', {
+      value: qqMusicCredentialFile,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    })
+  }
   const job = createJob(
-    {
-      kind: 'upload',
-      label: '本地上传',
-      filename: request.file.originalname,
-      authorizedMedia: requiresAuthorizedDecode
-        ? {
-            provider: protectedProvider,
-            purpose: 'analysis-and-score-generation',
-            decodedOutput: 'ephemeral',
-            policyVersion: 2,
-          }
-        : undefined,
-    },
+    source,
     request.file.path,
     inferenceProvider,
     {
       removeInputOnSettled: true,
-      onSettled: () => storageCleanup.run('job-settled'),
+      onSettled: () => {
+        if (qqMusicCredentialFile) unlinkIfExists(qqMusicCredentialFile)
+        storageCleanup.run('job-settled')
+      },
     },
   )
   response.status(202).json(job)

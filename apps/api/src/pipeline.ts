@@ -44,6 +44,10 @@ import {
   localAuthorizedMediaDecoderAvailable,
 } from './authorized-media.js'
 import {
+  fetchQQMusicEkey,
+  loadQQMusicCredentialFile,
+} from './qqmusic-ekey.js'
+import {
   builtinDemoAnalysis,
   builtinDemoStemFilenames,
 } from './builtin-demo.js'
@@ -156,10 +160,55 @@ export function describeWorkerFailure(
   stderr: string,
   code: number | null,
 ): string {
+  const structured = stderr
+    .split(/\r?\n/u)
+    .reverse()
+    .map((line) => {
+      try {
+        const message = JSON.parse(line) as {
+          type?: string
+          stageLabel?: string
+          message?: string
+        }
+        return message.type === 'gts-error' ? message : undefined
+      } catch {
+        return undefined
+      }
+    })
+    .find(Boolean)
   if (
     /no space left on device|errno\s*28|可用磁盘空间不足/iu.test(stderr)
   ) {
     return '可用磁盘空间不足，无法完成音轨分离。请释放更多磁盘空间后重试。'
+  }
+  if (
+    /winerror\s*126|dll load failed|failed to load python dll|specified module could not be found/iu.test(
+      stderr,
+    ) ||
+    code === 3221225781
+  ) {
+    return 'Windows 推理运行库缺失或损坏。请重新安装当前版本；若问题仍然存在，请安装 Microsoft Visual C++ 2015-2022 x64 运行库后重试。'
+  }
+  if (
+    /demucs.*(?:files\.txt|htdemucs_6s\.yaml)|demucs 运行数据缺失/iu.test(
+      stderr,
+    )
+  ) {
+    return '音轨分离模型配置未包含在安装包中，请更新或重新安装应用。'
+  }
+  if (
+    /invalid data found when processing input|could not find codec parameters|unsupported codec/iu.test(
+      stderr,
+    )
+  ) {
+    return '无法解码该音频文件。请确认文件未损坏，或先转换为标准 MP3、WAV、FLAC 后重试。'
+  }
+  if (
+    structured?.message &&
+    !/[\\/](?:Users|home|var|tmp|private)[\\/]/u.test(structured.message)
+  ) {
+    const stage = structured.stageLabel?.replace(/^正在/u, '') ?? '媒体分析'
+    return `${stage}失败：${structured.message.slice(0, 500)}`
   }
   const detail =
     stderr
@@ -916,10 +965,9 @@ export function workerSourceArguments(
           '--url',
           job.source.url,
           ...(job.source.mediaSession
-            ? [
-                '--cookies-from-browser',
-                job.source.mediaSession.browser,
-              ]
+            ? job.source.mediaSession.cookieFile
+              ? ['--cookies-file', job.source.mediaSession.cookieFile]
+              : ['--cookies-from-browser', job.source.mediaSession.browser]
             : []),
         ]
       : []
@@ -1044,7 +1092,7 @@ export async function executeWorker(
     let stderr = ''
     const stderrDecoder = new StringDecoder('utf8')
     processHandle.stderr.on('data', (chunk: Buffer) => {
-      stderr = `${stderr}${stderrDecoder.write(chunk)}`.slice(-1200)
+      stderr = `${stderr}${stderrDecoder.write(chunk)}`.slice(-64 * 1024)
     })
     processHandle.on('error', (error) => {
       cleanup()
@@ -1053,7 +1101,7 @@ export async function executeWorker(
     processHandle.on('close', (code) => {
       cleanup()
       stdout += stdoutDecoder.end()
-      stderr = `${stderr}${stderrDecoder.end()}`.slice(-1200)
+      stderr = `${stderr}${stderrDecoder.end()}`.slice(-64 * 1024)
       if (stdout) {
         const progress = parseWorkerProgress(stdout)
         if (progress) onProgress?.(progress)
@@ -1432,6 +1480,23 @@ async function runInferencePipeline(
       outputPath: decodedPath,
       originalName: preparedName,
       inputPath: preparedPath,
+      ...((job.source as SourceDescriptor & {
+        qqMusicCredentialFile?: string
+      }).qqMusicCredentialFile
+        ? {
+            resolveQmcEkey: async (media, signal) =>
+              fetchQQMusicEkey({
+                credential: await loadQQMusicCredentialFile(
+                  (job.source as SourceDescriptor & {
+                    qqMusicCredentialFile: string
+                  }).qqMusicCredentialFile,
+                ),
+                media,
+                platform: process.platform === 'win32' ? '27' : '20',
+                signal,
+              }),
+          }
+        : {}),
       signal: options.signal,
     })
     const decodedHeader = await readMediaHeader(decodedPath)
@@ -1480,18 +1545,30 @@ export function runPipeline(
       new Error('真实分析 Worker 尚未就绪，任务未执行；系统不会用示例结果替代'),
     )
   }
-  return runInferencePipeline(job, onUpdate, inputPath, options).catch((error: unknown) => {
-    const message = error instanceof Error ? error.message : '媒体获取失败'
-    if (!inputPath && platform) {
-      const failure = classifyMediaAcquisitionFailure(platform, message)
-      const wrapped = new Error(failure.message) as Error & {
-        errorCode?: 'media-auth-required' | 'media-session-unavailable'
+  return runInferencePipeline(job, onUpdate, inputPath, options)
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : '媒体获取失败'
+      if (!inputPath && platform) {
+        const failure = classifyMediaAcquisitionFailure(platform, message)
+        const wrapped = new Error(failure.message) as Error & {
+          errorCode?: 'media-auth-required' | 'media-session-unavailable'
+        }
+        wrapped.errorCode = failure.errorCode
+        throw wrapped
       }
-      wrapped.errorCode = failure.errorCode
-      throw wrapped
-    }
-    throw error
-  })
+      throw error
+    })
+    .finally(() => {
+      const ephemeralFiles = [
+        job.source.mediaSession?.cookieFile,
+        (job.source as SourceDescriptor & {
+          qqMusicCredentialFile?: string
+        }).qqMusicCredentialFile,
+      ].filter((path): path is string => typeof path === 'string')
+      return Promise.all(
+        ephemeralFiles.map((path) => rm(path, { force: true })),
+      ).then(() => undefined)
+    })
 }
 
 export function classifyMediaAcquisitionFailure(
@@ -1501,7 +1578,9 @@ export function classifyMediaAcquisitionFailure(
   message: string
   errorCode?: 'media-auth-required' | 'media-session-unavailable'
 } {
-  if (/drm|encrypted|encryption/iu.test(message)) {
+  if (
+    /drm|encrypted (?:content|media|stream)|media encryption/iu.test(message)
+  ) {
     return {
       message: `${platform.label}返回了当前解码器不支持的 DRM 或加密媒体流`,
     }
@@ -1512,7 +1591,7 @@ export function classifyMediaAcquisitionFailure(
     )
   ) {
     if (
-      /could not (?:copy|find).*cookie|failed to decrypt|keyring|safe storage/iu.test(
+      /could not (?:copy|find).*cookie|failed to decrypt|keyring|safe storage|app-bound|v20 cookie/iu.test(
         message,
       )
     ) {

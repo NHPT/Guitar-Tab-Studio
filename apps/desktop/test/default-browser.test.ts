@@ -55,6 +55,7 @@ test('detects a supported default browser and reports unsupported handlers', asy
     {
       supported: true,
       browser: { id: 'chrome', label: 'Google Chrome' },
+      sessionMode: 'browser-cookies',
     },
   )
   assert.deepEqual(
@@ -85,10 +86,36 @@ test('falls back to the macOS workspace API when LaunchServices preferences are 
   assert.deepEqual(result, {
     supported: true,
     browser: { id: 'edge', label: 'Microsoft Edge' },
+    sessionMode: 'browser-cookies',
   })
   assert.deepEqual(
     calls.map((call) => call.executable),
     ['/usr/bin/defaults', '/usr/bin/osascript'],
   )
   assert.match(calls[1].argumentsList.join(' '), /NSWorkspace/u)
+})
+
+test('uses isolated login for app-bound Chromium cookies on Windows', async () => {
+  assert.deepEqual(
+    await detectDefaultMediaBrowser(
+      'win32',
+      async () => '    ProgId    REG_SZ    MSEdgeHTM\r\n',
+    ),
+    {
+      supported: true,
+      browser: { id: 'edge', label: 'Microsoft Edge' },
+      sessionMode: 'isolated-login',
+    },
+  )
+  assert.deepEqual(
+    await detectDefaultMediaBrowser(
+      'win32',
+      async () => '    ProgId    REG_SZ    FirefoxURL-ABC\r\n',
+    ),
+    {
+      supported: true,
+      browser: { id: 'firefox', label: 'Firefox' },
+      sessionMode: 'browser-cookies',
+    },
+  )
 })

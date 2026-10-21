@@ -106,13 +106,30 @@ function scalarText(value: unknown): string | undefined {
   return undefined
 }
 
-function validMusicId(value: unknown): string | undefined {
+function decodedScalarText(value: unknown): string | undefined {
   const text = scalarText(value)
+  if (!text) return undefined
+  const byteArray = /^@ByteArray\((.*)\)$/isu.exec(text)?.[1]
+  const unwrapped = byteArray ?? text
+  if (/%[0-9a-f]{2}/iu.test(unwrapped)) {
+    try {
+      return decodeURIComponent(unwrapped)
+    } catch {
+      // Continue with the original value.
+    }
+  }
+  return unwrapped
+}
+
+function validMusicId(value: unknown): string | undefined {
+  const text = decodedScalarText(value)
+    ?.replace(/^[oO]/u, '')
+    .replace(/^0+(?=\d{4,24}$)/u, '')
   return text && /^\d{4,24}$/u.test(text) ? text : undefined
 }
 
 function validMusicKey(value: unknown): string | undefined {
-  const text = scalarText(value)
+  const text = decodedScalarText(value)
   if (
     !text ||
     text.length < 8 ||
@@ -562,6 +579,20 @@ function windowsCredentialText(
   )) {
     record[match[1]] = match[2]
   }
+  const tokens = text
+    .split(/[\u0000-\u001f\u007f]+/u)
+    .map((token) => token.trim())
+    .filter(Boolean)
+  for (let index = 0; index + 1 < tokens.length; index += 1) {
+    const key = normalizedKey(tokens[index])
+    if (
+      musicIdKeys.has(key) ||
+      musicKeyKeys.has(key) ||
+      loginTypeKeys.has(key)
+    ) {
+      record[tokens[index]] = tokens[index + 1]
+    }
+  }
   return parseQQMusicCredential(record)
 }
 
@@ -596,6 +627,19 @@ function decodedWindowsCredentialTexts(data: Uint8Array): string[] {
     )
   }
   decoded.add(buffer.toString('utf8'))
+  const asciiTokens =
+    buffer
+      .toString('latin1')
+      .match(/[\x20-\x7e]{1,4096}/gu)
+      ?.slice(0, 16_384) ?? []
+  const utf16Tokens =
+    buffer
+      .subarray(0, buffer.length - (buffer.length % 2))
+      .toString('utf16le')
+      .match(/[\x20-\x7e]{1,4096}/gu)
+      ?.slice(0, 16_384) ?? []
+  if (asciiTokens.length > 0) decoded.add(asciiTokens.join('\n'))
+  if (utf16Tokens.length > 0) decoded.add(utf16Tokens.join('\n'))
   return [...decoded]
 }
 
@@ -766,10 +810,29 @@ export async function loadQQMusicWindowsCredential(
   }
   if (readableFileFound && unsupportedFormat) {
     throw new Error(
-      '已找到 QQ 音乐客户端配置，但无法解析当前登录信息。请将 QQ 音乐更新到最新版，完全退出后重新登录下载该文件的账号，再打开本应用重试。',
+      '已找到 QQ 音乐客户端配置，但当前登录格式无法安全读取。请在应用中选择“使用 QQ 音乐网页登录授权”，并登录下载该文件的账号后重试。',
     )
   }
   return undefined
+}
+
+export async function loadQQMusicCredentialFile(
+  path: string,
+): Promise<QQMusicCredential> {
+  const stats = await lstat(path)
+  if (
+    !stats.isFile() ||
+    stats.isSymbolicLink() ||
+    stats.size <= 0 ||
+    stats.size > 64 * 1024
+  ) {
+    throw new Error('QQ 音乐一次性授权文件无效')
+  }
+  const credential = parseQQMusicCredential(
+    JSON.parse(await readFile(path, 'utf8')),
+  )
+  if (!credential) throw new Error('QQ 音乐一次性授权信息无效')
+  return credential
 }
 
 export function parseQQMusicMediaName(

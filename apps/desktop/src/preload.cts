@@ -4,6 +4,7 @@ import type {
   DesktopBridge,
   DesktopInvokeRequest,
   DesktopStudioMethod,
+  DesktopUpdateProgress,
   TranscriptionSetupProgress,
 } from '@gts/core'
 
@@ -53,6 +54,8 @@ const allowedMethods = new Set<DesktopStudioMethod>([
   'application-settings',
   'set-language',
   'detect-default-media-browser',
+  'authorize-media-session',
+  'authorize-qqmusic',
   'open-external-url',
   'set-background-job-state',
 ])
@@ -100,6 +103,16 @@ const bridge: DesktopBridge = {
     ipcRenderer.on('studio:transcription-progress', handler)
     return () =>
       ipcRenderer.removeListener('studio:transcription-progress', handler)
+  },
+  onUpdateProgress(
+    listener: (progress: DesktopUpdateProgress) => void,
+  ): () => void {
+    const handler = (
+      _event: unknown,
+      progress: DesktopUpdateProgress,
+    ) => listener(progress)
+    ipcRenderer.on('studio:update-progress', handler)
+    return () => ipcRenderer.removeListener('studio:update-progress', handler)
   },
 }
 

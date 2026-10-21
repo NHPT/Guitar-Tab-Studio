@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 import urllib.request
 import zipfile
 from bisect import bisect_left
@@ -76,6 +77,7 @@ YOURMT3_MODEL_SHA256 = (
 )
 YOURMT3_MODEL_BYTES = 561_544_628
 _MODEL_PROGRESS_RANGE = (0.0, 100.0, "正在下载模型")
+_CURRENT_STAGE_LABEL = "正在启动媒体分析"
 
 
 def emit_model_event(event_type: str, **payload: object) -> None:
@@ -193,6 +195,8 @@ def run(command: list[str]) -> None:
 
 
 def emit_progress(progress: float, status: str, stage_label: str) -> None:
+    global _CURRENT_STAGE_LABEL
+    _CURRENT_STAGE_LABEL = stage_label
     print(
         json.dumps(
             {
@@ -304,6 +308,35 @@ def hardware_probe() -> dict[str, object]:
             else {}
         ),
         "providers": providers,
+    }
+
+
+def runtime_self_test() -> dict[str, object]:
+    from importlib.metadata import version
+    from importlib.resources import files
+
+    import basic_pitch
+    import demucs
+    import soundfile
+    import torch
+
+    demucs_remote = files("demucs").joinpath("remote")
+    required_demucs_data = ("files.txt", "htdemucs_6s.yaml")
+    missing = [
+        name
+        for name in required_demucs_data
+        if not demucs_remote.joinpath(name).is_file()
+    ]
+    if missing:
+        raise RuntimeError(
+            "Demucs 运行数据缺失：" + ", ".join(missing)
+        )
+    return {
+        "basicPitch": version("basic-pitch"),
+        "demucs": getattr(demucs, "__version__", version("demucs")),
+        "ffmpeg": ffmpeg_command(),
+        "soundfile": soundfile.__version__,
+        "torch": torch.__version__,
     }
 
 
@@ -881,6 +914,7 @@ def acquire_url(
     url: str,
     destination: Path,
     cookies_from_browser: str | None = None,
+    cookies_file: Path | None = None,
 ) -> tuple[Path, dict[str, object]]:
     ffmpeg = ffmpeg_command()
     output = destination / "source.%(ext)s"
@@ -890,10 +924,21 @@ def acquire_url(
         else []
     )
     session_options: list[str] = []
-    cookies_file = os.environ.get("GTS_MEDIA_COOKIES_FILE")
-    if cookies_file:
-        cookies_path = Path(cookies_file)
-        if not cookies_path.is_file():
+    configured_cookies_file = (
+        cookies_file
+        or (
+            Path(os.environ["GTS_MEDIA_COOKIES_FILE"])
+            if os.environ.get("GTS_MEDIA_COOKIES_FILE")
+            else None
+        )
+    )
+    if configured_cookies_file:
+        cookies_path = configured_cookies_file.resolve()
+        if (
+            not cookies_path.is_file()
+            or cookies_path.stat().st_size <= 0
+            or cookies_path.stat().st_size > 2 * 1024 * 1024
+        ):
             raise RuntimeError("Configured media cookies file is unavailable")
         session_options.extend(["--cookies", str(cookies_path)])
     elif cookies_from_browser:
@@ -4550,6 +4595,16 @@ def main() -> None:
         help="Report local accelerator and optional provider availability.",
     )
     parser.add_argument(
+        "--runtime-self-test",
+        action="store_true",
+        help="Verify packaged runtime imports and required model registries.",
+    )
+    parser.add_argument(
+        "--media-probe",
+        action="store_true",
+        help="Normalize one local media file and report its decoded duration.",
+    )
+    parser.add_argument(
         "--prepare-transcription-provider",
         action="store_true",
         help="Download and verify the selected transcription provider.",
@@ -4570,6 +4625,11 @@ def main() -> None:
             "vivaldi",
         ),
         help="Read cookies from this browser for this URL acquisition only.",
+    )
+    parser.add_argument(
+        "--cookies-file",
+        type=Path,
+        help="Read an ephemeral Netscape cookie file for this acquisition only.",
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument(
@@ -4635,6 +4695,9 @@ def main() -> None:
     if arguments.hardware_probe:
         print(json.dumps(hardware_probe(), ensure_ascii=False))
         return
+    if arguments.runtime_self_test:
+        print(json.dumps(runtime_self_test(), ensure_ascii=False))
+        return
     if arguments.prepare_transcription_provider:
         prepare_transcription_provider(
             arguments.transcription_provider,
@@ -4648,6 +4711,20 @@ def main() -> None:
         parser.error("one of --input or --url is required")
     output = arguments.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    if arguments.media_probe:
+        if arguments.input is None:
+            parser.error("--media-probe requires --input")
+        normalized = normalize_audio(arguments.input.resolve(), output)
+        print(
+            json.dumps(
+                {
+                    "duration": decoded_audio_duration(normalized),
+                    "normalized": str(normalized),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
 
     if arguments.url:
         emit_progress(3, "acquiring", "正在获取在线媒体")
@@ -4655,6 +4732,7 @@ def main() -> None:
             arguments.url,
             output,
             arguments.cookies_from_browser,
+            arguments.cookies_file,
         )
         emit_progress(10, "acquiring", "在线媒体获取完成")
     else:
@@ -5144,4 +5222,21 @@ if __name__ == "__main__":
         import multiprocessing
 
         multiprocessing.freeze_support()
-    main()
+    try:
+        main()
+    except Exception as error:
+        traceback.print_exc()
+        sys.stderr.write(
+            json.dumps(
+                {
+                    "type": "gts-error",
+                    "stageLabel": _CURRENT_STAGE_LABEL,
+                    "errorType": type(error).__name__,
+                    "message": str(error),
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        sys.stderr.flush()
+        raise SystemExit(1) from None

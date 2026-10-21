@@ -32,6 +32,7 @@ export interface LocalApiServiceOptions {
   apiEntry: string
   workingDirectory: string
   dataRoot: string
+  mediaSessionRoot?: string
   homePath?: string
   workerCommand?: string
   ffmpegBinary?: string
@@ -81,6 +82,7 @@ export interface StudioApiTransport {
   submitUpload(
     upload: DesktopUpload,
     authorizedMedia?: AuthorizedMediaConsent,
+    qqMusicCredentialFile?: string,
   ): Promise<AnalysisJob>
   submitScore(upload: DesktopScoreUpload): Promise<StudioProject>
 }
@@ -140,6 +142,9 @@ export class LocalApiService implements StudioApiTransport {
         PORT: String(port),
         GTS_DATA_ROOT: this.options.dataRoot,
         GTS_DESKTOP_LOCAL: '1',
+        ...(this.options.mediaSessionRoot
+          ? { GTS_MEDIA_SESSION_ROOT: this.options.mediaSessionRoot }
+          : {}),
         ...(this.options.homePath
           ? { GTS_DESKTOP_HOME: this.options.homePath }
           : {}),
@@ -324,6 +329,7 @@ export class LocalApiService implements StudioApiTransport {
   submitUpload(
     upload: DesktopUpload,
     authorizedMedia?: AuthorizedMediaConsent,
+    qqMusicCredentialFile?: string,
   ): Promise<AnalysisJob> {
     const body = new FormData()
     const arrayBuffer = new ArrayBuffer(upload.bytes.byteLength)
@@ -341,6 +347,9 @@ export class LocalApiService implements StudioApiTransport {
         'authorizationPolicyVersion',
         String(authorizedMedia.policyVersion),
       )
+    }
+    if (qqMusicCredentialFile) {
+      body.append('qqMusicCredentialFile', qqMusicCredentialFile)
     }
     return this.request('/api/import/upload', { method: 'POST', body })
   }

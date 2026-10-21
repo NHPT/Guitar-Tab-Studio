@@ -205,6 +205,16 @@ test('passes a browser session only to the requested URL worker task', () => {
     '--input',
     resolve('/tmp/input.wav'),
   ])
+  job.source.mediaSession = {
+    browser: 'edge',
+    cookieFile: '/tmp/bilibili.cookies.txt',
+  }
+  assert.deepEqual(workerSourceArguments(job), [
+    '--url',
+    job.source.url,
+    '--cookies-file',
+    '/tmp/bilibili.cookies.txt',
+  ])
 })
 
 test('turns worker tracebacks into copyable user-facing errors', () => {
@@ -226,6 +236,20 @@ test('turns worker tracebacks into copyable user-facing errors', () => {
       1,
     ),
     '音轨分离进程异常退出。请确认磁盘空间充足后重试。',
+  )
+  assert.equal(
+    describeWorkerFailure(
+      '{"type":"gts-error","stageLabel":"正在标准化音频","errorType":"RuntimeError","message":"Invalid data found when processing input"}',
+      1,
+    ),
+    '无法解码该音频文件。请确认文件未损坏，或先转换为标准 MP3、WAV、FLAC 后重试。',
+  )
+  assert.match(
+    describeWorkerFailure(
+      'OSError: [WinError 126] The specified module could not be found',
+      1,
+    ),
+    /Windows 推理运行库缺失/u,
   )
 })
 
@@ -289,6 +313,13 @@ test('reports the actual media acquisition failure category', () => {
     classifyMediaAcquisitionFailure(
       bilibili,
       'ERROR: Failed to decrypt Chrome cookies using keyring',
+    ).errorCode,
+    'media-session-unavailable',
+  )
+  assert.equal(
+    classifyMediaAcquisitionFailure(
+      bilibili,
+      'ERROR: Edge v20 cookies use App-Bound Encryption',
     ).errorCode,
     'media-session-unavailable',
   )
