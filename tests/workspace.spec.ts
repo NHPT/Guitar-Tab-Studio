@@ -317,6 +317,41 @@ test('runs the metronome and drum machine without starting song playback', async
       1,
     )
   }
+  await drumPatterns.selectOption('custom-drums')
+  await expect(drumPatterns).toHaveValue('custom-drums')
+  const customKick = page.getByRole('button', {
+    name: '底鼓，第 2 步',
+  })
+  await expect(customKick).toHaveAttribute('aria-pressed', 'false')
+  await customKick.click()
+  await expect(customKick).toHaveAttribute('aria-pressed', 'true')
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const patterns = JSON.parse(
+          window.localStorage.getItem('gts-custom-rhythms-v1') ?? '{}',
+        ) as Record<string, Array<{ step: number; voice: string }>>
+        return patterns['4/4']?.some(
+          (hit) => hit.step === 1 && hit.voice === 'kick',
+        )
+      }),
+    )
+    .toBe(true)
+  await drumPatterns.selectOption('rock-driving')
+  await drumPatterns.selectOption('custom-drums')
+  await expect(customKick).toHaveAttribute('aria-pressed', 'true')
+  const practiceMeter = page.getByLabel('练习拍号')
+  await practiceMeter.selectOption('6/8')
+  await drumPatterns.selectOption('custom-drums')
+  await expect(
+    page.getByRole('button', { name: '底鼓，第 12 步' }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole('button', { name: '底鼓，第 13 步' }),
+  ).toHaveCount(0)
+  await practiceMeter.selectOption('4/4')
+  await drumPatterns.selectOption('custom-drums')
+  await expect(customKick).toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('.practice-step-sequencer > div')).toHaveCount(4)
   const kickMute = page.getByRole('button', { name: '底鼓静音' })
   await kickMute.click()
@@ -338,7 +373,8 @@ test('opens the tuner and live transcription as separate tools', async ({
   await expect(
     page.getByRole('button', { name: '开始调音' }),
   ).toBeVisible()
-  await expect(page.locator('.tuner-strings span')).toHaveText([
+  await expect(page.locator('.tuner-strings button > span')).toHaveText([
+    'AUTO',
     'E2',
     'A2',
     'D3',
@@ -346,6 +382,9 @@ test('opens the tuner and live transcription as separate tools', async ({
     'B3',
     'E4',
   ])
+  const lowE = page.getByRole('button', { name: '6弦 E2' })
+  await lowE.click()
+  await expect(lowE).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByRole('heading', { name: '吉他谱' })).toBeHidden()
 
   await page.getByRole('button', { name: '实时记谱' }).click()
@@ -363,6 +402,58 @@ test('opens the tuner and live transcription as separate tools', async ({
 
   await page.getByRole('button', { name: '返回分析' }).click()
   await expect(page.getByRole('heading', { name: '吉他谱' })).toBeVisible()
+})
+
+test('stabilizes a harmonic-rich low E as the correct guitar string', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const mediaDevices = navigator.mediaDevices ?? {}
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: mediaDevices,
+    })
+    Object.defineProperty(mediaDevices, 'getUserMedia', {
+      configurable: true,
+      value: async () => {
+        const context = new AudioContext()
+        const destination = context.createMediaStreamDestination()
+        const master = context.createGain()
+        master.gain.value = 0.32
+        master.connect(destination)
+        const nodes: AudioNode[] = [master, destination]
+        for (const [multiple, gainValue] of [
+          [1, 0.03],
+          [2, 0.75],
+          [3, 0.02],
+          [4, 0.15],
+        ]) {
+          const oscillator = context.createOscillator()
+          const gain = context.createGain()
+          oscillator.frequency.value = 82.4069 * multiple
+          gain.gain.value = gainValue
+          oscillator.connect(gain).connect(master)
+          oscillator.start()
+          nodes.push(oscillator, gain)
+        }
+        await context.resume()
+        Object.assign(window, {
+          __tunerFixture: { context, destination, nodes },
+        })
+        return destination.stream
+      },
+    })
+  })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: '调音器' }).click()
+  await page.getByRole('button', { name: '开始调音' }).click()
+  await expect(page.locator('.tuner-note strong')).toHaveText('E2')
+  await expect(page.locator('.tuner-readout > b')).toHaveText('音准准确')
+  await expect(page.locator('.tuner-meter-labels strong')).toContainText(
+    '0.0 cent',
+  )
+  await page.getByRole('button', { name: '停止调音' }).click()
 })
 
 test('starts the song at its first detected measure after count-in', async ({

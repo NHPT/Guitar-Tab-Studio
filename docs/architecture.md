@@ -318,7 +318,7 @@ protected upload or locally acquired link
                 |
        inspect container footer
                 |
-   embedded key or macOS desktop authorization
+ embedded key or macOS/Windows desktop authorization
                 |
        1 MiB bounded block reader
                 |
@@ -348,23 +348,27 @@ filename starts at `0x48` and can contain a different resource MID. The
 `GetEVkey` request must send the footer song MID in `songmid` and the complete
 resource filename in `filename`. Deriving both values from the filename causes
 official authorization failure `101404` for files where those IDs differ.
-Only the macOS Electron-local API may handle that variant: after the user
-confirms the rights notice, it reads the current QQ Music login credential from
-the application's sandbox preference plist. `AutoLoginUserInfo` is a nested
-binary `NSKeyedArchiver`, so the API converts both plist layers with the system
-`plutil`, resolves `$objects` / `CF$UID` references and extracts only
-`nUserId`, `strAuthst` and `loginType`. It then calls QQ Music's
-`music.vkey.GetEVkey` endpoint using the macOS desktop request profile. The
-returned per-file result is treated as the authorization decision before local
-decryption continues.
+Only the macOS and Windows Electron-local APIs may handle that variant. After
+the user confirms the rights notice, macOS reads the current QQ Music login
+credential from the application's sandbox preference plist.
+`AutoLoginUserInfo` is a nested binary `NSKeyedArchiver`, so the API converts
+both plist layers with the system `plutil`, resolves `$objects` / `CF$UID`
+references and extracts only `nUserId`, `strAuthst` and `loginType`. Windows
+checks the current-user QQ Music registry key and performs a bounded scan of
+small login/configuration files under the current user's Roaming and Local
+QQ Music roots. JSON, INI, XML, Cookie-style text and UTF-16 text are accepted;
+media/cache directories, symbolic links, oversized files and unrelated user
+directories are not scanned. The API then calls QQ Music's
+`music.vkey.GetEVkey` endpoint using the matching macOS or Windows desktop
+request profile. The returned per-file result is treated as the authorization
+decision before local decryption continues.
 
 The credential and ekey remain in request memory and are never logged,
 persisted, returned to the renderer or exposed by an API route. The official
 request has a fixed HTTPS destination, bounded response, ten-second timeout and
-no redirects. Browser clients cannot read a local QQ Music login, and automatic
-credential extraction is not implemented on Windows or Linux. No third-party
-decoder or key lookup service is used. A MusicEx footer without a usable
-filename is rejected rather than guessed.
+no redirects. Browser and Linux clients cannot read a local QQ Music login. No
+third-party decoder or key lookup service is used. A MusicEx footer without a
+usable filename is rejected rather than guessed.
 
 macOS may deny cross-container reads until the user grants the desktop
 application Full Disk Access. Permission denial, missing login state and

@@ -33,8 +33,22 @@ export interface GuitarPosition {
   fret: number
 }
 
+export interface TunerStabilityOptions {
+  minimumConfidence?: number
+  minimumReadings?: number
+  switchReadings?: number
+}
+
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value))
+}
+
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((left, right) => left - right)
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle]
 }
 
 export function midiFrequency(midi: number): number {
@@ -63,11 +77,115 @@ export function tunerReading(
   }
 }
 
+export function tunerReadingForTarget(
+  reading: TunerReading,
+  targetMidi: number,
+  maximumDistanceCents = 80,
+): TunerReading | null {
+  if (!Number.isInteger(targetMidi)) return null
+  const targetFrequency = midiFrequency(targetMidi)
+  let bestFrequency = reading.frequency
+  let bestDistance = Math.abs(
+    1200 * Math.log2(bestFrequency / targetFrequency),
+  )
+  for (let harmonic = 2; harmonic <= 6; harmonic += 1) {
+    const candidate = reading.frequency / harmonic
+    const distance = Math.abs(
+      1200 * Math.log2(candidate / targetFrequency),
+    )
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestFrequency = candidate
+    }
+  }
+  if (bestDistance > maximumDistanceCents) return null
+  const exactMidi = 69 + 12 * Math.log2(bestFrequency / 440)
+  return {
+    ...reading,
+    frequency: bestFrequency,
+    midi: targetMidi,
+    note: noteNames[(targetMidi + 120) % 12],
+    octave: Math.floor(targetMidi / 12) - 1,
+    cents: clamp((exactMidi - targetMidi) * 100, -50, 50),
+  }
+}
+
+export function stabilizeTunerReadings(
+  readings: readonly TunerReading[],
+  previous?: TunerReading | null,
+  options: TunerStabilityOptions = {},
+): TunerReading | null {
+  const minimumConfidence = options.minimumConfidence ?? 0.72
+  const minimumReadings = Math.max(1, options.minimumReadings ?? 3)
+  const switchReadings = Math.max(
+    minimumReadings,
+    options.switchReadings ?? 4,
+  )
+  const usable = readings
+    .filter(
+      (reading) =>
+        reading.confidence >= minimumConfidence &&
+        Number.isFinite(reading.frequency) &&
+        reading.frequency > 0,
+    )
+    .slice(-9)
+  if (usable.length < minimumReadings) return previous ?? null
+
+  const switchingTail = usable.slice(-switchReadings)
+  const forcedMidi =
+    switchingTail.length === switchReadings &&
+    switchingTail.every(
+      (reading) => reading.midi === switchingTail[0].midi,
+    )
+      ? switchingTail[0].midi
+      : undefined
+  const groups = new Map<number, TunerReading[]>()
+  for (const reading of usable) {
+    const group = groups.get(reading.midi) ?? []
+    group.push(reading)
+    groups.set(reading.midi, group)
+  }
+  const candidates = [...groups.entries()]
+    .filter(([, group]) => group.length >= minimumReadings)
+    .sort(([leftMidi, left], [rightMidi, right]) => {
+      const score = (midi: number, group: readonly TunerReading[]) =>
+        group.length * 2 +
+        group.reduce((sum, reading) => sum + reading.confidence, 0) +
+        (previous?.midi === midi ? 1.5 : 0)
+      return score(rightMidi, right) - score(leftMidi, left)
+    })
+  const selectedMidi =
+    forcedMidi ??
+    candidates[0]?.[0] ??
+    previous?.midi
+  const selected = selectedMidi === undefined
+    ? []
+    : (groups.get(selectedMidi) ?? [])
+  if (selected.length < minimumReadings) return previous ?? null
+
+  const latest = selected.at(-1)!
+  const measuredFrequency = median(
+    selected.slice(-5).map((reading) => reading.frequency),
+  )
+  const frequency =
+    previous?.midi === selectedMidi
+      ? previous.frequency * 0.58 + measuredFrequency * 0.42
+      : measuredFrequency
+  return tunerReading({
+    frequency,
+    confidence: median(
+      selected.slice(-5).map((reading) => reading.confidence),
+    ),
+    level: latest.level,
+  })
+}
+
 export function detectFundamentalFrequency(
   input: Float32Array,
   sampleRate: number,
   minimumFrequency = 70,
   maximumFrequency = 1200,
+  preferredFrequencies: readonly number[] = [],
 ): DetectedPitch | null {
   if (
     input.length < 512 ||
@@ -127,19 +245,68 @@ export function detectFundamentalFrequency(
       cumulative > 0
         ? (difference[lag] * (lag - minimumLag + 1)) / cumulative
         : 1
-    if (
-      lag > minimumLag &&
-      normalized[lag - 1] < 0.16 &&
-      normalized[lag - 1] <= normalized[lag - 2] &&
-      normalized[lag - 1] <= normalized[lag]
-    ) {
-      selectedLag = lag - 1
-      selectedValue = normalized[selectedLag]
-      break
+  }
+  if (preferredFrequencies.length > 0) {
+    const toleranceRatio = 2 ** (70 / 1200)
+    const candidates: Array<{ lag: number; value: number }> = []
+    for (const frequency of preferredFrequencies) {
+      if (
+        !Number.isFinite(frequency) ||
+        frequency < minimumFrequency ||
+        frequency > maximumFrequency
+      ) {
+        continue
+      }
+      const start = Math.max(
+        minimumLag,
+        Math.floor(effectiveRate / (frequency * toleranceRatio)),
+      )
+      const end = Math.min(
+        maximumLag,
+        Math.ceil(effectiveRate / (frequency / toleranceRatio)),
+      )
+      let candidateLag = -1
+      let candidateValue = Number.POSITIVE_INFINITY
+      for (let lag = start; lag <= end; lag += 1) {
+        if (normalized[lag] < candidateValue) {
+          candidateLag = lag
+          candidateValue = normalized[lag]
+        }
+      }
+      if (candidateLag >= minimumLag) {
+        candidates.push({ lag: candidateLag, value: candidateValue })
+      }
     }
-    if (normalized[lag] < selectedValue) {
-      selectedLag = lag
-      selectedValue = normalized[lag]
+    const reliable = candidates
+      .filter((candidate) => candidate.value <= 0.03)
+      .sort((left, right) => left.lag - right.lag)
+    const fallback = [...candidates].sort(
+      (left, right) => left.value - right.value,
+    )
+    const selected = reliable[0] ?? fallback[0]
+    if (selected) {
+      selectedLag = selected.lag
+      selectedValue = selected.value
+    }
+  } else {
+    for (let lag = minimumLag + 1; lag < maximumLag; lag += 1) {
+      if (
+        normalized[lag] < 0.16 &&
+        normalized[lag] <= normalized[lag - 1] &&
+        normalized[lag] <= normalized[lag + 1]
+      ) {
+        selectedLag = lag
+        selectedValue = normalized[lag]
+        break
+      }
+    }
+    if (selectedLag < 0) {
+      for (let lag = minimumLag; lag <= maximumLag; lag += 1) {
+        if (normalized[lag] < selectedValue) {
+          selectedLag = lag
+          selectedValue = normalized[lag]
+        }
+      }
     }
   }
   if (selectedLag < minimumLag || selectedValue > 0.32) return null
@@ -158,6 +325,19 @@ export function detectFundamentalFrequency(
     confidence: clamp(1 - selectedValue, 0, 1),
     level,
   }
+}
+
+export function detectStandardGuitarFrequency(
+  input: Float32Array,
+  sampleRate: number,
+): DetectedPitch | null {
+  return detectFundamentalFrequency(
+    input,
+    sampleRate,
+    70,
+    400,
+    openStringMidi.map(midiFrequency),
+  )
 }
 
 export function guitarPositionForPitch(

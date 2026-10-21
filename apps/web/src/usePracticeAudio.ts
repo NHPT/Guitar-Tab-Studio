@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { MutableRefObject } from 'react'
-import { rhythmEventPosition } from '@gts/core'
+import {
+  PRACTICE_OUTPUT_GAIN,
+  rhythmEventPosition,
+} from '@gts/core'
 import type {
   PercussionVoice,
   PracticeRhythm,
@@ -166,54 +169,180 @@ function schedulePercussion(
 ): AudioScheduledSourceNode[] {
   const level = Math.max(0.0001, Math.min(1, velocity))
   if (voice === 'click-high' || voice === 'click-low') {
+    const high = voice === 'click-high'
+    if (kit === 'wood') {
+      return [
+        playTone(
+          context,
+          high ? 980 : 640,
+          level * 0.9,
+          0.11,
+          'triangle',
+          destination,
+          at,
+        ),
+        playTone(
+          context,
+          high ? 1470 : 960,
+          level * 0.32,
+          0.055,
+          'sine',
+          destination,
+          at + 0.004,
+        ),
+      ]
+    }
     return [
       playTone(
         context,
-        voice === 'click-high' ? 1760 : 1120,
-        level * (kit === 'wood' ? 0.78 : 0.9),
-        kit === 'wood' ? 0.08 : 0.065,
-        kit === 'wood' ? 'sine' : 'square',
+        high ? 2100 : 1320,
+        level,
+        0.045,
+        'square',
         destination,
         at,
       ),
     ]
   }
   if (voice === 'kick') {
+    const profile = {
+      acoustic: {
+        start: 132,
+        end: 46,
+        duration: 0.21,
+        level: 0.58,
+        type: 'sine' as const,
+      },
+      electronic: {
+        start: 196,
+        end: 38,
+        duration: 0.3,
+        level: 0.72,
+        type: 'sine' as const,
+      },
+      brush: {
+        start: 102,
+        end: 52,
+        duration: 0.16,
+        level: 0.38,
+        type: 'triangle' as const,
+      },
+      wood: {
+        start: 118,
+        end: 72,
+        duration: 0.12,
+        level: 0.46,
+        type: 'triangle' as const,
+      },
+    }[kit === 'click' ? 'acoustic' : kit]
     const oscillator = context.createOscillator()
     const gain = context.createGain()
-    oscillator.type = 'sine'
-    oscillator.frequency.setValueAtTime(
-      kit === 'electronic' ? 168 : 132,
-      at,
+    oscillator.type = profile.type
+    oscillator.frequency.setValueAtTime(profile.start, at)
+    oscillator.frequency.exponentialRampToValueAtTime(
+      profile.end,
+      at + profile.duration * 0.72,
     )
-    oscillator.frequency.exponentialRampToValueAtTime(46, at + 0.12)
-    gain.gain.setValueAtTime(level * 0.52, at)
-    gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.2)
+    gain.gain.setValueAtTime(level * profile.level, at)
+    gain.gain.exponentialRampToValueAtTime(
+      0.0001,
+      at + profile.duration,
+    )
     oscillator.connect(gain).connect(destination)
     oscillator.start(at)
-    oscillator.stop(at + 0.21)
-    return [oscillator]
+    oscillator.stop(at + profile.duration + 0.01)
+    const sources: AudioScheduledSourceNode[] = [oscillator]
+    if (kit === 'electronic') {
+      sources.push(
+        playTone(
+          context,
+          2400,
+          level * 0.18,
+          0.018,
+          'square',
+          destination,
+          at,
+        ),
+      )
+    } else if (kit === 'brush') {
+      sources.push(
+        scheduleNoiseBurst(
+          context,
+          at,
+          0.075,
+          level * 0.11,
+          destination,
+          'lowpass',
+          520,
+        ),
+      )
+    } else if (kit === 'wood') {
+      sources.push(
+        playTone(
+          context,
+          330,
+          level * 0.24,
+          0.07,
+          'square',
+          destination,
+          at,
+        ),
+      )
+    }
+    return sources
   }
   if (voice === 'snare' || voice === 'clap') {
+    if (kit === 'wood') {
+      return [
+        playTone(
+          context,
+          voice === 'clap' ? 1380 : 920,
+          level * 0.5,
+          voice === 'clap' ? 0.045 : 0.075,
+          'square',
+          destination,
+          at,
+        ),
+        playTone(
+          context,
+          voice === 'clap' ? 1880 : 1320,
+          level * 0.22,
+          0.035,
+          'triangle',
+          destination,
+          at + 0.012,
+        ),
+      ]
+    }
+    const electronic = kit === 'electronic'
+    const brushed = kit === 'brush'
     const sources: AudioScheduledSourceNode[] = [
       scheduleNoiseBurst(
         context,
         at,
-        voice === 'clap' ? 0.095 : 0.14,
-        level * (kit === 'brush' ? 0.2 : 0.34),
+        voice === 'clap'
+          ? electronic
+            ? 0.07
+            : 0.1
+          : brushed
+            ? 0.24
+            : electronic
+              ? 0.095
+              : 0.15,
+        level * (brushed ? 0.24 : electronic ? 0.45 : 0.38),
         destination,
-        'highpass',
-        kit === 'brush' ? 950 : 1450,
+        electronic ? 'bandpass' : 'highpass',
+        brushed ? 720 : electronic ? 2800 : 1450,
       ),
     ]
     if (voice === 'snare') {
       sources.push(
         playTone(
           context,
-          kit === 'electronic' ? 215 : 185,
-          level * 0.12,
-          0.1,
-          'triangle',
+          electronic ? 245 : brushed ? 150 : 185,
+          level * (electronic ? 0.22 : brushed ? 0.07 : 0.14),
+          electronic ? 0.075 : 0.11,
+          electronic ? 'square' : 'triangle',
           destination,
           at,
         ),
@@ -222,12 +351,12 @@ function schedulePercussion(
       sources.push(
         scheduleNoiseBurst(
           context,
-          at + 0.018,
-          0.06,
-          level * 0.2,
+          at + (electronic ? 0.026 : 0.018),
+          electronic ? 0.045 : 0.06,
+          level * (electronic ? 0.3 : 0.2),
           destination,
-          'highpass',
-          1700,
+          electronic ? 'bandpass' : 'highpass',
+          electronic ? 3600 : 1700,
         ),
       )
     }
@@ -239,44 +368,157 @@ function schedulePercussion(
     voice === 'shaker' ||
     voice === 'crash'
   ) {
+    if (kit === 'wood') {
+      const frequency = {
+        'closed-hat': 2100,
+        'open-hat': 1640,
+        shaker: 2520,
+        crash: 1180,
+      }[voice]
+      return [
+        playTone(
+          context,
+          frequency,
+          level * (voice === 'crash' ? 0.34 : 0.24),
+          voice === 'crash' ? 0.2 : voice === 'open-hat' ? 0.12 : 0.055,
+          'triangle',
+          destination,
+          at,
+        ),
+      ]
+    }
+    const electronic = kit === 'electronic'
+    const brushed = kit === 'brush'
     const duration =
       voice === 'crash'
-        ? 0.42
+        ? brushed
+          ? 0.58
+          : electronic
+            ? 0.32
+            : 0.46
         : voice === 'open-hat'
-          ? 0.18
+          ? brushed
+            ? 0.28
+            : electronic
+              ? 0.13
+              : 0.2
           : voice === 'shaker'
-            ? 0.065
-            : 0.045
+            ? brushed
+              ? 0.1
+              : 0.065
+            : brushed
+              ? 0.08
+              : electronic
+                ? 0.032
+                : 0.05
     const frequency =
-      voice === 'crash' ? 2800 : voice === 'shaker' ? 4200 : 6500
-    return [
+      voice === 'crash'
+        ? brushed
+          ? 1750
+          : electronic
+            ? 4200
+            : 2800
+        : voice === 'shaker'
+          ? brushed
+            ? 2500
+            : 4200
+          : electronic
+            ? 8900
+            : brushed
+              ? 3200
+              : 6500
+    const sources: AudioScheduledSourceNode[] = [
       scheduleNoiseBurst(
         context,
         at,
         duration,
         level *
-          (voice === 'crash' ? 0.22 : voice === 'open-hat' ? 0.16 : 0.11),
+          (voice === 'crash'
+            ? brushed
+              ? 0.17
+              : 0.25
+            : voice === 'open-hat'
+              ? brushed
+                ? 0.12
+                : 0.18
+              : brushed
+                ? 0.09
+                : 0.13),
         destination,
-        'highpass',
+        electronic ? 'bandpass' : 'highpass',
         frequency,
       ),
     ]
+    if (electronic && voice !== 'shaker') {
+      sources.push(
+        playTone(
+          context,
+          voice === 'crash' ? 4200 : 7200,
+          level * 0.07,
+          Math.min(0.12, duration),
+          'square',
+          destination,
+          at,
+        ),
+      )
+    }
+    return sources
   }
+  const resolvedKit = kit === 'click' ? 'acoustic' : kit
   const frequency = {
-    rim: kit === 'wood' ? 1320 : 930,
-    'tom-high': 176,
-    'tom-low': 112,
-    cowbell: 620,
-  }[voice]
-  const type: OscillatorType =
-    voice === 'rim' ? 'square' : voice === 'cowbell' ? 'square' : 'sine'
+    acoustic: {
+      rim: 930,
+      'tom-high': 176,
+      'tom-low': 112,
+      cowbell: 620,
+    },
+    electronic: {
+      rim: 1580,
+      'tom-high': 248,
+      'tom-low': 138,
+      cowbell: 880,
+    },
+    brush: {
+      rim: 760,
+      'tom-high': 154,
+      'tom-low': 96,
+      cowbell: 540,
+    },
+    wood: {
+      rim: 1320,
+      'tom-high': 680,
+      'tom-low': 420,
+      cowbell: 1040,
+    },
+  }[resolvedKit][voice]
+  const typeByKit = ({
+    acoustic: voice === 'rim' || voice === 'cowbell' ? 'square' : 'sine',
+    electronic: voice === 'tom-low' ? 'sawtooth' : 'square',
+    brush: 'triangle',
+    wood: 'triangle',
+  } satisfies Record<typeof resolvedKit, OscillatorType>)[resolvedKit]
   return [
     playTone(
       context,
       frequency,
-      level * (voice === 'cowbell' ? 0.16 : 0.22),
-      voice.startsWith('tom') ? 0.18 : 0.075,
-      type,
+      level *
+        (resolvedKit === 'electronic'
+          ? 0.3
+          : resolvedKit === 'brush'
+            ? 0.16
+            : voice === 'cowbell'
+              ? 0.2
+              : 0.25),
+      voice.startsWith('tom')
+        ? resolvedKit === 'electronic'
+          ? 0.24
+          : resolvedKit === 'wood'
+            ? 0.11
+            : 0.19
+        : resolvedKit === 'wood'
+          ? 0.06
+          : 0.08,
+      typeByKit,
       destination,
       at,
     ),
@@ -405,6 +647,8 @@ export function usePracticeAudio({
 }: PracticeAudioOptions): PracticeAudioState {
   const contextRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
+  const practiceGainRef = useRef<GainNode | null>(null)
+  const practiceLimiterRef = useRef<DynamicsCompressorNode | null>(null)
   const analyserConnectedRef = useRef(false)
   const lastBeatRef = useRef<string>('')
   const lastSyntheticPositionRef = useRef(0)
@@ -446,6 +690,8 @@ export function usePracticeAudio({
       })
       contextRef.current = context
       analyserRef.current = null
+      practiceGainRef.current = null
+      practiceLimiterRef.current = null
       analyserConnectedRef.current = false
     }
     const analyser = analyserRef.current ?? context.createAnalyser()
@@ -458,7 +704,22 @@ export function usePracticeAudio({
       analyser.connect(context.destination)
       analyserConnectedRef.current = true
     }
-    return { context, analyser }
+    const practiceGain =
+      practiceGainRef.current ?? context.createGain()
+    const practiceLimiter =
+      practiceLimiterRef.current ?? context.createDynamicsCompressor()
+    practiceGain.gain.value = PRACTICE_OUTPUT_GAIN
+    practiceLimiter.threshold.value = -7
+    practiceLimiter.knee.value = 8
+    practiceLimiter.ratio.value = 8
+    practiceLimiter.attack.value = 0.002
+    practiceLimiter.release.value = 0.08
+    if (!practiceGainRef.current || !practiceLimiterRef.current) {
+      practiceGain.connect(practiceLimiter).connect(analyser)
+    }
+    practiceGainRef.current = practiceGain
+    practiceLimiterRef.current = practiceLimiter
+    return { context, analyser, practiceOutput: practiceGain }
   }, [])
   const activateAudio = useCallback(async () => {
     const { context } = ensureAudioGraph()
@@ -500,7 +761,7 @@ export function usePracticeAudio({
     }: StartCountInOptions) => {
       cancelCountIn()
       const generation = countInGenerationRef.current
-      const { context, analyser } = ensureAudioGraph()
+      const { context, analyser, practiceOutput } = ensureAudioGraph()
       if (context.state !== 'running') {
         await Promise.race([
           context.resume(),
@@ -529,7 +790,7 @@ export function usePracticeAudio({
             kit,
             (beat === 1 ? 1 : 0.76) * volume,
             at,
-            analyser,
+            practiceOutput,
           ),
         )
         timers.push(
@@ -551,7 +812,7 @@ export function usePracticeAudio({
         kit,
         0.82 * volume,
         songStartsAt,
-        analyser,
+        practiceOutput,
       )
       nodes.push(...songStartNodes)
 
@@ -608,7 +869,7 @@ export function usePracticeAudio({
                 rhythm.kit,
                 hit.velocity * rhythm.volume,
                 songStartsAt,
-                analyser,
+                practiceOutput,
               ),
             )
           })
@@ -876,7 +1137,7 @@ export function usePracticeAudio({
 
   useEffect(() => {
     if (!playing || !project || !rhythm.enabled) return
-    const { context, analyser } = ensureAudioGraph()
+    const { context, practiceOutput } = ensureAudioGraph()
     const scheduledKeys = new Set(preScheduledRhythmKeysRef.current)
     preScheduledRhythmKeysRef.current.clear()
     const scheduledNodes = new Set<AudioScheduledSourceNode>()
@@ -937,7 +1198,7 @@ export function usePracticeAudio({
             rhythm.kit,
             hit.velocity * rhythm.volume,
             startsAt,
-            analyser,
+            practiceOutput,
           ).forEach(trackNode)
         })
       })
@@ -977,7 +1238,7 @@ export function usePracticeAudio({
       onStandaloneStep(-1)
       return
     }
-    const { context, analyser } = ensureAudioGraph()
+    const { context, practiceOutput } = ensureAudioGraph()
     const scheduledNodes = new Set<AudioScheduledSourceNode>()
     const stepTimers = new Set<number>()
     const mutedVoices = new Set(standaloneMutedVoices)
@@ -1017,7 +1278,7 @@ export function usePracticeAudio({
               standaloneKit,
               hit.velocity * standaloneVolume,
               nextAt,
-              analyser,
+              practiceOutput,
             ).forEach(trackNode)
           })
         const callbackTimer = window.setTimeout(() => {
@@ -1073,6 +1334,8 @@ export function usePracticeAudio({
       const context = contextRef.current
       contextRef.current = null
       analyserRef.current = null
+      practiceGainRef.current = null
+      practiceLimiterRef.current = null
       analyserConnectedRef.current = false
       if (context && context.state !== 'closed') {
         void context.close()

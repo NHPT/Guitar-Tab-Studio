@@ -1,0 +1,513 @@
+.adjudication-page {
+  height: calc(100vh - 60px);
+  min-height: 640px;
+  display: grid;
+  grid-template-columns: 250px minmax(560px, 1fr) 248px;
+  color: var(--text);
+}
+
+.adjudication-queue {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr);
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.adjudication-queue > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.adjudication-queue > header span,
+.adjudication-inspector section > span,
+.adjudication-differences header span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.adjudication-queue > header strong {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.adjudication-queue > div {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.adjudication-queue > div > button {
+  width: 100%;
+  min-height: 56px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.adjudication-queue > div > button.is-current {
+  box-shadow: inset 3px 0 var(--accent-strong);
+  background: var(--active-surface);
+}
+
+.adjudication-queue button > span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.adjudication-queue button strong,
+.adjudication-queue button small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.adjudication-queue button strong {
+  font-size: 12px;
+}
+
+.adjudication-queue button small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.adjudication-queue button i {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.adjudication-queue button i.is-ready {
+  color: var(--warning);
+}
+
+.adjudication-queue button i.is-gold {
+  color: var(--success);
+}
+
+.adjudication-main {
+  min-width: 0;
+  padding: 20px 24px 36px;
+  overflow-y: auto;
+}
+
+.adjudication-title {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.adjudication-title > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.adjudication-title span {
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.adjudication-title h1 {
+  margin: 0;
+  font-size: 20px;
+  letter-spacing: 0;
+}
+
+.adjudication-baseline {
+  display: grid;
+  grid-template-columns: repeat(2, 72px);
+  gap: 3px;
+}
+
+.adjudication-baseline button {
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: transparent;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.adjudication-baseline button.is-active {
+  border-color: var(--border);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.adjudication-transport {
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.adjudication-transport button,
+.adjudication-marker-editor > button {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.adjudication-transport svg,
+.adjudication-marker-editor svg {
+  width: 14px;
+  height: 14px;
+}
+
+.adjudication-transport strong,
+.adjudication-transport span {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.adjudication-transport span {
+  color: var(--text-muted);
+}
+
+.adjudication-timeline {
+  height: 230px;
+  position: relative;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 100% 50%, 10% 100%;
+  cursor: crosshair;
+}
+
+.adjudication-timeline > span {
+  position: absolute;
+  left: 8px;
+  z-index: 5;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.adjudication-timeline > span.is-a {
+  top: 8px;
+}
+
+.adjudication-timeline > span.is-b {
+  top: calc(50% + 8px);
+}
+
+.adjudication-timeline > button {
+  width: 10px;
+  height: 50%;
+  position: absolute;
+  left: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  transform: translateX(-50%);
+  cursor: pointer;
+}
+
+.adjudication-timeline > button::before {
+  content: "";
+  width: 1px;
+  height: 100%;
+  position: absolute;
+  left: 50%;
+  background: var(--accent);
+}
+
+.adjudication-timeline > button.is-a {
+  top: 0;
+}
+
+.adjudication-timeline > button.is-b {
+  top: 50%;
+}
+
+.adjudication-timeline > button.is-b::before {
+  background: var(--warning);
+}
+
+.adjudication-timeline > button.is-downbeat::before {
+  width: 3px;
+}
+
+.adjudication-playhead {
+  width: 1px;
+  height: 100%;
+  position: absolute;
+  top: 0;
+  z-index: 6;
+  background: var(--danger);
+  pointer-events: none;
+}
+
+.adjudication-marker-editor {
+  display: grid;
+  grid-template-columns: 30px minmax(130px, 1fr) 110px 30px;
+  align-items: end;
+  gap: 8px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.adjudication-marker-editor label {
+  display: grid;
+  gap: 5px;
+}
+
+.adjudication-marker-editor label span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.adjudication-marker-editor input,
+.adjudication-marker-editor select {
+  width: 100%;
+  height: 30px;
+  box-sizing: border-box;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface-strong);
+  font-size: 12px;
+}
+
+.adjudication-differences {
+  padding-top: 16px;
+}
+
+.adjudication-differences > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+}
+
+.adjudication-differences header strong {
+  font-size: 13px;
+}
+
+.adjudication-differences > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+}
+
+.adjudication-differences button {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 70px 64px;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.adjudication-differences code,
+.adjudication-differences span,
+.adjudication-differences i {
+  font-size: 10px;
+}
+
+.adjudication-differences code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.adjudication-differences span {
+  color: var(--warning);
+  text-align: right;
+}
+
+.adjudication-differences i {
+  color: var(--text-muted);
+  font-style: normal;
+  text-align: right;
+}
+
+.adjudication-inspector {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 16px;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.adjudication-inspector section {
+  display: grid;
+  gap: 12px;
+}
+
+.adjudication-inspector dl {
+  margin: 0;
+}
+
+.adjudication-inspector dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.adjudication-inspector dt,
+.adjudication-inspector dd {
+  font-size: 11px;
+}
+
+.adjudication-inspector dt {
+  color: var(--text-muted);
+}
+
+.adjudication-inspector dd {
+  margin: 0;
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.adjudication-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 16px 0 0;
+  font-size: 11px;
+}
+
+.adjudication-message svg {
+  width: 13px;
+  height: 13px;
+}
+
+.adjudication-message.is-error {
+  color: var(--danger);
+}
+
+.adjudication-message.is-success {
+  color: var(--success);
+}
+
+.adjudication-submit {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin-top: auto;
+  border: 1px solid var(--accent-strong);
+  border-radius: 6px;
+  color: #fff;
+  background: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.adjudication-submit:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.adjudication-submit svg {
+  width: 14px;
+  height: 14px;
+}
+
+.adjudication-empty,
+.adjudication-loading {
+  min-height: calc(100vh - 60px);
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+@media (max-width: 1100px) {
+  .adjudication-page {
+    grid-template-columns: 220px minmax(500px, 1fr) 224px;
+  }
+
+  .adjudication-main {
+    padding-inline: 18px;
+  }
+}
+
+@media (max-width: 820px) {
+  .adjudication-page {
+    height: auto;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .adjudication-queue {
+    max-height: 280px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .adjudication-main {
+    padding: 18px 14px 30px;
+  }
+
+  .adjudication-inspector {
+    min-height: 360px;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+}
+
+@media (max-width: 520px) {
+  .adjudication-title {
+    align-items: flex-start;
+  }
+
+  .adjudication-baseline {
+    grid-template-columns: repeat(2, 58px);
+  }
+
+  .adjudication-timeline {
+    height: 200px;
+  }
+
+  .adjudication-marker-editor {
+    grid-template-columns: 30px minmax(0, 1fr) 30px;
+  }
+
+  .adjudication-marker-editor label:nth-of-type(2) {
+    grid-column: 2;
+  }
+
+  .adjudication-differences > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

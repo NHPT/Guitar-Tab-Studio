@@ -71,6 +71,7 @@ import {
   type PracticeRhythm,
   type ProjectRevision,
   type RhythmGroup,
+  type RhythmHit,
   type RhythmKit,
   type StorageCleanupStatus,
   type StudioApplication,
@@ -217,20 +218,78 @@ const practiceLanes: Array<{
   id: PracticeLaneId
   label: string
   voices: PercussionVoice[]
+  defaultVoice: PercussionVoice
+  velocity: number
 }> = [
-  { id: 'kick', label: '底鼓', voices: ['kick'] },
-  { id: 'snare', label: '军鼓', voices: ['snare', 'clap', 'rim'] },
+  {
+    id: 'kick',
+    label: '底鼓',
+    voices: ['kick'],
+    defaultVoice: 'kick',
+    velocity: 0.92,
+  },
+  {
+    id: 'snare',
+    label: '军鼓',
+    voices: ['snare', 'clap', 'rim'],
+    defaultVoice: 'snare',
+    velocity: 0.88,
+  },
   {
     id: 'hat',
     label: '踩镲',
     voices: ['closed-hat', 'open-hat', 'crash', 'shaker'],
+    defaultVoice: 'closed-hat',
+    velocity: 0.56,
   },
   {
     id: 'percussion',
     label: '打击乐',
     voices: ['tom-high', 'tom-low', 'cowbell'],
+    defaultVoice: 'tom-high',
+    velocity: 0.72,
   },
 ]
+const customRhythmId = 'custom-drums'
+const customRhythmsStorageKey = 'gts-custom-rhythms-v1'
+const percussionVoices = new Set(
+  practiceLanes.flatMap((lane) => lane.voices),
+)
+
+function customRhythmSteps(signature: TimeSignature): number {
+  return signature[0] * (signature[1] === 8 ? 2 : 4)
+}
+
+function initialCustomRhythms(): Record<string, RhythmHit[]> {
+  try {
+    const value = JSON.parse(
+      window.localStorage.getItem(customRhythmsStorageKey) ?? '{}',
+    ) as Record<string, unknown>
+    return Object.fromEntries(
+      Object.entries(value).flatMap(([signature, hits]) => {
+        if (!Array.isArray(hits)) return []
+        const parsed = hits.flatMap((hit) => {
+          if (
+            !hit ||
+            typeof hit !== 'object' ||
+            !Number.isInteger((hit as RhythmHit).step) ||
+            (hit as RhythmHit).step < 0 ||
+            !percussionVoices.has((hit as RhythmHit).voice) ||
+            typeof (hit as RhythmHit).velocity !== 'number' ||
+            (hit as RhythmHit).velocity <= 0 ||
+            (hit as RhythmHit).velocity > 1
+          ) {
+            return []
+          }
+          return [{ ...(hit as RhythmHit) }]
+        })
+        return [[signature, parsed]]
+      }),
+    )
+  } catch {
+    return {}
+  }
+}
 const rhythmGroupOrder: RhythmGroup[] = [
   'metronome',
   'rock',
@@ -564,6 +623,10 @@ function App({ application = studioApplication }: AppProps) {
   const [practiceAccent, setPracticeAccent] = useState(true)
   const [practiceRhythmId, setPracticeRhythmId] =
     useState('rock-basic')
+  const [practiceCustomEnabled, setPracticeCustomEnabled] =
+    useState(false)
+  const [customPracticeHits, setCustomPracticeHits] =
+    useState<Record<string, RhythmHit[]>>(initialCustomRhythms)
   const [practiceKit, setPracticeKit] =
     useState<RhythmKit>('click')
   const [practiceVolume, setPracticeVolume] = useState(0.7)
@@ -1023,6 +1086,13 @@ function App({ application = studioApplication }: AppProps) {
     window.localStorage.setItem('gts-practice-bpm', String(practiceBpm))
   }, [practiceBpm])
 
+  useEffect(() => {
+    window.localStorage.setItem(
+      customRhythmsStorageKey,
+      JSON.stringify(customPracticeHits),
+    )
+  }, [customPracticeHits])
+
   const scoreProject = useMemo(() => {
     if (!project) return project
     const selectedPart =
@@ -1136,6 +1206,26 @@ function App({ application = studioApplication }: AppProps) {
     ) ??
     standaloneDrumRhythms[0] ??
     PRACTICE_RHYTHMS.find((rhythm) => rhythm.id === 'rock-basic')!
+  const customPatternKey = formatTimeSignature(practiceTimeSignature)
+  const customPracticeRhythm = useMemo<PracticeRhythm>(
+    () => ({
+      id: customRhythmId,
+      label: '自定义节奏',
+      group: 'rock',
+      kit: practiceKit === 'click' ? 'acoustic' : practiceKit,
+      timeSignature: practiceTimeSignature,
+      stepsPerBar: customRhythmSteps(practiceTimeSignature),
+      bpmRange: [30, 260],
+      swing: 0.5,
+      hits: customPracticeHits[customPatternKey] ?? [],
+    }),
+    [
+      customPatternKey,
+      customPracticeHits,
+      practiceKit,
+      practiceTimeSignature,
+    ],
+  )
   const standaloneDefinition = useMemo(
     () =>
       practiceMode === 'metronome'
@@ -1144,9 +1234,13 @@ function App({ application = studioApplication }: AppProps) {
             practiceSubdivision,
             practiceAccent,
           )
-        : selectedStandaloneDrumRhythm,
+        : practiceCustomEnabled
+          ? customPracticeRhythm
+          : selectedStandaloneDrumRhythm,
     [
+      customPracticeRhythm,
       practiceAccent,
+      practiceCustomEnabled,
       practiceMode,
       practiceSubdivision,
       practiceTimeSignature,
@@ -1163,6 +1257,56 @@ function App({ application = studioApplication }: AppProps) {
   const handlePracticeStep = useCallback((step: number) => {
     setPracticeStep(step)
   }, [])
+  const enableCustomPattern = useCallback(() => {
+    setCustomPracticeHits((current) =>
+      customPatternKey in current
+        ? current
+        : {
+            ...current,
+            [customPatternKey]: selectedStandaloneDrumRhythm.hits.map(
+              (hit) => ({ ...hit }),
+            ),
+          },
+    )
+    setPracticeCustomEnabled(true)
+  }, [customPatternKey, selectedStandaloneDrumRhythm.hits])
+  const toggleCustomPatternHit = useCallback(
+    (lane: (typeof practiceLanes)[number], step: number) => {
+      setCustomPracticeHits((current) => {
+        const source =
+          current[customPatternKey] ??
+          selectedStandaloneDrumRhythm.hits.map((hit) => ({ ...hit }))
+        const hasHit = source.some(
+          (hit) => hit.step === step && lane.voices.includes(hit.voice),
+        )
+        const hits = source.filter(
+          (hit) => hit.step !== step || !lane.voices.includes(hit.voice),
+        )
+        if (!hasHit) {
+          hits.push({
+            step,
+            voice: lane.defaultVoice,
+            velocity: lane.velocity,
+          })
+        }
+        hits.sort(
+          (left, right) =>
+            left.step - right.step ||
+            left.voice.localeCompare(right.voice),
+        )
+        return { ...current, [customPatternKey]: hits }
+      })
+      setPracticeCustomEnabled(true)
+    },
+    [customPatternKey, selectedStandaloneDrumRhythm.hits],
+  )
+  const clearCustomPattern = useCallback(() => {
+    setCustomPracticeHits((current) => ({
+      ...current,
+      [customPatternKey]: [],
+    }))
+    setPracticeCustomEnabled(true)
+  }, [customPatternKey])
 
   const {
     analyserRef,
@@ -3034,6 +3178,7 @@ function App({ application = studioApplication }: AppProps) {
                         formatTimeSignature(signature) === event.target.value,
                     ) ?? practiceTimeSignatures[0]
                   setPracticeTimeSignature(next)
+                  setPracticeCustomEnabled(false)
                   const firstPattern = PRACTICE_RHYTHMS.find(
                     (rhythm) =>
                       rhythm.group !== 'metronome' &&
@@ -3091,16 +3236,28 @@ function App({ application = studioApplication }: AppProps) {
                 <span>{t('节奏型')}</span>
                 <select
                   aria-label={t('独立鼓机节奏型')}
-                  value={selectedStandaloneDrumRhythm.id}
+                  value={
+                    practiceCustomEnabled
+                      ? customRhythmId
+                      : selectedStandaloneDrumRhythm.id
+                  }
                   onChange={(event) => {
+                    if (event.target.value === customRhythmId) {
+                      enableCustomPattern()
+                      return
+                    }
                     const next =
                       standaloneDrumRhythms.find(
                         (rhythm) => rhythm.id === event.target.value,
                       ) ?? selectedStandaloneDrumRhythm
+                    setPracticeCustomEnabled(false)
                     setPracticeRhythmId(next.id)
                     setPracticeKit(next.kit)
                   }}
                 >
+                  <option value={customRhythmId}>
+                    {t('自定义节奏')}
+                  </option>
                   {standaloneDrumRhythms.map((rhythm) => (
                     <option value={rhythm.id} key={rhythm.id}>
                       {t(rhythm.label)}
@@ -3159,6 +3316,29 @@ function App({ application = studioApplication }: AppProps) {
                 '--practice-step-count': standaloneDefinition.stepsPerBar,
               } as CSSProperties}
             >
+              {practiceCustomEnabled ? (
+                <header className="practice-sequencer-toolbar">
+                  <strong>{t('自定义节奏')}</strong>
+                  <div>
+                    <button
+                      type="button"
+                      aria-label={t('恢复预设')}
+                      title={t('恢复预设')}
+                      onClick={() => setPracticeCustomEnabled(false)}
+                    >
+                      <RotateCcw aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={t('清空节奏')}
+                      title={t('清空节奏')}
+                      onClick={clearCustomPattern}
+                    >
+                      <Trash2 aria-hidden="true" />
+                    </button>
+                  </div>
+                </header>
+              ) : null}
               {practiceLanes.map((lane) => {
                 const muted = mutedPracticeLanes.includes(lane.id)
                 const laneSteps = new Set(
@@ -3169,6 +3349,7 @@ function App({ application = studioApplication }: AppProps) {
                 return (
                   <div className={muted ? 'is-muted' : ''} key={lane.id}>
                     <button
+                      className="practice-lane-toggle"
                       type="button"
                       aria-label={`${t(lane.label)}${muted ? t('取消静音') : t('静音')}`}
                       aria-pressed={muted}
@@ -3176,19 +3357,40 @@ function App({ application = studioApplication }: AppProps) {
                     >
                       {t(lane.label)}
                     </button>
-                    <span aria-hidden="true">
+                    <div className="practice-step-grid">
                       {Array.from(
                         { length: standaloneDefinition.stepsPerBar },
-                        (_, step) => (
-                          <i
-                            className={`${laneSteps.has(step) ? 'has-hit' : ''}${
+                        (_, step) => {
+                          const hasHit = laneSteps.has(step)
+                          const beatStep =
+                            standaloneDefinition.stepsPerBar /
+                            practiceTimeSignature[0]
+                          return (
+                          <button
+                            type="button"
+                            className={`${hasHit ? 'has-hit' : ''}${
                               practiceStep === step ? ' is-current' : ''
-                            }`}
+                            }${step % beatStep === 0 ? ' is-beat' : ''}`}
+                            aria-label={
+                              language === 'en-US'
+                                ? `${t(lane.label)}, step ${step + 1}`
+                                : `${t(lane.label)}，第 ${step + 1} 步`
+                            }
+                            aria-pressed={hasHit}
+                            title={
+                              language === 'en-US'
+                                ? `${t(lane.label)}, step ${step + 1}`
+                                : `${t(lane.label)}，第 ${step + 1} 步`
+                            }
+                            onClick={() =>
+                              toggleCustomPatternHit(lane, step)
+                            }
                             key={step}
                           />
-                        ),
+                          )
+                        },
                       )}
-                    </span>
+                    </div>
                   </div>
                 )
               })}
@@ -4169,7 +4371,7 @@ function App({ application = studioApplication }: AppProps) {
                       <FileAudio aria-hidden="true" />
                       <strong>{t('选择音频或视频')}</strong>
                       <span>MP3、WAV、FLAC、APE、M4A、AAC、OGG、MP4、MOV、WEBM，最大 500 MB</span>
-                      <small>加密容器经确认后由 API 服务端临时解码；无内嵌密钥的新版 QMC2 需使用 macOS 桌面版。</small>
+                      <small>加密容器经确认后由 API 服务端临时解码；无内嵌密钥的新版 QMC2 需使用 macOS 或 Windows 桌面版。</small>
                       <input
                         ref={fileInputRef}
                         type="file"

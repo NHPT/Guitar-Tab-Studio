@@ -58,6 +58,9 @@ npm run beat:gold -- init \
   --annotator-alias reviewer-a \
   --start 30 \
   --duration 24 \
+  --pre-roll 4 \
+  --post-roll 4 \
+  --corpus-version beat-pilot-v2 \
   --tag syncopated
 
 npm run beat:gold -- submit \
@@ -136,4 +139,139 @@ npm run beat:gold -- gate \
 | 20 | 朴树《平凡之路》 | 重复分解型、完整混音 | 3 |
 
 Pilot 不需要一次收集全部素材。优先准备表中前 10 首的本地无损文件或最高质量
-原始文件，每首先截取 2–4 个互不重叠片段，即可开始第一轮 48 片段标注。
+原始文件，每首先截取 4–5 个互不重叠片段，即可开始第一轮 48 片段标注。
+
+### Pilot 准备脚本
+
+本地受保护媒体必须先通过桌面端已有的官方授权链路解码为标准音频，并放入 Git
+忽略目录。脚本不读取平台账号、不执行解码，也不会把源音频、片段或审核结果写入
+仓库。当前 Pilot v2 使用 10 个录音、每段 24 秒评测窗，并在前后各附加 4 秒
+只听上下文，共 48 段：
+
+- train：24 段；
+- validation：10 段；
+- test：14 段；
+- 同一录音只属于一个分区。
+
+准备命令：
+
+```bash
+npm run beat:pilot -- \
+  --source-dir .cache/beat-gold/sources
+```
+
+脚本输出到 `.cache/beat-gold/pilot-v2/`，包括逐录音节拍候选、48 个 PCM
+审核片段、指定审核者的 draft 文件和 `pilot-manifest.json`。先生成
+`reviewer-a`，再使用同一源目录独立初始化 `reviewer-b`：
+
+```bash
+npm run beat:pilot -- \
+  --source-dir .cache/beat-gold/sources \
+  --annotator-alias reviewer-b
+```
+
+不得使用 `--force` 覆盖已经开始人工复核的队列。manifest 固定记录
+`corpus_version`、语料摘要、音频边界和评测窗，审核文件不得修改这些字段。
+
+前后上下文只用于判断完整小节和裁剪相位，不进入 Beat/Downbeat 指标；评分只读取
+`evaluation_start <= at < evaluation_end` 的拍点。拍点始终保留全曲小节号与拍位，
+不得把裁剪后的第一个拍点重新编号为强拍。Pilot v1 已归档，不得继续标注。
+
+这些候选仅用于开始人工标注，状态固定为 `draft`、`benchmark_eligible: false`；
+完成双人独立标注和第三方裁决前，不得作为评测金标准或用于宣称准确率。
+
+### 本地审核后台
+
+真实人工复核使用冻结快照，避免日常开发热更新影响正在进行的审核：
+
+```bash
+npm run beat:review:freeze
+npm run beat:review:preview
+```
+
+`freeze` 会构建并复制当前 API/Web 制品，但不会复制或修改真实 Pilot。`preview`
+使用独立运行目录和固定端口，继续只读同一份 Pilot 源数据；除非审核员主动保存或
+提交，否则启动、刷新和页面导航不会改写审核文件。
+
+访问地址：
+
+```text
+http://127.0.0.1:5191/admin/login
+```
+
+API 固定使用 `http://127.0.0.1:8791`。访问 `localhost:5191` 会自动跳转到
+`127.0.0.1`，确保管理会话与 API 处于同一站点。冻结预览只监听本机回环地址，
+可与 `5173/8787` 的日常开发环境并行运行。
+
+当前本地预览 owner 账号为 `admin`，开发期密码为 `Admin@123456`。删除隔离运行
+目录后，首次访问会重新进入 owner 初始化。账号状态保存在
+`.cache/beat-gold/review-preview/runtime/admin/state.json`，审计日志保存在同目录
+的 `audit.jsonl`；密码只保存 scrypt 盐值和摘要，不保存明文。会话只保存在 API
+进程内存中，重启预览后需要重新登录。
+
+后台使用 HttpOnly、SameSite 会话，并提供 owner、reviewer、adjudicator、
+model-maintainer 和 viewer 五类角色。管理 API 统一位于 `/api/admin/*`，不与
+普通用户接口混用。
+
+后台与普通用户工作台隔离，不显示在用户导航中。仪表盘展示语料版本、队列数量、
+分区、审核进度和生产门禁；侧栏按以下层级组织：
+
+1. 语料与权利、金标准版本；
+2. 节拍、起音/拨弦、音高、弦品、和弦、技法；
+3. 差异与裁决、评测与门禁、模型与实验；
+4. 用户与审计、系统与备份。
+
+当前仅开放节拍层。后续层按“节拍 → 起音/拨弦 → 音高 → 弦品 → 和弦 → 技法”
+锁定依赖，前置层未通过时禁止写入。
+
+节拍复核地址：
+
+```text
+http://127.0.0.1:5191/admin/reviews/beat
+```
+
+页面只读取 manifest 白名单内的本地 Pilot 文件，支持上下文试听、评测窗标识、
+不完整小节提示、全曲拍位调整、拍点增删与 10ms 微调、拍号、弱起、完整性检查、
+草稿保存和独立提交。上下文拍点禁止拖动和增删。提交后文件锁定，后台差异比较与
+第三方裁决沿用 `beat:gold` 的可移植 JSON schema 和规范摘要算法。
+
+灰色上下文中的候选拍点仅用于判断连续拍位和小节边界，不参与指标或训练导出，
+也不要求人工修正；候选时间明显错误时，以音频和亮色评测窗内的拍点为准。时间轴
+徽标始终显示当前拍位，强拍显示 `1`；小节号只在悬停提示和拍点摘要中显示。
+
+不同审核者使用互相隔离的目录。owner 可切换队列；reviewer 账号只能进入绑定的
+审核者队列。人工双审时应在“用户与审计”中创建两个独立账号，并分别绑定
+`reviewer-a` 与 `reviewer-b`：
+
+```text
+http://127.0.0.1:5191/admin/reviews/beat?reviewer=reviewer-a
+```
+
+每次提交同时记录管理账号 ID 和用户名。A、B 使用同一管理账号提交时，不满足
+独立审核条件；裁决者也必须使用不同于 A、B 的第三个账号。最后一个有效 owner
+不能被停用，所有账号创建、登录、修改和审核操作均写入审计日志。
+
+### 后台闭环
+
+1. `reviewer-a` 与 `reviewer-b` 分别完成 4 项检查并独立提交；任一方未提交时，
+   “差异与裁决”只显示等待状态。
+2. 第三方裁决员查看 Beat/Downbeat F1、时间误差、拍号、弱起和逐拍差异，生成
+   `adjudicated_gold`。裁决结果写入 `gold/`，不覆盖 A/B 原始提交。
+3. “评测与门禁”使用裁决金标准计算覆盖率和质量阈值；冻结报告会保存模型版本、
+   语料摘要、指标、门禁结果与报告摘要，供后续回归比较。
+4. 48 段全部裁决后，“金标准版本”才能冻结不可变目录，并生成 `.tar.gz` 与
+   SHA-256。相同版本标识不能覆盖已有版本。
+5. “模型与实验”只把已裁决的 `train` 分区转换为训练数据，禁止读取
+   `validation/test` 作为训练样本，并执行跨分区录音泄漏检查。当前训练门槛为
+   100 个 train 金标准；不足时任务只记录为 `blocked`，达到门槛后才进入
+   `queued`。
+6. “系统与备份”归档 manifest、分析、双人草稿、金标准、评测和版本数据，同时
+   保存归档 SHA-256。恢复操作只解压到 `.restores/` 做清单与语料摘要校验，不
+   覆盖当前 Pilot。
+
+后续层页面已经固定 schema、字段和依赖状态，但在前置层完成前保持只读锁定。
+依赖顺序为“节拍 → 起音/拨弦 → 音高 → 弦品 → 和弦 → 技法”。
+
+生产环境初始化 owner 时必须配置 `GTS_ADMIN_BOOTSTRAP_TOKEN`，并在初始化请求中
+提供对应令牌。只有本地开发、桌面本地运行，或生产环境显式配置绝对路径
+`GTS_BEAT_GOLD_ROOT` 时，API 才会发现 Pilot 数据。

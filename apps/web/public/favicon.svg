@@ -1,16 +1,40 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-  <rect width="24" height="24" rx="5" fill="#b54134"/>
-  <g
-    fill="none"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient
+      id="pick-gradient"
+      x1="16"
+      y1="5.5"
+      x2="16"
+      y2="28"
+      gradientUnits="userSpaceOnUse"
+    >
+      <stop stop-color="#f6af52"/>
+      <stop offset="1" stop-color="#cb4737"/>
+    </linearGradient>
+  </defs>
+  <rect
+    x="2.9"
+    y="2.9"
+    width="26.2"
+    height="26.2"
+    rx="6.1"
+    fill="#181a20"
     stroke="#fff"
-    stroke-linecap="round"
-    stroke-linejoin="round"
-    stroke-width="2.4"
-  >
-    <path d="m11.9 12.1 4.514-4.514"/>
-    <path d="M20.1 2.3a1 1 0 0 0-1.4 0l-1.114 1.114A2 2 0 0 0 17 4.828v1.344a2 2 0 0 1-.586 1.414A2 2 0 0 1 17.828 7h1.344a2 2 0 0 0 1.414-.586L21.7 5.3a1 1 0 0 0 0-1.4z"/>
-    <path d="m6 16 2 2"/>
-    <path d="M8.2 9.9C8.7 8.8 9.8 8 11 8c2.8 0 5 2.2 5 5 0 1.2-.8 2.3-1.9 2.8l-.9.4A2 2 0 0 0 12 18a4 4 0 0 1-4 4c-3.3 0-6-2.7-6-6a4 4 0 0 1 4-4 2 2 0 0 0 1.8-1.2z"/>
-    <circle cx="11.5" cy="12.5" r=".7" fill="#fff" stroke="none"/>
+    stroke-opacity=".14"
+    stroke-width=".35"
+  />
+  <path
+    d="M16 5.76C9.92 5.12 5.76 8.64 6.72 13.76c.96 5.76 5.76 11.52 9.28 14.08 3.52-2.56 8.32-8.32 9.28-14.08C26.24 8.64 22.08 5.12 16 5.76Z"
+    fill="url(#pick-gradient)"
+  />
+  <g fill="none" stroke="#17191f" stroke-linecap="round">
+    <circle cx="16" cy="13.76" r="3.68" stroke-width=".8"/>
+    <line x1="10.56" y1="7.84" x2="10.56" y2="22.24" stroke-width=".38"/>
+    <line x1="12.74" y1="7.84" x2="12.74" y2="22.24" stroke-width=".355"/>
+    <line x1="14.91" y1="7.84" x2="14.91" y2="22.24" stroke-width=".33"/>
+    <line x1="17.09" y1="7.84" x2="17.09" y2="22.24" stroke-width=".305"/>
+    <line x1="19.26" y1="7.84" x2="19.26" y2="22.24" stroke-width=".28"/>
+    <line x1="21.44" y1="7.84" x2="21.44" y2="22.24" stroke-width=".255"/>
+    <line x1="11.36" y1="19.84" x2="20.64" y2="19.84" stroke-width="1.02"/>
   </g>
 </svg>

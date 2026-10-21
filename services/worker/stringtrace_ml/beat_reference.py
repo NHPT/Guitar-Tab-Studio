@@ -17,7 +17,7 @@ import soundfile
 from .metrics import evaluate_beats
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REVIEW_KIND = "beat-grid"
 REQUIRED_CHECKS = ("beat_times", "downbeats", "meter", "completeness")
 ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -43,6 +43,40 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def _canonical_number(value: int | float) -> str:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("Review content contains a non-finite number")
+    if number == 0:
+        return "0"
+    return f"{number:.12f}".rstrip("0").rstrip(".")
+
+
+def _canonical_json(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return _canonical_number(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        return "[" + ",".join(_canonical_json(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return (
+            "{"
+            + ",".join(
+                json.dumps(str(key), ensure_ascii=False)
+                + ":"
+                + _canonical_json(value[key])
+                for key in sorted(value)
+            )
+            + "}"
+        )
+    raise ValueError("Review content contains an unsupported value")
+
+
 def review_content_digest(review: dict[str, Any]) -> str:
     payload = {
         key: value
@@ -50,12 +84,7 @@ def review_content_digest(review: dict[str, Any]) -> str:
         if key not in {"status", "submission", "adjudication"}
     }
     return hashlib.sha256(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
+        _canonical_json(payload).encode("utf-8")
     ).hexdigest()
 
 
@@ -91,6 +120,16 @@ def beat_markers_from_analysis(
     return markers
 
 
+def evaluation_markers(review: dict[str, Any]) -> list[dict[str, Any]]:
+    evaluation_start = float(review["evaluation_start"])
+    evaluation_end = float(review["evaluation_end"])
+    return [
+        marker
+        for marker in review["beats"]
+        if evaluation_start <= float(marker["at"]) < evaluation_end
+    ]
+
+
 def validate_review(
     review: dict[str, Any],
     *,
@@ -116,16 +155,38 @@ def validate_review(
     for name in ("source_audio_sha256", "audio_sha256"):
         if not SHA256_PATTERN.fullmatch(str(review.get(name, ""))):
             raise ValueError(f"{name} must be a SHA-256 digest")
-    start = float(review.get("source_start", math.nan))
-    end = float(review.get("source_end", math.nan))
-    duration = float(review.get("duration", math.nan))
+    corpus_version = str(review.get("corpus_version", ""))
+    if not ID_PATTERN.fullmatch(corpus_version):
+        raise ValueError("corpus_version contains unsafe characters")
+    audio_start = float(review.get("audio_source_start", math.nan))
+    audio_end = float(review.get("audio_source_end", math.nan))
+    audio_duration = float(review.get("audio_duration", math.nan))
+    evaluation_start = float(review.get("evaluation_start", math.nan))
+    evaluation_end = float(review.get("evaluation_end", math.nan))
+    evaluation_duration = float(
+        review.get("evaluation_duration", math.nan)
+    )
     if (
-        not all(math.isfinite(value) for value in (start, end, duration))
-        or start < 0
-        or duration <= 0
-        or abs(end - start - duration) > 1e-5
+        not all(
+            math.isfinite(value)
+            for value in (
+                audio_start,
+                audio_end,
+                audio_duration,
+                evaluation_start,
+                evaluation_end,
+                evaluation_duration,
+            )
+        )
+        or audio_start < 0
+        or audio_duration <= 0
+        or abs(audio_end - audio_start - audio_duration) > 1e-5
+        or evaluation_start < 0
+        or evaluation_duration <= 0
+        or evaluation_end > audio_duration + 1e-5
+        or abs(evaluation_end - evaluation_start - evaluation_duration) > 1e-5
     ):
-        raise ValueError("Invalid beat review clip boundaries")
+        raise ValueError("Invalid beat review audio or evaluation boundaries")
     signature = review.get("time_signature")
     if (
         not isinstance(signature, list)
@@ -150,7 +211,7 @@ def validate_review(
         downbeat = marker.get("downbeat")
         if (
             not math.isfinite(at)
-            or not 0 <= at < duration
+            or not 0 <= at < audio_duration
             or not 1 <= beat <= numerator
             or measure < 0
             or not isinstance(downbeat, bool)
@@ -181,7 +242,10 @@ def validate_review(
     if require_submitted and status not in {"submitted", "adjudicated"}:
         raise ValueError("Beat review is not submitted")
     if status == "submitted":
-        if len(beats) < 2 or not all(checks[name] for name in REQUIRED_CHECKS):
+        if (
+            len(evaluation_markers(review)) < 2
+            or not all(checks[name] for name in REQUIRED_CHECKS)
+        ):
             raise ValueError("Submitted beat reviews require complete checks")
         submission = review.get("submission")
         if (
@@ -217,6 +281,9 @@ def create_review(
     annotator_alias: str,
     source_start: float,
     duration: float,
+    corpus_version: str = "beat-pilot-v2",
+    pre_roll: float = 4.0,
+    post_roll: float = 4.0,
     analysis_path: Path | None = None,
     time_signature: tuple[int, int] = (4, 4),
     pickup_beats: int = 0,
@@ -224,14 +291,28 @@ def create_review(
 ) -> dict[str, Any]:
     if review_path.exists():
         raise FileExistsError(f"Review already exists: {review_path.name}")
-    if source_start < 0 or duration <= 0:
-        raise ValueError("Clip start and duration must be positive")
+    if (
+        source_start < 0
+        or duration <= 0
+        or pre_roll < 0
+        or post_roll < 0
+    ):
+        raise ValueError("Clip boundaries and context must be non-negative")
+    source_duration = float(soundfile.info(audio_path).duration)
+    requested_evaluation_end = source_start + duration
+    if requested_evaluation_end > source_duration + 1e-5:
+        raise ValueError("Evaluation window exceeds the source audio")
+    audio_source_start = max(0.0, source_start - pre_roll)
+    audio_source_end = min(
+        source_duration,
+        requested_evaluation_end + post_roll,
+    )
     audio, _sample_rate = librosa.load(
         audio_path,
         sr=22050,
         mono=True,
-        offset=source_start,
-        duration=duration,
+        offset=audio_source_start,
+        duration=audio_source_end - audio_source_start,
     )
     if audio.size == 0:
         raise ValueError("Beat review clip contains no audio")
@@ -247,34 +328,39 @@ def create_review(
     if analysis is not None:
         raw_signature = analysis.get("time_signature", time_signature)
         time_signature = (int(raw_signature[0]), int(raw_signature[1]))
-    source_end = source_start + actual_duration
+    audio_source_end = audio_source_start + actual_duration
+    evaluation_start = source_start - audio_source_start
+    evaluation_end = evaluation_start + duration
+    if evaluation_end > actual_duration + 1e-5:
+        raise ValueError("Decoded audio does not contain the evaluation window")
     candidate_beats = (
         beat_markers_from_analysis(
             analysis,
-            source_start=source_start,
-            source_end=source_end,
+            source_start=audio_source_start,
+            source_end=audio_source_end,
         )
         if analysis is not None
         else []
     )
     if analysis is not None:
-        pickup_beats = sum(
-            int(marker["measure"]) == 0
-            for marker in candidate_beats
-        )
+        pickup_beats = int(analysis.get("pickup_beats", pickup_beats))
     review: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "review_kind": REVIEW_KIND,
         "status": "draft",
+        "corpus_version": corpus_version,
         "clip_id": clip_id,
         "group_id": group_id,
         "annotator_alias": annotator_alias,
         "audio": clip_audio.name,
         "source_audio_sha256": sha256_file(audio_path),
         "audio_sha256": sha256_file(clip_audio),
-        "source_start": round(source_start, 6),
-        "source_end": round(source_end, 6),
-        "duration": round(actual_duration, 6),
+        "audio_source_start": round(audio_source_start, 6),
+        "audio_source_end": round(audio_source_end, 6),
+        "audio_duration": round(actual_duration, 6),
+        "evaluation_start": round(evaluation_start, 6),
+        "evaluation_end": round(evaluation_end, 6),
+        "evaluation_duration": round(duration, 6),
         "time_signature": list(time_signature),
         "pickup_beats": pickup_beats,
         "beats": candidate_beats,
@@ -315,12 +401,16 @@ def submit_review(review_path: Path) -> dict[str, Any]:
 
 def _assert_same_clip(left: dict[str, Any], right: dict[str, Any]) -> None:
     for name in (
+        "corpus_version",
         "clip_id",
         "group_id",
         "source_audio_sha256",
-        "source_start",
-        "source_end",
-        "duration",
+        "audio_source_start",
+        "audio_source_end",
+        "audio_duration",
+        "evaluation_start",
+        "evaluation_end",
+        "evaluation_duration",
     ):
         if left.get(name) != right.get(name):
             raise ValueError(f"Beat reviews differ in {name}")
@@ -335,16 +425,18 @@ def compare_reviews(
     _assert_same_clip(left, right)
     if left["annotator_alias"] == right["annotator_alias"]:
         raise ValueError("Independent beat reviews require different annotators")
-    left_beats = [float(marker["at"]) for marker in left["beats"]]
-    right_beats = [float(marker["at"]) for marker in right["beats"]]
+    left_window = evaluation_markers(left)
+    right_window = evaluation_markers(right)
+    left_beats = [float(marker["at"]) for marker in left_window]
+    right_beats = [float(marker["at"]) for marker in right_window]
     left_downbeats = [
         float(marker["at"])
-        for marker in left["beats"]
+        for marker in left_window
         if marker["downbeat"]
     ]
     right_downbeats = [
         float(marker["at"])
-        for marker in right["beats"]
+        for marker in right_window
         if marker["downbeat"]
     ]
     return {
@@ -426,19 +518,31 @@ def evaluate_review(
     validate_review(review, require_adjudicated=True)
     predicted = beat_markers_from_analysis(
         analysis,
-        source_start=float(review["source_start"]),
-        source_end=float(review["source_end"]),
+        source_start=float(review["audio_source_start"]),
+        source_end=float(review["audio_source_end"]),
     )
-    reference_beats = [float(marker["at"]) for marker in review["beats"]]
-    predicted_beats = [float(marker["at"]) for marker in predicted]
+    evaluation_start = float(review["evaluation_start"])
+    evaluation_end = float(review["evaluation_end"])
+    reference_window = evaluation_markers(review)
+    predicted_window = [
+        marker
+        for marker in predicted
+        if evaluation_start <= float(marker["at"]) < evaluation_end
+    ]
+    reference_beats = [
+        float(marker["at"]) for marker in reference_window
+    ]
+    predicted_beats = [
+        float(marker["at"]) for marker in predicted_window
+    ]
     reference_downbeats = [
         float(marker["at"])
-        for marker in review["beats"]
+        for marker in reference_window
         if marker["downbeat"]
     ]
     predicted_downbeats = [
         float(marker["at"])
-        for marker in predicted
+        for marker in predicted_window
         if marker["downbeat"]
     ]
     return {
@@ -517,6 +621,9 @@ def main() -> None:
     initialize.add_argument("--annotator-alias", required=True)
     initialize.add_argument("--start", type=float, required=True)
     initialize.add_argument("--duration", type=float, default=24.0)
+    initialize.add_argument("--corpus-version", default="beat-pilot-v2")
+    initialize.add_argument("--pre-roll", type=float, default=4.0)
+    initialize.add_argument("--post-roll", type=float, default=4.0)
     initialize.add_argument("--time-signature", default="4/4")
     initialize.add_argument("--pickup-beats", type=int, default=0)
     initialize.add_argument("--tag", action="append")
@@ -562,6 +669,9 @@ def main() -> None:
             annotator_alias=arguments.annotator_alias,
             source_start=arguments.start,
             duration=arguments.duration,
+            corpus_version=arguments.corpus_version,
+            pre_roll=arguments.pre_roll,
+            post_roll=arguments.post_roll,
             time_signature=(int(numerator), int(denominator)),
             pickup_beats=arguments.pickup_beats,
             tags=arguments.tag,

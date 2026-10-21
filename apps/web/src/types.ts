@@ -429,3 +429,327 @@ export interface InferenceDeploymentStatus {
   }
   recent: InferenceObservation[]
 }
+
+export interface BeatReviewChecks {
+  beat_times: boolean
+  downbeats: boolean
+  meter: boolean
+  completeness: boolean
+}
+
+export interface BeatReviewMarker {
+  at: number
+  beat: number
+  measure: number
+  downbeat: boolean
+}
+
+export interface BeatReviewPackage {
+  schema_version: 2
+  review_kind: 'beat-grid'
+  status: 'draft' | 'submitted' | 'adjudicated'
+  corpus_version: string
+  clip_id: string
+  group_id: string
+  annotator_alias: string
+  audio: string
+  audio_source_start: number
+  audio_source_end: number
+  audio_duration: number
+  evaluation_start: number
+  evaluation_end: number
+  evaluation_duration: number
+  time_signature: [number, number]
+  pickup_beats: number
+  beats: BeatReviewMarker[]
+  tags: string[]
+  checks: BeatReviewChecks
+  submission?: {
+    submitted_at: string
+    content_sha256: string
+    admin_user_id?: string
+    admin_username?: string
+  } | null
+  verification_status:
+    | 'draft'
+    | 'independent_annotation'
+    | 'adjudicated_gold'
+  benchmark_eligible: boolean
+}
+
+export interface BeatReviewSummary {
+  clipId: string
+  recordingId: string
+  split: 'train' | 'validation' | 'test'
+  status: BeatReviewPackage['status']
+  duration: number
+  sourceStart: number
+  audioDuration: number
+  evaluationStart: number
+  evaluationEnd: number
+  beatCount: number
+  timeSignature: [number, number]
+  pickupBeats: number
+  checks: BeatReviewChecks
+  tags: string[]
+}
+
+export interface BeatReviewDocument {
+  review: BeatReviewPackage
+  audioUrl: string
+}
+
+export interface BeatReviewDraft {
+  beats: BeatReviewMarker[]
+  time_signature: [number, number]
+  pickup_beats: number
+  checks: BeatReviewChecks
+}
+
+export interface BeatGoldStatus {
+  enabled: boolean
+  reviewers: string[]
+  manifest: {
+    corpusVersion: string
+    corpusSha256: string
+    immutable: true
+    evaluationDuration: number
+    context: {
+      preRoll: number
+      postRoll: number
+    }
+    recordings: number
+    clips: number
+    splitCounts: Record<string, number>
+    verificationStatus: string
+    benchmarkEligible: boolean
+  } | null
+}
+
+export type AdminRole =
+  | 'owner'
+  | 'reviewer'
+  | 'adjudicator'
+  | 'model-maintainer'
+  | 'viewer'
+
+export interface AdminUser {
+  id: string
+  username: string
+  displayName: string
+  role: AdminRole
+  active: boolean
+  reviewerAlias?: string
+  createdAt: string
+  lastLoginAt?: string
+}
+
+export interface AdminAuditEvent {
+  at: string
+  action: string
+  actorId: string | null
+  actorUsername: string | null
+  [key: string]: unknown
+}
+
+export interface BeatMetrics {
+  true_positive: number
+  false_positive: number
+  false_negative: number
+  precision: number
+  recall: number
+  f1: number
+  mean_error_ms: number | null
+  median_error_ms: number | null
+  p95_error_ms: number | null
+  tolerance_ms: number
+}
+
+export interface BeatMarkerDifference {
+  left: BeatReviewMarker | null
+  right: BeatReviewMarker | null
+  deltaMs: number | null
+  phaseAgreement: boolean
+}
+
+export interface BeatReviewComparison {
+  clipId: string
+  reviewers: [string, string]
+  independentAccounts: boolean
+  meterAgreement: boolean
+  pickupAgreement: boolean
+  beatMetrics: BeatMetrics
+  downbeatMetrics: BeatMetrics
+  differences: BeatMarkerDifference[]
+  left: BeatReviewDocument
+  right: BeatReviewDocument
+}
+
+export interface BeatAdjudicationSummary {
+  clipId: string
+  recordingId: string
+  split: 'train' | 'validation' | 'test'
+  leftStatus: BeatReviewPackage['status']
+  rightStatus: BeatReviewPackage['status']
+  ready: boolean
+  adjudicated: boolean
+  independentAccounts: boolean
+  beatF1: number | null
+  medianErrorMs: number | null
+  disagreements: number | null
+}
+
+export interface BeatEvaluationReport {
+  schemaVersion: 1
+  generatedAt: string
+  modelVersion: string
+  corpusVersion: string
+  corpusSha256: string
+  coverage: {
+    adjudicated: number
+    total: number
+    complete: boolean
+    splitCounts: Record<string, number>
+  }
+  aggregate: {
+    beatMetrics: BeatMetrics
+    downbeatMetrics: BeatMetrics
+    meterAccuracy: number
+    pickupAccuracy: number
+  }
+  gate: {
+    passed: boolean
+    checks: Record<string, boolean>
+    thresholds: {
+      beatF1: number
+      medianErrorMs: number
+      p95ErrorMs: number
+      downbeatF1: number
+    }
+  }
+  items: Array<{
+    clipId: string
+    split: 'train' | 'validation' | 'test'
+    referenceBeats: number
+    predictedBeats: number
+    beatMetrics: BeatMetrics
+    downbeatMetrics: BeatMetrics
+    meterCorrect: boolean
+    pickupCorrect: boolean
+  }>
+  reportSha256: string
+}
+
+export interface BeatGoldRelease {
+  schemaVersion: 1
+  version: string
+  createdAt: string
+  corpusVersion: string
+  corpusSha256: string
+  clips: number
+  splitCounts: Record<string, number>
+  files: Array<{
+    path: string
+    size: number
+    sha256: string
+  }>
+  archive: {
+    filename: string
+    size: number
+    sha256: string
+  }
+}
+
+export interface BeatTrainingDataset {
+  schemaVersion: 1
+  version: string
+  createdAt: string
+  clips: number
+  recordings: number
+  corpusVersions: string[]
+  manifestSha256: string
+  readyForTraining: boolean
+  minimumTrainClips: number
+}
+
+export interface BeatTrainingJob {
+  id: string
+  datasetVersion: string
+  recipe: 'beat-tempo-map-v1'
+  status: 'blocked' | 'queued'
+  reason?: string
+  createdAt: string
+  codeRevision: string
+}
+
+export interface BeatTrainingStatus {
+  minimumTrainClips: number
+  adjudicatedTrainClips: number
+  datasets: BeatTrainingDataset[]
+  jobs: BeatTrainingJob[]
+}
+
+export interface ReviewLayerStatus {
+  id: 'beat' | 'onset' | 'pitch' | 'string-fret' | 'chord' | 'technique'
+  label: string
+  order: number
+  schemaVersion: 1
+  reviewKind: string
+  dependsOn?: ReviewLayerStatus['id']
+  fields: Array<{
+    name: string
+    type: string
+    required: boolean
+  }>
+  checks: string[]
+  status: 'active' | 'scaffolded' | 'blocked'
+  blocker?: string
+  reviewed: number
+  total: number
+}
+
+export interface BeatBackup {
+  schemaVersion: 1
+  id: string
+  createdAt: string
+  corpusVersion: string
+  corpusSha256: string
+  archive: {
+    filename: string
+    size: number
+    sha256: string
+  }
+  verified: boolean
+  restored: boolean
+}
+
+export interface AdminSession {
+  configured: boolean
+  authenticated: boolean
+  user: AdminUser | null
+}
+
+export interface AdminDashboard {
+  generatedAt: string
+  corpus: BeatGoldStatus['manifest']
+  reviewer: string | null
+  reviews: {
+    total: number
+    draft: number
+    submitted: number
+    adjudicated: number
+    checksComplete: number
+  }
+  layers: Array<{
+    id: string
+    label: string
+    status: 'ready' | 'blocked'
+    dependsOn?: string
+  }>
+  gates: {
+    beatF1: number
+    medianErrorMs: number
+    p95ErrorMs: number
+    downbeatF1: number
+  }
+}

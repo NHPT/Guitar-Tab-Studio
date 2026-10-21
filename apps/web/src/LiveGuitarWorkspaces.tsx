@@ -1,5 +1,11 @@
 import {
+  midiFrequency,
+  tunerReadingForTarget,
+} from '@gts/core'
+import {
+  Activity,
   ArrowLeft,
+  Gauge,
   Guitar,
   Mic,
   Play,
@@ -8,6 +14,7 @@ import {
   Trash2,
   Volume2,
 } from 'lucide-react'
+import { useState, type CSSProperties } from 'react'
 import type { LiveGuitarController } from './useLiveGuitar'
 
 interface WorkspaceProps {
@@ -15,6 +22,15 @@ interface WorkspaceProps {
   onBack: () => void
   t: (source: string) => string
 }
+
+const standardTuning = [
+  { midi: 40, note: 'E2', string: 6 },
+  { midi: 45, note: 'A2', string: 5 },
+  { midi: 50, note: 'D3', string: 4 },
+  { midi: 55, note: 'G3', string: 3 },
+  { midi: 59, note: 'B3', string: 2 },
+  { midi: 64, note: 'E4', string: 1 },
+] as const
 
 function InputToggle({
   active,
@@ -46,11 +62,33 @@ export function TunerWorkspace({
   onBack,
   t,
 }: WorkspaceProps) {
+  const [targetMidi, setTargetMidi] = useState<number | null>(null)
   const active =
     controller.status === 'listening' && controller.mode === 'tuner'
-  const reading = controller.reading
+  const target = standardTuning.find(
+    (candidate) => candidate.midi === targetMidi,
+  )
+  const reading =
+    controller.reading && targetMidi !== null
+      ? tunerReadingForTarget(controller.reading, targetMidi)
+      : controller.reading
   const cents = reading?.cents ?? 0
-  const inTune = Boolean(reading && Math.abs(cents) <= 4)
+  const inTune = Boolean(reading && Math.abs(cents) <= 3)
+  const stateLabel = !active
+    ? t('调音器已停止')
+    : !reading
+      ? t('等待音频输入')
+      : inTune
+        ? t('音准准确')
+        : cents < 0
+          ? t('偏低')
+          : t('偏高')
+  const noteLabel = reading
+    ? `${reading.note}${reading.octave}`
+    : target?.note ?? '--'
+  const meterStyle = {
+    '--tuner-position': `${50 + Math.max(-50, Math.min(50, cents))}%`,
+  } as CSSProperties
   return (
     <section className="live-tool tuner-workspace" aria-labelledby="tuner-title">
       <header>
@@ -78,55 +116,127 @@ export function TunerWorkspace({
       </header>
 
       <div className={`tuner-stage${inTune ? ' is-in-tune' : ''}`}>
-        <div className="tuner-scale" aria-label={t('音分偏差')}>
-          {[-50, -25, 0, 25, 50].map((value) => (
-            <i
-              className={value === 0 ? 'is-center' : ''}
-              key={value}
-            >
-              {value > 0 ? `+${value}` : value}
+        <div className="tuner-readout">
+          <span>
+            {target
+              ? `${target.string}${t('弦')} · ${target.note}`
+              : t('自动识别')}
+          </span>
+          <div className="tuner-note">
+            <strong className={!reading && !target ? 'is-empty' : ''}>
+              {noteLabel}
+            </strong>
+            <small>
+              {reading ? `${reading.frequency.toFixed(2)} Hz` : '-- Hz'}
+            </small>
+          </div>
+          <b>{stateLabel}</b>
+        </div>
+
+        <div className="tuner-meter">
+          <div className="tuner-meter-labels" aria-hidden="true">
+            <span>{t('偏低')}</span>
+            <strong>
+              {reading
+                ? `${cents >= 0 ? '+' : ''}${cents.toFixed(1)} cent`
+                : '0.0 cent'}
+            </strong>
+            <span>{t('偏高')}</span>
+          </div>
+          <div
+            className="tuner-scale"
+            aria-label={t('音分偏差')}
+            aria-valuemin={-50}
+            aria-valuemax={50}
+            aria-valuenow={Number(cents.toFixed(1))}
+            role="meter"
+            style={meterStyle}
+          >
+            <div aria-hidden="true">
+              {Array.from({ length: 21 }, (_, index) => {
+                const value = index * 5 - 50
+                return (
+                  <i
+                    className={
+                      value === 0
+                        ? 'is-center'
+                        : value % 25 === 0
+                          ? 'is-major'
+                          : ''
+                    }
+                    key={value}
+                  />
+                )
+              })}
+            </div>
+            <b aria-hidden="true" />
+          </div>
+          <div className="tuner-scale-values" aria-hidden="true">
+            <span>-50</span>
+            <span>-25</span>
+            <span>0</span>
+            <span>+25</span>
+            <span>+50</span>
+          </div>
+        </div>
+
+        <div className="tuner-telemetry">
+          <span>
+            <Gauge aria-hidden="true" />
+            A4 440 Hz
+          </span>
+          <span>
+            <Activity aria-hidden="true" />
+            {reading ? `${Math.round(reading.confidence * 100)}%` : '--'}
+          </span>
+          <div className="input-level">
+            <Mic aria-hidden="true" />
+            <i>
+              <b
+                style={{
+                  width: `${Math.min(100, controller.level * 850)}%`,
+                }}
+              />
             </i>
-          ))}
-          <b
-            style={{
-              left: `${50 + Math.max(-50, Math.min(50, cents))}%`,
-            }}
-          />
+          </div>
         </div>
-        <div className="tuner-note">
-          <span>{reading ? `${reading.note}${reading.octave}` : '--'}</span>
-          <strong>
-            {reading
-              ? `${cents >= 0 ? '+' : ''}${cents.toFixed(1)} cent`
-              : t('等待音符')}
-          </strong>
-          <small>
-            {reading ? `${reading.frequency.toFixed(1)} Hz` : '440 Hz'}
-          </small>
-        </div>
-        <div className="input-level">
-          <Mic aria-hidden="true" />
-          <i>
-            <b
-              style={{
-                width: `${Math.min(100, controller.level * 850)}%`,
-              }}
-            />
-          </i>
-        </div>
-        <div className="tuner-strings" aria-label={t('标准调弦')}>
-          {['E2', 'A2', 'D3', 'G3', 'B3', 'E4'].map((note) => (
-            <span
-              className={
-                reading && `${reading.note}${reading.octave}` === note
-                  ? 'is-active'
-                  : ''
-              }
-              key={note}
+
+        <div className="tuner-targets">
+          <div>
+            <strong>{t('目标弦')}</strong>
+            <small>{t('标准调弦')}</small>
+          </div>
+          <div className="tuner-strings" aria-label={t('标准调弦')}>
+            <button
+              className={targetMidi === null ? 'is-active' : ''}
+              type="button"
+              aria-pressed={targetMidi === null}
+              onClick={() => setTargetMidi(null)}
             >
-              {note}
-            </span>
-          ))}
+              <span>AUTO</span>
+              <small>{t('自动')}</small>
+            </button>
+            {standardTuning.map((candidate) => {
+              const detected =
+                reading &&
+                reading.midi === candidate.midi &&
+                targetMidi === null
+              const selected = targetMidi === candidate.midi
+              return (
+                <button
+                  className={selected || detected ? 'is-active' : ''}
+                  type="button"
+                  aria-label={`${candidate.string}${t('弦')} ${candidate.note}`}
+                  aria-pressed={selected}
+                  key={candidate.midi}
+                  onClick={() => setTargetMidi(candidate.midi)}
+                >
+                  <span>{candidate.note}</span>
+                  <small>{midiFrequency(candidate.midi).toFixed(1)}</small>
+                </button>
+              )
+            })}
+          </div>
         </div>
       </div>
       {controller.error ? (

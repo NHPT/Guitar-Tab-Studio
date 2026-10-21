@@ -1,5 +1,10 @@
 import { spawn } from 'node:child_process'
-import { isAbsolute, resolve as resolvePath } from 'node:path'
+import { lstat, readFile, readdir } from 'node:fs/promises'
+import {
+  extname,
+  isAbsolute,
+  resolve as resolvePath,
+} from 'node:path'
 import plist from 'plist'
 
 const QQMUSIC_EKEY_ENDPOINT =
@@ -10,6 +15,33 @@ const REQUEST_TIMEOUT_MS = 10_000
 const MAX_SERIALIZED_VALUE_BYTES = 128 * 1024
 const MAX_PLUTIL_ERROR_BYTES = 32 * 1024
 const PLUTIL_TIMEOUT_MS = 10_000
+const MAX_WINDOWS_CREDENTIAL_BYTES = 2 * 1024 * 1024
+const MAX_WINDOWS_CREDENTIAL_FILES = 128
+const MAX_WINDOWS_CREDENTIAL_DEPTH = 5
+const WINDOWS_REGISTRY_TIMEOUT_MS = 5_000
+const WINDOWS_CREDENTIAL_EXTENSIONS = new Set([
+  '.cfg',
+  '.config',
+  '.dat',
+  '.ini',
+  '.json',
+  '.ldb',
+  '.log',
+  '.txt',
+  '.xml',
+])
+const WINDOWS_SKIPPED_DIRECTORIES = new Set([
+  'cache',
+  'download',
+  'downloads',
+  'image',
+  'images',
+  'music',
+  'song',
+  'songs',
+  'temp',
+  'tmp',
+])
 
 const musicIdKeys = new Set([
   'musicid',
@@ -299,6 +331,28 @@ export function qqMusicMacCredentialPaths(homePath: string): string[] {
   ]
 }
 
+export function qqMusicWindowsCredentialRoots(
+  homePath: string,
+): string[] {
+  if (!isAbsolute(homePath)) return []
+  return [
+    resolvePath(
+      homePath,
+      'AppData',
+      'Roaming',
+      'Tencent',
+      'QQMusic',
+    ),
+    resolvePath(
+      homePath,
+      'AppData',
+      'Local',
+      'Tencent',
+      'QQMusic',
+    ),
+  ]
+}
+
 class PlutilCommandError extends Error {
   constructor(
     readonly exitCode: number | null,
@@ -471,6 +525,248 @@ export async function loadQQMusicMacCredential(
   if (loginFileFound) {
     throw new Error(
       'QQ 音乐客户端配置中没有当前登录信息。请完全退出 QQ 音乐，重新登录下载该文件的账号后再试。',
+    )
+  }
+  return undefined
+}
+
+function windowsCredentialText(
+  value: string,
+): QQMusicCredential | undefined {
+  const text = value.replaceAll('\u0000', '').trim()
+  if (!text) return undefined
+  const direct = parseQQMusicCredential(text)
+  if (direct) return direct
+
+  try {
+    const parsed = parseQQMusicCredential(JSON.parse(text))
+    if (parsed) return parsed
+  } catch {
+    // Continue with registry and XML-shaped text.
+  }
+
+  const record: Record<string, string> = {}
+  for (const line of text.split(/\r?\n/u)) {
+    const registry = /^\s*([a-z0-9_.-]+)\s+REG_[A-Z0-9_]+\s+(.+?)\s*$/iu.exec(
+      line,
+    )
+    if (registry) record[registry[1]] = registry[2]
+  }
+  for (const match of text.matchAll(
+    /<([a-z][a-z0-9_.-]*)[^>]*>\s*([^<]+?)\s*<\/\1>/giu,
+  )) {
+    record[match[1]] = match[2]
+  }
+  for (const match of text.matchAll(
+    /["']?([a-z][a-z0-9_.-]*)["']?\s*[:=]\s*["']([^"'<>;\r\n]+)["']/giu,
+  )) {
+    record[match[1]] = match[2]
+  }
+  return parseQQMusicCredential(record)
+}
+
+function decodedWindowsCredentialTexts(data: Uint8Array): string[] {
+  const buffer = Buffer.from(data)
+  const decoded = new Set<string>()
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    decoded.add(buffer.subarray(2).toString('utf16le'))
+  } else if (
+    buffer.length >= 2 &&
+    buffer[0] === 0xfe &&
+    buffer[1] === 0xff
+  ) {
+    const swapped = Buffer.from(buffer.subarray(2))
+    if (swapped.length % 2 !== 0) {
+      decoded.add(swapped.subarray(0, swapped.length - 1).swap16().toString('utf16le'))
+    } else {
+      decoded.add(swapped.swap16().toString('utf16le'))
+    }
+  }
+
+  const sampleBytes = Math.min(buffer.length, 4096)
+  let oddNulls = 0
+  for (let index = 1; index < sampleBytes; index += 2) {
+    if (buffer[index] === 0) oddNulls += 1
+  }
+  if (sampleBytes >= 8 && oddNulls >= Math.floor(sampleBytes / 8)) {
+    decoded.add(
+      buffer
+        .subarray(0, buffer.length - (buffer.length % 2))
+        .toString('utf16le'),
+    )
+  }
+  decoded.add(buffer.toString('utf8'))
+  return [...decoded]
+}
+
+function credentialFromWindowsData(
+  data: Uint8Array,
+): QQMusicCredential | undefined {
+  for (const text of decodedWindowsCredentialTexts(data)) {
+    const credential = windowsCredentialText(text)
+    if (credential) return credential
+  }
+  return undefined
+}
+
+function windowsCredentialFilePriority(name: string): number {
+  const normalized = name.toLowerCase()
+  if (/login|auth|account|cookie|credential/u.test(normalized)) return 0
+  if (/user|profile|session/u.test(normalized)) return 1
+  if (/config|setting|preference/u.test(normalized)) return 2
+  return 3
+}
+
+function supportedWindowsCredentialFile(name: string): boolean {
+  return (
+    WINDOWS_CREDENTIAL_EXTENSIONS.has(extname(name).toLowerCase()) ||
+    /login|auth|account|cookie|credential|profile|session|setting|user/iu.test(
+      name,
+    )
+  )
+}
+
+async function windowsCredentialFiles(homePath: string): Promise<{
+  files: string[]
+  permissionDenied: boolean
+}> {
+  const queue = qqMusicWindowsCredentialRoots(homePath).map((path) => ({
+    depth: 0,
+    path,
+  }))
+  const files: string[] = []
+  let permissionDenied = false
+
+  while (queue.length > 0 && files.length < MAX_WINDOWS_CREDENTIAL_FILES) {
+    const directory = queue.shift()!
+    let entries
+    try {
+      const stats = await lstat(directory.path)
+      if (!stats.isDirectory() || stats.isSymbolicLink()) continue
+      entries = await readdir(directory.path, { withFileTypes: true })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EACCES') {
+        permissionDenied = true
+      }
+      continue
+    }
+
+    entries.sort(
+      (left, right) =>
+        windowsCredentialFilePriority(left.name) -
+          windowsCredentialFilePriority(right.name) ||
+        left.name.localeCompare(right.name),
+    )
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue
+      const path = resolvePath(directory.path, entry.name)
+      if (entry.isDirectory()) {
+        if (
+          directory.depth < MAX_WINDOWS_CREDENTIAL_DEPTH &&
+          !WINDOWS_SKIPPED_DIRECTORIES.has(entry.name.toLowerCase())
+        ) {
+          queue.push({ depth: directory.depth + 1, path })
+        }
+        continue
+      }
+      if (
+        entry.isFile() &&
+        supportedWindowsCredentialFile(entry.name)
+      ) {
+        files.push(path)
+        if (files.length >= MAX_WINDOWS_CREDENTIAL_FILES) break
+      }
+    }
+  }
+
+  return { files, permissionDenied }
+}
+
+function readWindowsRegistryCredential(): Promise<
+  QQMusicCredential | undefined
+> {
+  if (process.platform !== 'win32') return Promise.resolve(undefined)
+  return new Promise((resolveValue) => {
+    const child = spawn(
+      'reg.exe',
+      [
+        'query',
+        'HKCU\\Software\\Tencent\\QQMusic',
+        '/s',
+      ],
+      { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true },
+    )
+    const chunks: Buffer[] = []
+    let bytes = 0
+    let failed = false
+    const timer = setTimeout(() => {
+      failed = true
+      child.kill()
+    }, WINDOWS_REGISTRY_TIMEOUT_MS)
+    child.stdout.on('data', (chunk: Buffer) => {
+      bytes += chunk.byteLength
+      if (bytes > MAX_WINDOWS_CREDENTIAL_BYTES) {
+        failed = true
+        child.kill()
+        return
+      }
+      chunks.push(chunk)
+    })
+    child.once('error', () => {
+      clearTimeout(timer)
+      resolveValue(undefined)
+    })
+    child.once('close', (code) => {
+      clearTimeout(timer)
+      resolveValue(
+        failed || code !== 0
+          ? undefined
+          : credentialFromWindowsData(Buffer.concat(chunks)),
+      )
+    })
+  })
+}
+
+export async function loadQQMusicWindowsCredential(
+  homePath: string,
+): Promise<QQMusicCredential | undefined> {
+  if (!isAbsolute(homePath)) return undefined
+  const registryCredential = await readWindowsRegistryCredential()
+  if (registryCredential) return registryCredential
+
+  const candidates = await windowsCredentialFiles(homePath)
+  let readableFileFound = false
+  let unsupportedFormat = false
+  for (const path of candidates.files) {
+    try {
+      const stats = await lstat(path)
+      if (
+        !stats.isFile() ||
+        stats.isSymbolicLink() ||
+        stats.size <= 0 ||
+        stats.size > MAX_WINDOWS_CREDENTIAL_BYTES
+      ) {
+        continue
+      }
+      const data = await readFile(path)
+      readableFileFound = true
+      const credential = credentialFromWindowsData(data)
+      if (credential) return credential
+      unsupportedFormat = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EACCES') {
+        candidates.permissionDenied = true
+      }
+    }
+  }
+  if (candidates.permissionDenied) {
+    throw new Error(
+      'Windows 已阻止读取 QQ 音乐客户端登录信息。请退出 QQ 音乐与本应用，重新打开后再试；若启用了安全软件的受控文件夹访问，请允许 Guitar Tab Studio 读取当前用户的 QQ 音乐配置。',
+    )
+  }
+  if (readableFileFound && unsupportedFormat) {
+    throw new Error(
+      '已找到 QQ 音乐客户端配置，但无法解析当前登录信息。请将 QQ 音乐更新到最新版，完全退出后重新登录下载该文件的账号，再打开本应用重试。',
     )
   }
   return undefined
@@ -736,13 +1032,13 @@ export async function resolveQQMusicEkeyForDesktop(
   const env = options.env ?? process.env
   if (env.GTS_DESKTOP_LOCAL !== '1') {
     throw new Error(
-      '该 QMC2 文件没有内嵌密钥。浏览器端无法读取本机 QQ 音乐登录态，请改用 macOS 桌面版处理。',
+      '该 QMC2 文件没有内嵌密钥。浏览器端无法读取本机 QQ 音乐登录态，请改用 macOS 或 Windows 桌面版处理。',
     )
   }
   const platform = options.platform ?? process.platform
-  if (platform !== 'darwin') {
+  if (platform !== 'darwin' && platform !== 'win32') {
     throw new Error(
-      '当前桌面系统暂不支持自动读取 QQ 音乐登录态；无内嵌密钥的 QMC2 文件目前仅支持 macOS 桌面版。',
+      '当前桌面系统暂不支持自动读取 QQ 音乐登录态；无内嵌密钥的 QMC2 文件目前仅支持 macOS 和 Windows 桌面版。',
     )
   }
   const homePath = env.GTS_DESKTOP_HOME
@@ -750,7 +1046,10 @@ export async function resolveQQMusicEkeyForDesktop(
     throw new Error('桌面运行时未提供可用的用户目录')
   }
   const loadCredential =
-    options.loadCredential ?? loadQQMusicMacCredential
+    options.loadCredential ??
+    (platform === 'win32'
+      ? loadQQMusicWindowsCredential
+      : loadQQMusicMacCredential)
   const credential = await loadCredential(homePath)
   if (!credential) {
     throw new Error(
@@ -761,6 +1060,7 @@ export async function resolveQQMusicEkeyForDesktop(
     credential,
     fetchImpl: options.fetchImpl,
     media,
+    platform: platform === 'win32' ? '27' : '20',
     signal: options.signal,
   })
 }

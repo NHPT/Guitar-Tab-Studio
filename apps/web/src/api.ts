@@ -1,6 +1,23 @@
 import type {
   AnalysisJob,
+  AdminAuditEvent,
+  AdminDashboard,
+  AdminSession,
+  AdminUser,
   AuthorizedMediaConsent,
+  BeatBackup,
+  BeatGoldStatus,
+  BeatAdjudicationSummary,
+  BeatEvaluationReport,
+  BeatGoldRelease,
+  BeatReviewComparison,
+  BeatReviewDocument,
+  BeatReviewDraft,
+  BeatReviewPackage,
+  BeatReviewSummary,
+  BeatTrainingDataset,
+  BeatTrainingJob,
+  BeatTrainingStatus,
   CapabilityState,
   MediaBrowserSession,
   CommunityAccount,
@@ -17,6 +34,7 @@ import type {
   ProjectRevisionKind,
   ReviewDocument,
   ReviewDraft,
+  ReviewLayerStatus,
   ReviewSummary,
   StudioProject,
   TrainingRecipe,
@@ -32,7 +50,10 @@ const API_ROOT =
   (import.meta.env.DEV ? 'http://127.0.0.1:8787' : '')
 
 async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_ROOT}${path}`, init)
+  const response = await fetch(`${API_ROOT}${path}`, {
+    credentials: 'include',
+    ...init,
+  })
   const body = (await response.json()) as T & { error?: string }
 
   if (!response.ok) {
@@ -257,8 +278,293 @@ export function reopenReview(
   )
 }
 
+function beatReviewApiPath(path: string, reviewer: string): string {
+  return `${path}?${new URLSearchParams({ reviewer }).toString()}`
+}
+
+export function fetchBeatGoldStatus(): Promise<BeatGoldStatus> {
+  return jsonRequest('/api/admin/beat-gold')
+}
+
+export function fetchBeatReviews(
+  reviewer: string,
+): Promise<BeatReviewSummary[]> {
+  return jsonRequest<{ reviews: BeatReviewSummary[] }>(
+    beatReviewApiPath('/api/admin/beat-gold/reviews', reviewer),
+  ).then((response) => response.reviews)
+}
+
+export function fetchBeatReview(
+  clipId: string,
+  reviewer: string,
+): Promise<BeatReviewDocument> {
+  return jsonRequest(
+    beatReviewApiPath(
+      `/api/admin/beat-gold/reviews/${encodeURIComponent(clipId)}`,
+      reviewer,
+    ),
+  )
+}
+
+export function saveBeatReview(
+  clipId: string,
+  reviewer: string,
+  draft: BeatReviewDraft,
+): Promise<BeatReviewDocument> {
+  return jsonRequest(
+    beatReviewApiPath(
+      `/api/admin/beat-gold/reviews/${encodeURIComponent(clipId)}`,
+      reviewer,
+    ),
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(draft),
+    },
+  )
+}
+
+export function submitBeatReview(
+  clipId: string,
+  reviewer: string,
+  draft: BeatReviewDraft,
+): Promise<BeatReviewDocument> {
+  return jsonRequest(
+    beatReviewApiPath(
+      `/api/admin/beat-gold/reviews/${encodeURIComponent(clipId)}/submit`,
+      reviewer,
+    ),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(draft),
+    },
+  )
+}
+
 export function apiAssetUrl(path: string): string {
   return `${API_ROOT}${path}`
+}
+
+export function fetchAdminSession(): Promise<AdminSession> {
+  return jsonRequest('/api/admin/auth/session')
+}
+
+export function bootstrapAdmin(input: {
+  username: string
+  password: string
+  displayName: string
+}): Promise<{ user: AdminUser }> {
+  return jsonRequest('/api/admin/auth/bootstrap', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export function loginAdmin(input: {
+  username: string
+  password: string
+}): Promise<{ user: AdminUser }> {
+  return jsonRequest('/api/admin/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export async function logoutAdmin(): Promise<void> {
+  const response = await fetch(`${API_ROOT}/api/admin/auth/logout`, {
+    method: 'POST',
+    credentials: 'include',
+  })
+  if (!response.ok) {
+    const body = (await response.json()) as { error?: string }
+    throw new Error(body.error ?? `请求失败 (${response.status})`)
+  }
+}
+
+export function fetchAdminDashboard(): Promise<AdminDashboard> {
+  return jsonRequest('/api/admin/dashboard')
+}
+
+export function fetchAdminUsers(): Promise<AdminUser[]> {
+  return jsonRequest<{ users: AdminUser[] }>('/api/admin/users').then(
+    (response) => response.users,
+  )
+}
+
+export function createAdminUser(input: {
+  username: string
+  password: string
+  displayName: string
+  role: AdminUser['role']
+  reviewerAlias?: string
+}): Promise<AdminUser> {
+  return jsonRequest('/api/admin/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export function updateAdminUser(
+  userId: string,
+  input: Partial<
+    Pick<
+      AdminUser,
+      'displayName' | 'role' | 'reviewerAlias' | 'active'
+    >
+  > & { password?: string },
+): Promise<AdminUser> {
+  return jsonRequest(`/api/admin/users/${encodeURIComponent(userId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export function fetchAdminAudit(): Promise<AdminAuditEvent[]> {
+  return jsonRequest<{ events: AdminAuditEvent[] }>(
+    '/api/admin/audit?limit=200',
+  ).then((response) => response.events)
+}
+
+function adjudicationPath(path: string): string {
+  return `${path}?${new URLSearchParams({
+    left: 'reviewer-a',
+    right: 'reviewer-b',
+  }).toString()}`
+}
+
+export function fetchBeatAdjudicationQueue(): Promise<
+  BeatAdjudicationSummary[]
+> {
+  return jsonRequest<{ items: BeatAdjudicationSummary[] }>(
+    adjudicationPath('/api/admin/beat-gold/adjudication'),
+  ).then((response) => response.items)
+}
+
+export function fetchBeatComparison(
+  clipId: string,
+): Promise<BeatReviewComparison> {
+  return jsonRequest(
+    adjudicationPath(
+      `/api/admin/beat-gold/adjudication/${encodeURIComponent(clipId)}`,
+    ),
+  )
+}
+
+export function adjudicateBeat(
+  clipId: string,
+  draft: BeatReviewDraft,
+): Promise<BeatReviewPackage> {
+  return jsonRequest(
+    adjudicationPath(
+      `/api/admin/beat-gold/adjudication/${encodeURIComponent(clipId)}`,
+    ),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(draft),
+    },
+  )
+}
+
+export function fetchBeatEvaluation(): Promise<{
+  current: BeatEvaluationReport
+  runs: BeatEvaluationReport[]
+}> {
+  return jsonRequest('/api/admin/beat-gold/evaluation')
+}
+
+export function saveBeatEvaluation(
+  modelVersion: string,
+): Promise<BeatEvaluationReport> {
+  return jsonRequest('/api/admin/beat-gold/evaluation/runs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ modelVersion }),
+  })
+}
+
+export function fetchBeatGoldReleases(): Promise<BeatGoldRelease[]> {
+  return jsonRequest<{ releases: BeatGoldRelease[] }>(
+    '/api/admin/beat-gold/releases',
+  ).then((response) => response.releases)
+}
+
+export function createBeatGoldRelease(
+  version: string,
+): Promise<BeatGoldRelease> {
+  return jsonRequest('/api/admin/beat-gold/releases', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version }),
+  })
+}
+
+export function beatGoldReleaseUrl(version: string): string {
+  return apiAssetUrl(
+    `/api/admin/beat-gold/releases/${encodeURIComponent(version)}/download`,
+  )
+}
+
+export function fetchBeatTrainingStatus(): Promise<BeatTrainingStatus> {
+  return jsonRequest('/api/admin/beat-training')
+}
+
+export function createBeatTrainingDataset(
+  version: string,
+): Promise<BeatTrainingDataset> {
+  return jsonRequest('/api/admin/beat-training/datasets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version }),
+  })
+}
+
+export function createBeatTrainingJob(input: {
+  datasetVersion: string
+  codeRevision: string
+}): Promise<BeatTrainingJob> {
+  return jsonRequest('/api/admin/beat-training/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export function fetchReviewLayer(
+  layerId: string,
+): Promise<ReviewLayerStatus> {
+  return jsonRequest(
+    `/api/admin/review-layers/${encodeURIComponent(layerId)}`,
+  )
+}
+
+export function fetchBeatBackups(): Promise<BeatBackup[]> {
+  return jsonRequest<{ backups: BeatBackup[] }>(
+    '/api/admin/beat-backups',
+  ).then((response) => response.backups)
+}
+
+export function createBeatBackup(): Promise<BeatBackup> {
+  return jsonRequest('/api/admin/beat-backups', { method: 'POST' })
+}
+
+export function verifyBeatBackup(backupId: string): Promise<BeatBackup> {
+  return jsonRequest(
+    `/api/admin/beat-backups/${encodeURIComponent(backupId)}/verify`,
+    { method: 'POST' },
+  )
+}
+
+export function restoreBeatBackup(backupId: string): Promise<BeatBackup> {
+  return jsonRequest(
+    `/api/admin/beat-backups/${encodeURIComponent(backupId)}/restore`,
+    { method: 'POST' },
+  )
 }
 
 function communityRequest<T>(

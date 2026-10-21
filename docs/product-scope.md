@@ -63,6 +63,8 @@ controls, and eighteen selectable color systems with amber as the default.
   defaults to the complete score and allows selectable start and end measures.
 - Drum stems can be soloed in the mixer. Generated rhythm and metronome
   patterns use the project playback speed and have an independent volume.
+  Practice percussion uses a limited 2x output bus and distinct acoustic,
+  electronic, brush and wood synthesis profiles.
 - The complete score shows chord names, fingering diagrams, pick/strum rhythm,
   continuous tablature, rhythm beams, technique marks, sections, and optional lyrics.
 - Capo recommendations prefer easier open-chord shapes and remain optional and editable.
@@ -82,11 +84,13 @@ controls, and eighteen selectable color systems with amber as the default.
 
 - Qishui Music online import is not offered because a stable acquisition
   adapter is not available.
-- Keyless MusicEx QMC2 files require the macOS desktop runtime, a current
-  QQ Music login and a successful per-file authorization response from the
-  official `music.vkey.GetEVkey` endpoint. macOS Full Disk Access may be
-  required to read the nested client plist. Browser, Windows and Linux clients
-  do not extract that local credential.
+- Keyless MusicEx QMC2 files require the macOS or Windows desktop runtime, a
+  current QQ Music login and a successful per-file authorization response from
+  the official `music.vkey.GetEVkey` endpoint. macOS Full Disk Access may be
+  required to read the nested client plist. Windows reads only bounded files
+  under the current user's QQ Music configuration roots and the current-user
+  QQ Music registry key. Browser and Linux clients do not extract that local
+  credential.
 - The application does not use a third-party decoder or key lookup service,
   and it does not retain QQ Music credentials or returned ekeys.
 - Key-separated KWM v2 and KGM v5 require a desktop user to explicitly import
@@ -102,7 +106,8 @@ controls, and eighteen selectable color systems with amber as the default.
   browser profile; the selection is not persisted.
 - Song rhythm backing follows playback. The standalone practice tool runs its
   own metronome or drum-machine clock with independent BPM, meter, subdivision,
-  kit, volume, pattern, and drum-lane mute controls.
+  kit, volume, pattern, and drum-lane mute controls. Drum-machine steps are
+  editable per lane and saved locally for each supported time signature.
 - Native Android/iOS packages are not current release artifacts. Store builds
   require cloud-runtime, signing, privacy-manifest and review gates.
 - Fine guitar-technique labels combine note transitions with acoustic features,

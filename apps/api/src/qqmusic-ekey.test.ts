@@ -7,6 +7,7 @@ import {
   buildQQMusicEkeyRequest,
   fetchQQMusicEkey,
   loadQQMusicMacCredential,
+  loadQQMusicWindowsCredential,
   parseQQMusicCredential,
   parseQQMusicCredentialArchive,
   parseQQMusicMediaName,
@@ -107,6 +108,31 @@ test(
     }
   },
 )
+
+test('loads a UTF-16 Windows QQ Music login fixture from UserData', async () => {
+  const homePath = resolve(process.cwd(), '.test-qqmusic-windows-home')
+  const loginPath = resolve(
+    homePath,
+    'AppData/Roaming/Tencent/QQMusic/UserData/login.ini',
+  )
+  await rm(homePath, { recursive: true, force: true })
+  await mkdir(dirname(loginPath), { recursive: true })
+  await writeFile(
+    loginPath,
+    Buffer.from(
+      `\ufeffmusicid=${credential.musicId}\r\nstrAuthst=${credential.musicKey}\r\nloginType=${credential.loginType}\r\n`,
+      'utf16le',
+    ),
+  )
+  try {
+    assert.deepEqual(
+      await loadQQMusicWindowsCredential(homePath),
+      credential,
+    )
+  } finally {
+    await rm(homePath, { recursive: true, force: true })
+  }
+})
 
 test('extracts the media MID from a MusicEx encrypted filename', () => {
   assert.deepEqual(parseQQMusicMediaName(mediaName), {
@@ -229,7 +255,7 @@ test('reports account authorization failures without exposing credentials', asyn
   )
 })
 
-test('limits automatic credential access to the macOS desktop runtime', async () => {
+test('limits automatic credential access to supported desktop runtimes', async () => {
   await assert.rejects(
     resolveQQMusicEkeyForDesktop(media, {
       env: {},
@@ -243,8 +269,47 @@ test('limits automatic credential access to the macOS desktop runtime', async ()
         GTS_DESKTOP_LOCAL: '1',
         GTS_DESKTOP_HOME: '/fixture-home',
       },
-      platform: 'win32',
+      platform: 'linux',
     }),
-    /仅支持 macOS 桌面版/u,
+    /仅支持 macOS 和 Windows 桌面版/u,
   )
+})
+
+test('uses the Windows QQ Music request profile for keyless QMC2', async () => {
+  let requestBody: Record<string, unknown> | undefined
+  let userAgent = ''
+  const result = await resolveQQMusicEkeyForDesktop(media, {
+    env: {
+      GTS_DESKTOP_LOCAL: '1',
+      GTS_DESKTOP_HOME: '/fixture-home',
+    },
+    platform: 'win32',
+    loadCredential: async () => credential,
+    fetchImpl: (async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body))
+      userAgent = new Headers(init?.headers).get('User-Agent') ?? ''
+      return Response.json({
+        code: 0,
+        req_1: {
+          code: 0,
+          data: {
+            midurlinfo: [
+              {
+                filename: media.filename,
+                songmid: media.songMid,
+                ekey: fixtureEkey,
+                result: 0,
+              },
+            ],
+          },
+        },
+      })
+    }) as typeof fetch,
+  })
+
+  const request = requestBody?.req_1 as Record<string, unknown>
+  const param = request.param as Record<string, unknown>
+  assert.equal(result, fixtureEkey)
+  assert.equal(param.platform, '27')
+  assert.match(userAgent, /Windows/u)
 })

@@ -2074,14 +2074,17 @@ class StringTraceMlTest(unittest.TestCase):
             analysis_path = root / "analysis.json"
             soundfile.write(
                 audio_path,
-                np.zeros(22_050 * 5, dtype=np.float32),
+                np.zeros(22_050 * 12, dtype=np.float32),
                 22_050,
                 subtype="PCM_16",
             )
             analysis = {
                 "time_signature": [4, 4],
                 "pickup_beats": 1,
-                "beats": [0.25, 0.75, 1.25, 1.75, 2.25, 2.75, 3.25, 3.75],
+                "beats": [
+                    round(0.25 + index * 0.5, 2)
+                    for index in range(24)
+                ],
             }
             analysis_path.write_text(
                 json.dumps(analysis),
@@ -2099,8 +2102,11 @@ class StringTraceMlTest(unittest.TestCase):
                     clip_id="steady-4-4-001",
                     group_id="source-song-001",
                     annotator_alias=alias,
-                    source_start=0,
+                    source_start=4,
                     duration=4,
+                    corpus_version="beat-pilot-v2-test",
+                    pre_roll=2,
+                    post_roll=2,
                     tags=["steady", "4-4"],
                 )
             right = json.loads(paths["annotator-b"].read_text(encoding="utf-8"))
@@ -2132,6 +2138,7 @@ class StringTraceMlTest(unittest.TestCase):
             self.assertEqual(gold["verification_status"], "adjudicated_gold")
             self.assertTrue(gold["benchmark_eligible"])
             report = evaluate_beat_review(gold, analysis)
+            self.assertEqual(report["reference_beats"], 8)
             self.assertEqual(report["beat_metrics"]["f1"], 1)
             self.assertEqual(report["downbeat_metrics"]["f1"], 1)
             self.assertTrue(evaluate_beat_gate(report)["passed"])

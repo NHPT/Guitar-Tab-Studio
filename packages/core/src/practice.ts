@@ -62,6 +62,8 @@ export interface PracticeTempoProfile {
   high: number
 }
 
+export const PRACTICE_OUTPUT_GAIN = 2
+
 const FOUR_FOUR: TimeSignature = [4, 4]
 const THREE_FOUR: TimeSignature = [3, 4]
 const SIX_EIGHT: TimeSignature = [6, 8]
@@ -260,9 +262,11 @@ export const PRACTICE_RHYTHMS: PracticeRhythm[] = [
     stepsPerBar: 16,
     bpmRange: [140, 240],
     hits: [
+      ...hits('crash', [0], 0.72),
       ...hits('kick', [0, 4, 8, 12], 0.9),
       ...hits('snare', [2, 6, 10, 14], 0.9),
-      ...every('closed-hat', 16, 1, 0.5),
+      ...every('closed-hat', 16, 2, 0.56),
+      ...hits('open-hat', [3, 7, 11, 15], 0.42),
     ],
   }),
   rhythm({
@@ -308,9 +312,10 @@ export const PRACTICE_RHYTHMS: PracticeRhythm[] = [
     stepsPerBar: 16,
     bpmRange: [65, 150],
     hits: [
-      ...hits('kick', [0, 7, 8], 0.86),
+      ...hits('kick', [0, 6, 8, 11], 0.86),
       ...hits('snare', [4, 12], 0.82),
-      ...every('closed-hat', 16, 2, 0.47),
+      ...every('closed-hat', 16, 2, 0.42),
+      ...hits('open-hat', [14], 0.5),
     ],
   }),
   rhythm({
@@ -489,9 +494,9 @@ export const PRACTICE_RHYTHMS: PracticeRhythm[] = [
     stepsPerBar: 12,
     bpmRange: [35, 90],
     hits: [
-      ...hits('kick', [0, 5, 6], 0.66),
-      ...hits('snare', [3, 9], 0.62),
-      ...hits('closed-hat', [0, 2, 3, 5, 6, 8, 9, 11], 0.34),
+      ...hits('kick', [0, 6], 0.66),
+      ...hits('rim', [3, 9], 0.62),
+      ...hits('shaker', [0, 2, 3, 5, 6, 8, 9, 11], 0.34),
     ],
   }),
   rhythm({
@@ -505,7 +510,8 @@ export const PRACTICE_RHYTHMS: PracticeRhythm[] = [
     hits: [
       ...hits('kick', [0, 5, 6, 11], 0.82),
       ...hits('snare', [3, 9], 0.86),
-      ...hits('closed-hat', [0, 2, 3, 5, 6, 8, 9, 11], 0.44),
+      ...hits('closed-hat', [0, 3, 6, 9], 0.5),
+      ...hits('open-hat', [2, 5, 8, 11], 0.42),
     ],
   }),
   rhythm({
@@ -520,6 +526,7 @@ export const PRACTICE_RHYTHMS: PracticeRhythm[] = [
       ...hits('kick', [0, 4, 8, 12], 0.94),
       ...hits('clap', [4, 12], 0.82),
       ...hits('open-hat', [2, 6, 10, 14], 0.62),
+      ...hits('closed-hat', [0, 4, 8, 12], 0.28),
     ],
   }),
   rhythm({
@@ -704,8 +711,8 @@ export const PRACTICE_RHYTHMS: PracticeRhythm[] = [
     bpmRange: [45, 115],
     hits: [
       ...hits('kick', [0, 6], 0.72),
-      ...hits('snare', [6], 0.64),
-      ...every('closed-hat', 12, 2, 0.36),
+      ...hits('rim', [6], 0.64),
+      ...every('shaker', 12, 2, 0.36),
     ],
   }),
   rhythm({

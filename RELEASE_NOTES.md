@@ -1,4 +1,4 @@
-# Guitar Tab Studio v0.1.0-preview.10
+# Guitar Tab Studio v0.1.0-preview.11
 
 This desktop preview prioritizes score timing, repeatable beat evaluation, and
 practical rehearsal tools. It remains intended for functional testing and
@@ -6,6 +6,18 @@ human-reviewed transcription work, not production model evaluation.
 
 ## Highlights
 
+- Windows media shortcuts now open user-visible download locations before
+  application caches. QQ Music defaults to the Windows Music folder, with
+  tested fallbacks for QQ Music, NetEase Cloud Music, MOO, Kuwo and Kugou.
+- Keyless MusicEx QMC2 files are now supported by the Windows desktop build.
+  The local API reads only bounded QQ Music configuration/registry data and
+  uses the official Windows authorization request profile; credentials and
+  returned ekeys remain in memory.
+- Metronome, rhythm backing and drum-machine output now use a limited 2x gain
+  bus. Acoustic, electronic, brush and wood kits have distinct synthesis
+  envelopes, filters and transients instead of minor parameter variations.
+- The standalone drum machine now supports editable lane steps, per-meter
+  custom-pattern persistence, preset restoration and pattern clearing.
 - Score timing now preserves the original performance timeline while writing
   notation against a per-beat tempo map. Each beat can select binary, triplet,
   sixteenth-note, or thirty-second-note subdivisions without altering audio.
@@ -45,7 +57,7 @@ human-reviewed transcription work, not production model evaluation.
   instrumentation, and recording quality.
 - No downloaded evaluation songs are included in this release. Copyrighted
   source audio must remain local and outside the repository and installers.
-- Preview.10 provides the review and evaluation machinery, but the independent
+- Preview.11 provides the review and evaluation machinery, but the independent
   human annotations and adjudicated test corpus are not complete.
 
 ## Preview Limitations
@@ -57,7 +69,7 @@ human-reviewed transcription work, not production model evaluation.
 - The built-in TAB, rhythm, and technique candidates are generated results and
   have not been manually approved as gold-standard notation.
 - Existing projects retain their previous analysis until they are analyzed
-  again with Preview.10.
+  again with Preview.11.
 - Installers are unsigned and not notarized. macOS Gatekeeper and Windows
   SmartScreen may display warnings.
 - macOS builds currently support Apple Silicon only. Windows builds support x64

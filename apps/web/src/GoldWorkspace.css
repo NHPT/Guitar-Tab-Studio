@@ -1,0 +1,236 @@
+.gold-page {
+  width: min(100%, 1180px);
+  margin: 0 auto;
+  padding: 30px 34px 48px;
+}
+
+.gold-status {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  border-bottom: 1px solid var(--border);
+}
+
+.gold-status > div {
+  display: grid;
+  gap: 5px;
+  padding: 22px 20px 22px 0;
+  border-right: 1px solid var(--border);
+}
+
+.gold-status span,
+.gold-releases header span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.gold-status > div strong {
+  font-size: 30px;
+}
+
+.gold-status > div small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.gold-status dl {
+  display: grid;
+  align-content: center;
+  gap: 0;
+  margin: 0;
+  padding-left: 24px;
+}
+
+.gold-status dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.gold-status dt,
+.gold-status dd {
+  font-size: 11px;
+}
+
+.gold-status dt {
+  color: var(--text-muted);
+}
+
+.gold-status dd {
+  margin: 0;
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.gold-create {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 150px;
+  align-items: end;
+  gap: 12px;
+  padding: 26px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.gold-create label {
+  display: grid;
+  gap: 6px;
+}
+
+.gold-create label span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.gold-create input {
+  height: 36px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface-strong);
+  font-size: 12px;
+}
+
+.gold-create > button {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--accent-strong);
+  border-radius: 6px;
+  color: #fff;
+  background: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.gold-create > button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.gold-create svg,
+.gold-releases a svg,
+.gold-message svg {
+  width: 14px;
+  height: 14px;
+}
+
+.gold-message {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.gold-message.is-error {
+  color: var(--danger);
+}
+
+.gold-message.is-success {
+  color: var(--success);
+}
+
+.gold-releases {
+  padding-top: 28px;
+}
+
+.gold-releases > header {
+  display: flex;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.gold-releases header small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.gold-releases article {
+  min-height: 54px;
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) 80px 90px 110px 70px;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.gold-releases article > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.gold-releases article strong {
+  font-size: 12px;
+}
+
+.gold-releases article span,
+.gold-releases article code {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.gold-releases article code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.gold-releases article a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.gold-loading {
+  min-height: calc(100vh - 60px);
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .gold-page {
+    padding: 22px 14px 36px;
+  }
+
+  .gold-status {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gold-status > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .gold-status dl {
+    padding-left: 0;
+  }
+
+  .gold-create {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gold-releases article {
+    grid-template-columns: minmax(0, 1fr) 70px;
+    padding: 9px 0;
+  }
+
+  .gold-releases article code:nth-of-type(2),
+  .gold-releases article code:nth-of-type(3) {
+    display: none;
+  }
+}

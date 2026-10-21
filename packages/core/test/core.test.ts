@@ -9,12 +9,14 @@ import {
   CoreValidationError,
   createEasyArrangement,
   detectFundamentalFrequency,
+  detectStandardGuitarFrequency,
   detectStandardAudioSignature,
   guitarPositionForPitch,
   MemoryProjectRepository,
   notationPositionAt,
   parseModelPackageManifest,
   parseProjectRevision,
+  PRACTICE_OUTPUT_GAIN,
   PRACTICE_RHYTHMS,
   migrateStudioProject,
   parseAnalysisDocument,
@@ -24,8 +26,10 @@ import {
   rhythmCompatibility,
   rhythmCompatibilityForTempoProfile,
   rhythmEventPosition,
+  stabilizeTunerReadings,
   tempoMapFromBeats,
   tunerReading,
+  tunerReadingForTarget,
   uploadContentValidationError,
   uploadPrefilterError,
 } from '../src/index.js'
@@ -309,6 +313,86 @@ test('detects a guitar pitch and maps it to a playable position', () => {
   })
 })
 
+test('recovers a guitar fundamental when upper harmonics dominate', () => {
+  const sampleRate = 48_000
+  for (const { baseFrequency, detune, harmonics } of [
+    {
+      baseFrequency: 82.4069,
+      detune: 0,
+      harmonics: [0.03, 0.75, 0.02, 0.15],
+    },
+    {
+      baseFrequency: 82.4069,
+      detune: 0,
+      harmonics: [0.03, 0.04, 0.75, 0.1],
+    },
+    {
+      baseFrequency: 246.9417,
+      detune: 15,
+      harmonics: [0.03, 0.04, 0.75, 0.1],
+    },
+    {
+      baseFrequency: 329.6276,
+      detune: 30,
+      harmonics: [0.28, 0.18, 0.1],
+    },
+  ]) {
+    const frequency = baseFrequency * 2 ** (detune / 1200)
+    const samples = Float32Array.from(
+      { length: 8192 },
+      (_, index) => {
+        const at = index / sampleRate
+        const envelope = Math.exp(-at * 2.5)
+        return harmonics.reduce(
+          (value, amplitude, harmonic) =>
+            value +
+            envelope *
+              amplitude *
+              Math.sin(
+                2 * Math.PI * frequency * (harmonic + 1) * at,
+              ),
+          0,
+        )
+      },
+    )
+    const detection = detectStandardGuitarFrequency(samples, sampleRate)
+    assert.ok(detection)
+    assert.ok(
+      Math.abs(1200 * Math.log2(detection.frequency / frequency)) < 1,
+    )
+    assert.equal(
+      tunerReading(detection)?.midi,
+      Math.round(69 + 12 * Math.log2(frequency / 440)),
+    )
+  }
+})
+
+test('stabilizes tuner readings and supports a locked guitar string', () => {
+  const e2 = 82.4069
+  const readings = [-3, 1, 1201, 2, 0]
+    .map((cents) =>
+      tunerReading({
+        frequency: e2 * 2 ** (cents / 1200),
+        confidence: 0.94,
+        level: 0.1,
+      }),
+    )
+    .filter((reading) => reading !== null)
+  const stable = stabilizeTunerReadings(readings)
+  assert.equal(stable?.midi, 40)
+  assert.ok(Math.abs(stable?.cents ?? 100) < 2)
+
+  const octaveReading = tunerReading({
+    frequency: e2 * 2,
+    confidence: 0.96,
+    level: 0.1,
+  })
+  assert.ok(octaveReading)
+  const targeted = tunerReadingForTarget(octaveReading, 40)
+  assert.equal(targeted?.midi, 40)
+  assert.ok(Math.abs(targeted?.cents ?? 100) < 0.1)
+})
+
 test('provides advanced drum fills with cymbal or tom transitions', () => {
   const fills = PRACTICE_RHYTHMS.filter((rhythm) =>
     rhythm.id.endsWith('-fill'),
@@ -321,6 +405,21 @@ test('provides advanced drum fills with cymbal or tom transitions', () => {
       ),
     ),
   )
+})
+
+test('keeps named drum machine patterns structurally distinct', () => {
+  assert.equal(PRACTICE_OUTPUT_GAIN, 2)
+  const patterns = PRACTICE_RHYTHMS.filter(
+    (rhythm) => rhythm.group !== 'metronome',
+  )
+  const signatures = patterns.map((rhythm) =>
+    JSON.stringify([
+      rhythm.timeSignature,
+      rhythm.stepsPerBar,
+      rhythm.hits.map((hit) => [hit.step, hit.voice]),
+    ]),
+  )
+  assert.equal(new Set(signatures).size, patterns.length)
 })
 
 test('anchors rhythm steps to the detected beat grid within each measure', () => {

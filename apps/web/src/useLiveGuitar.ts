@@ -1,6 +1,8 @@
 import {
   detectFundamentalFrequency,
+  detectStandardGuitarFrequency,
   guitarPositionForPitch,
+  stabilizeTunerReadings,
   tunerReading,
   type GuitarPosition,
   type TunerReading,
@@ -64,6 +66,9 @@ export function useLiveGuitar(): LiveGuitarController {
   const candidateFramesRef = useRef(0)
   const activeNoteRef = useRef<ActiveNote | undefined>(undefined)
   const previousPositionRef = useRef<GuitarPosition | undefined>(undefined)
+  const tunerHistoryRef = useRef<TunerReading[]>([])
+  const stableTunerReadingRef = useRef<TunerReading | null>(null)
+  const missingTunerFramesRef = useRef(0)
 
   const publishActiveNote = useCallback((active: ActiveNote) => {
     const note = {
@@ -112,6 +117,9 @@ export function useLiveGuitar(): LiveGuitarController {
     }
     candidateMidiRef.current = undefined
     candidateFramesRef.current = 0
+    tunerHistoryRef.current = []
+    stableTunerReadingRef.current = null
+    missingTunerFramesRef.current = 0
     setReading(null)
     setLevel(0)
     setMode(null)
@@ -150,18 +158,44 @@ export function useLiveGuitar(): LiveGuitarController {
         startedAtRef.current = context.currentTime
         previousLevelRef.current = 0
         lastAttackRef.current = context.currentTime
+        lastUiUpdateRef.current = 0
         setStatus('listening')
 
         const samples = new Float32Array(analyser.fftSize)
         const update = () => {
           if (contextRef.current !== context) return
           analyser.getFloatTimeDomainData(samples)
-          const detection = detectFundamentalFrequency(
-            samples,
-            context.sampleRate,
-          )
+          const detection =
+            nextMode === 'tuner'
+              ? detectStandardGuitarFrequency(samples, context.sampleRate)
+              : detectFundamentalFrequency(samples, context.sampleRate)
           const now = context.currentTime
-          const nextReading = detection ? tunerReading(detection) : null
+          const detectedReading = detection ? tunerReading(detection) : null
+          let nextReading = detectedReading
+          if (nextMode === 'tuner') {
+            if (
+              detectedReading &&
+              detectedReading.confidence >= 0.72 &&
+              detectedReading.level >= 0.006
+            ) {
+              missingTunerFramesRef.current = 0
+              tunerHistoryRef.current = [
+                ...tunerHistoryRef.current,
+                detectedReading,
+              ].slice(-9)
+              stableTunerReadingRef.current = stabilizeTunerReadings(
+                tunerHistoryRef.current,
+                stableTunerReadingRef.current,
+              )
+            } else {
+              missingTunerFramesRef.current += 1
+              if (missingTunerFramesRef.current >= 10) {
+                tunerHistoryRef.current = []
+                stableTunerReadingRef.current = null
+              }
+            }
+            nextReading = stableTunerReadingRef.current
+          }
           const nextLevel = detection?.level ?? 0
           if (now - lastUiUpdateRef.current >= 0.05) {
             lastUiUpdateRef.current = now

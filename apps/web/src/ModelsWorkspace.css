@@ -1,0 +1,302 @@
+.models-page {
+  width: min(100%, 1220px);
+  margin: 0 auto;
+  padding: 30px 34px 48px;
+}
+
+.models-readiness {
+  padding: 24px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.models-readiness > header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+}
+
+.models-readiness header > div {
+  display: grid;
+  gap: 5px;
+}
+
+.models-readiness header span,
+.models-jobs header span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.models-readiness header strong {
+  font-size: 22px;
+}
+
+.models-readiness header i {
+  color: var(--warning);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.models-readiness > div {
+  height: 8px;
+  overflow: hidden;
+  background: var(--surface-muted);
+}
+
+.models-readiness > div span {
+  height: 100%;
+  display: block;
+  background: var(--accent-strong);
+}
+
+.models-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 32px;
+  padding: 28px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.models-datasets > header,
+.models-job-form > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.models-datasets > header svg,
+.models-job-form > header svg {
+  width: 15px;
+  height: 15px;
+  color: var(--accent-strong);
+}
+
+.models-datasets > header strong,
+.models-job-form > header strong {
+  font-size: 13px;
+}
+
+.models-datasets article {
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 100px 70px;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.models-datasets article > div {
+  display: grid;
+  gap: 3px;
+}
+
+.models-datasets article strong {
+  font-size: 12px;
+}
+
+.models-datasets article span,
+.models-datasets article code,
+.models-datasets article i {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.models-datasets article code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.models-datasets article i {
+  font-style: normal;
+  text-align: right;
+}
+
+.models-datasets article i.is-ready {
+  color: var(--success);
+}
+
+.models-datasets footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  gap: 8px;
+  padding-top: 16px;
+}
+
+.models-datasets input,
+.models-job-form input,
+.models-job-form select {
+  height: 34px;
+  box-sizing: border-box;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface-strong);
+  font-size: 12px;
+}
+
+.models-datasets footer button,
+.models-job-form > button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--accent-strong);
+  border-radius: 6px;
+  color: #fff;
+  background: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.models-datasets footer button:disabled,
+.models-job-form > button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.models-datasets footer svg,
+.models-job-form > button svg,
+.models-message svg {
+  width: 14px;
+  height: 14px;
+}
+
+.models-job-form {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding-left: 24px;
+  border-left: 1px solid var(--border);
+}
+
+.models-job-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.models-job-form label span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.models-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.models-message.is-error {
+  color: var(--danger);
+}
+
+.models-message.is-success {
+  color: var(--success);
+}
+
+.models-jobs {
+  padding-top: 28px;
+}
+
+.models-jobs > header {
+  display: flex;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.models-jobs header small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.models-jobs article {
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) 140px 120px minmax(140px, 1fr);
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.models-jobs article strong,
+.models-jobs article span,
+.models-jobs article code,
+.models-jobs article i {
+  font-size: 11px;
+}
+
+.models-jobs article span,
+.models-jobs article code {
+  color: var(--text-muted);
+}
+
+.models-jobs article code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.models-jobs article i {
+  color: var(--warning);
+  font-style: normal;
+  text-align: right;
+}
+
+.models-jobs article i.is-ready {
+  color: var(--success);
+}
+
+.models-loading {
+  min-height: calc(100vh - 60px);
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+@media (max-width: 820px) {
+  .models-page {
+    padding: 22px 14px 36px;
+  }
+
+  .models-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .models-job-form {
+    padding: 20px 0 0;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+}
+
+@media (max-width: 520px) {
+  .models-datasets article {
+    grid-template-columns: minmax(0, 1fr) 70px;
+  }
+
+  .models-datasets article code {
+    display: none;
+  }
+
+  .models-datasets footer {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .models-jobs article {
+    grid-template-columns: minmax(0, 1fr) 100px;
+    padding: 8px 0;
+  }
+
+  .models-jobs article code {
+    grid-column: 1;
+  }
+}

@@ -44,6 +44,8 @@ function platformCandidates(
   platform: NodeJS.Platform,
   homePath: string,
   musicPath: string,
+  documentsPath: string,
+  downloadsPath: string,
   appDataPath: string,
 ): string[] {
   if (platform === 'darwin') {
@@ -93,26 +95,61 @@ function platformCandidates(
   if (platform === 'win32') {
     const localAppData = resolve(homePath, 'AppData', 'Local')
     const windowsRoot = resolve(homePath, '..', '..')
+    const publicMusic = resolve(
+      windowsRoot,
+      'Users',
+      'Public',
+      'Music',
+    )
     const candidates: Record<DesktopMediaSource, string[]> = {
       qqmusic: [
+        resolve(musicPath, 'QQMusic'),
+        resolve(musicPath, 'QQ 音乐'),
+        resolve(publicMusic, 'QQMusicData', 'Song'),
+        resolve(publicMusic, 'QQMusic'),
+        musicPath,
+        resolve(downloadsPath, 'QQMusic'),
+        resolve(documentsPath, 'Tencent', 'QQMusic'),
+        resolve(appDataPath, 'Tencent', 'QQMusic', 'QQMusicCache'),
         resolve(localAppData, 'Tencent', 'QQMusic', 'Cache'),
         resolve(appDataPath, 'Tencent', 'QQMusic'),
       ],
       netease: [
+        resolve(musicPath, '网易云音乐'),
+        resolve(musicPath, 'CloudMusic'),
+        resolve(documentsPath, 'CloudMusic'),
+        resolve(downloadsPath, '网易云音乐'),
+        resolve(downloadsPath, 'CloudMusic'),
+        musicPath,
         resolve(localAppData, 'NetEase', 'CloudMusic', 'Cache'),
         resolve(appDataPath, 'NetEase', 'CloudMusic'),
       ],
       moo: [
+        resolve(musicPath, 'MOO Music'),
+        resolve(musicPath, 'MooMusic'),
+        resolve(musicPath, 'MOO 音乐'),
+        resolve(downloadsPath, 'MOO Music'),
+        musicPath,
         resolve(localAppData, 'Tencent', 'MooMusic'),
         resolve(appDataPath, 'Tencent', 'MooMusic'),
       ],
       kuwo: [
         resolve(windowsRoot, 'KwDownload', 'song'),
         resolve(homePath, 'KwDownload', 'song'),
+        resolve(musicPath, 'KwDownload', 'song'),
+        resolve(musicPath, 'KwDownload'),
+        resolve(downloadsPath, 'KwDownload'),
+        musicPath,
       ],
       kugou: [
-        resolve(appDataPath, 'kugou8'),
+        resolve(windowsRoot, 'KuGou'),
         resolve(homePath, 'KuGou'),
+        resolve(musicPath, 'KuGou'),
+        resolve(musicPath, 'KugouMusic'),
+        resolve(downloadsPath, 'KuGou'),
+        musicPath,
+        resolve(appDataPath, 'kugou8'),
+        resolve(localAppData, 'KuGou'),
       ],
     }
     return candidates[source]
@@ -185,6 +222,8 @@ export function localFileDefaultPath({
       platform,
       homePath,
       musicPath,
+      documentsPath,
+      downloadsPath,
       appDataPath,
     ),
     ...sourceDirectoryNames[source].flatMap((directory) => [
