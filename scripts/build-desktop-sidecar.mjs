@@ -107,6 +107,7 @@ function materializeSymlinks(root) {
 }
 
 materializeSymlinks(outputRoot)
+rmSync(buildRoot, { recursive: true, force: true })
 
 const require = createRequire(import.meta.url)
 const ffmpegSource = require('ffmpeg-static')
@@ -142,6 +143,13 @@ function runProbe(command, argumentsList, label) {
 }
 
 runProbe(workerExecutable, ['--runtime-self-test'], 'Worker runtime self-test')
+if (process.platform === 'win32') {
+  runProbe(
+    workerExecutable,
+    ['--internal-qqmusic-runtime-self-test'],
+    'Windows QQ Music runtime self-test',
+  )
+}
 const smokeRoot = resolve(buildRoot, 'media-smoke')
 const smokeInput = resolve(smokeRoot, 'fixture.mp3')
 const smokeOutput = resolve(smokeRoot, 'output')

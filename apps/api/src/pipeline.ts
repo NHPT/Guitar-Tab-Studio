@@ -1601,7 +1601,7 @@ export function classifyMediaAcquisitionFailure(
       }
     }
     return {
-      message: `${platform.label}要求登录会话或人机验证；可在导入窗口使用系统默认浏览器的登录状态重试`,
+      message: `${platform.label}要求有效登录会话或人机验证；应用将根据默认浏览器的安全策略选择复用会话或应用内隔离登录`,
       errorCode: 'media-auth-required',
     }
   }

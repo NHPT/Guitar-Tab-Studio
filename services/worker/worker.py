@@ -174,6 +174,8 @@ def run(command: list[str]) -> None:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         if completed.returncode in {28, 228}:
@@ -275,6 +277,8 @@ def hardware_probe() -> dict[str, object]:
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
             )
             first_gpu = (
@@ -793,6 +797,8 @@ def run_with_percent_progress(
         command,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=0,
     )
     assert process.stderr is not None
@@ -899,6 +905,16 @@ def run_internal_module() -> bool:
         import yt_dlp
 
         yt_dlp.main(sys.argv[2:])
+        return True
+    if sys.argv[1] == "--internal-qqmusic-credential":
+        from qqmusic_windows import print_qqmusic_windows_credential
+
+        print_qqmusic_windows_credential()
+        return True
+    if sys.argv[1] == "--internal-qqmusic-runtime-self-test":
+        from qqmusic_windows import print_qqmusic_windows_runtime_self_test
+
+        print_qqmusic_windows_runtime_self_test()
         return True
     return False
 

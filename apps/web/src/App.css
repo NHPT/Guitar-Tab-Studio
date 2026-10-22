@@ -133,7 +133,7 @@ button {
 .header-popover > header svg {
   width: 16px;
   height: 16px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 .header-popover > header strong {
@@ -159,7 +159,7 @@ button {
   padding: 0 9px;
   border: 1px solid var(--accent);
   border-radius: 7px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--accent-soft);
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 10px;
@@ -226,12 +226,12 @@ button {
 }
 
 .primary-button {
-  color: #ffffff;
-  background: var(--accent-strong);
+  color: var(--on-accent);
+  background: var(--accent-fill);
 }
 
 .primary-button:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: var(--accent-fill-hover);
   transform: translateY(-1px);
 }
 
@@ -324,7 +324,7 @@ button {
 .project-list-resizer:hover::after,
 .project-list-resizer:focus-visible::after {
   width: 52px;
-  background: var(--accent-strong);
+  background: var(--accent-fill);
 }
 
 .project-list-resizer:focus-visible {
@@ -374,7 +374,7 @@ button {
   place-items: center;
   border: 1px solid var(--border);
   border-radius: 7px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--surface-strong);
 }
 
@@ -458,7 +458,7 @@ button {
 }
 
 .rail-section button.is-active {
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -561,8 +561,8 @@ button {
 }
 
 .workspace.is-practice-workspace .metronome-pulse-strip i.is-current {
-  border-color: var(--accent-strong);
-  background: var(--accent-strong);
+  border-color: var(--accent-ink);
+  background: var(--accent-fill);
   transform: scaleY(1.08);
 }
 
@@ -833,8 +833,8 @@ button {
   gap: 7px;
   padding: 0 12px;
   border-radius: 7px;
-  color: #ffffff;
-  background: var(--accent-strong);
+  color: var(--on-accent);
+  background: var(--accent-fill);
   font-size: 11px;
   font-weight: 700;
   cursor: pointer;
@@ -880,7 +880,7 @@ button {
 
 .practice-tempo-control > button:hover,
 .practice-tempo-control > button:focus-visible {
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -927,7 +927,7 @@ button {
 
 .practice-tempo-control .tap-tempo-button {
   width: 42px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 9px;
   font-weight: 750;
@@ -991,7 +991,7 @@ button {
 
 .practice-accent-toggle.is-active {
   border-color: var(--accent);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -1034,7 +1034,7 @@ button {
 }
 
 .practice-sequencer-toolbar strong {
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   font-size: 10px;
   font-weight: 750;
 }
@@ -1059,7 +1059,7 @@ button {
 .practice-sequencer-toolbar button:hover,
 .practice-sequencer-toolbar button:focus-visible {
   border-color: var(--accent);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -1131,8 +1131,8 @@ button {
 
 .practice-step-grid button.is-current,
 .practice-step-grid button.has-hit.is-current {
-  border-color: var(--accent-strong);
-  background: var(--accent-strong);
+  border-color: var(--accent-ink);
+  background: var(--accent-fill);
   transform: scaleY(1.22);
 }
 
@@ -1160,7 +1160,7 @@ button {
 }
 
 .metronome-pulse-strip i.is-current {
-  background: var(--accent-strong);
+  background: var(--accent-fill);
   transform: scaleY(2);
 }
 
@@ -1198,8 +1198,8 @@ button {
   gap: 7px;
   padding: 0 12px;
   border-radius: 7px;
-  color: #ffffff;
-  background: var(--accent-strong);
+  color: var(--on-accent);
+  background: var(--accent-fill);
   font-size: 11px;
   font-weight: 700;
   cursor: pointer;
@@ -1245,7 +1245,7 @@ button {
 
 .tuner-readout > b {
   min-height: 20px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   font-size: 12px;
   font-weight: 750;
 }
@@ -1354,7 +1354,7 @@ button {
   position: absolute;
   bottom: -1px;
   left: var(--tuner-position);
-  background: var(--accent-strong);
+  background: var(--accent-fill);
   box-shadow: 0 0 0 3px var(--accent-soft);
   transform: translateX(-50%);
   transition:
@@ -1436,7 +1436,7 @@ button {
   height: 100%;
   display: block;
   border-radius: inherit;
-  background: var(--accent-strong);
+  background: var(--accent-fill);
   transition: width 70ms linear;
 }
 
@@ -1506,7 +1506,7 @@ button {
 
 .tuner-strings button.is-active {
   border-color: var(--accent);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -1605,7 +1605,7 @@ button {
 
 .live-tab b.has-note {
   border: 1px solid var(--accent);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -1672,8 +1672,8 @@ button {
   display: grid;
   place-items: center;
   border-radius: 50%;
-  color: #ffffff;
-  background: var(--accent-strong);
+  color: var(--on-accent);
+  background: var(--accent-fill);
   cursor: pointer;
   transition: transform 120ms ease;
 }
@@ -1734,7 +1734,7 @@ input[type="range"] {
   border-radius: 999px;
   appearance: none;
   background: var(--border);
-  accent-color: var(--accent-strong);
+  accent-color: var(--accent-fill);
   cursor: pointer;
 }
 
@@ -1744,7 +1744,7 @@ input[type="range"]::-webkit-slider-thumb {
   border: 2px solid var(--surface-strong);
   border-radius: 50%;
   appearance: none;
-  background: var(--accent-strong);
+  background: var(--accent-fill);
   box-shadow: 0 0 0 1px var(--border-strong);
 }
 
@@ -1783,7 +1783,7 @@ input[type="range"]::-webkit-slider-thumb {
 .loop-toggle:focus-visible,
 .loop-control.is-active .loop-toggle {
   border-color: var(--accent);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -1985,7 +1985,7 @@ input[type="range"]::-webkit-slider-thumb {
 .rhythm-toggle:focus-visible,
 .rhythm-toggle.is-active {
   border-color: var(--accent);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -2064,12 +2064,12 @@ input[type="range"]::-webkit-slider-thumb {
 .count-in-status > div:first-child svg {
   width: 16px;
   height: 16px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 .count-in-status > strong {
   min-width: 72px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 28px;
   line-height: 1;
@@ -2101,8 +2101,8 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .count-in-beats i.is-current {
-  border-color: var(--accent-strong);
-  background: var(--accent-strong);
+  border-color: var(--accent-ink);
+  background: var(--accent-fill);
   transform: scale(1.35);
 }
 
@@ -2191,7 +2191,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 .visualizer-line.is-live {
   clip-path: inset(0 calc(100% - var(--visualizer-progress)) 0 0);
-  stroke: var(--accent-strong);
+  stroke: var(--accent-ink);
   stroke-width: 2;
   filter: drop-shadow(0 0 4px var(--accent));
 }
@@ -2238,7 +2238,7 @@ input[type="range"]::-webkit-slider-thumb {
   top: 0;
   bottom: 0;
   width: 1px;
-  background: var(--accent-strong);
+  background: var(--accent-fill);
   pointer-events: none;
 }
 
@@ -2250,7 +2250,7 @@ input[type="range"]::-webkit-slider-thumb {
   width: 7px;
   height: 7px;
   border-radius: 0 0 4px 4px;
-  background: var(--accent-strong);
+  background: var(--accent-fill);
 }
 
 .waveform-cursor::after {
@@ -2365,8 +2365,8 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .tab-measure.is-active {
-  border-color: #df8d81;
-  background: #fff8f6;
+  border-color: var(--accent);
+  background: var(--active-surface);
 }
 
 .tab-measure > header {
@@ -2462,20 +2462,20 @@ input[type="range"]::-webkit-slider-thumb {
   position: absolute;
   top: -11px;
   right: -5px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   font-family: Inter, sans-serif;
   font-size: 8px;
   line-height: 10px;
 }
 
 .tab-note.is-selected {
-  border-color: var(--accent-strong);
-  color: #ffffff;
-  background: var(--accent-strong);
+  border-color: var(--accent-ink);
+  color: var(--on-accent);
+  background: var(--accent-fill);
 }
 
 .tab-note.is-selected small {
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 .tab-note.is-uncertain {
@@ -2544,7 +2544,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .capo-toggle input:checked + i {
-  background: var(--accent-strong);
+  background: var(--accent-fill);
 }
 
 .capo-toggle input:checked + i::after {
@@ -2790,7 +2790,7 @@ input[type="range"]::-webkit-slider-thumb {
   bottom: 25px;
   left: 50%;
   z-index: 8;
-  background: var(--accent-strong);
+  background: var(--accent-fill);
   box-shadow: 0 0 10px var(--accent-ring);
   pointer-events: none;
 }
@@ -2803,7 +2803,7 @@ input[type="range"]::-webkit-slider-thumb {
   width: 10px;
   height: 7px;
   border-radius: 0 0 5px 5px;
-  background: var(--accent-strong);
+  background: var(--accent-fill);
 }
 
 .score-flow::-webkit-scrollbar {
@@ -2854,7 +2854,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .score-measure.is-chord-selected .chord-diagram-button {
-  border-color: var(--accent-strong);
+  border-color: var(--accent-ink);
 }
 
 .chord-diagram figcaption {
@@ -2929,7 +2929,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .chord-finger {
-  fill: #ffffff;
+  fill: var(--on-text);
   font-family: Inter, sans-serif;
   font-size: 4.5px;
   font-weight: 700;
@@ -2985,7 +2985,7 @@ input[type="range"]::-webkit-slider-thumb {
   top: 6px;
   left: 10px;
   z-index: 2;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   font-size: 9px;
   font-weight: 750;
 }
@@ -3126,15 +3126,15 @@ input[type="range"]::-webkit-slider-thumb {
   position: absolute;
   top: -10px;
   right: -5px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   font-family: Inter, sans-serif;
   font-size: 7px;
   font-style: normal;
 }
 
 .score-beat-cell button.is-selected {
-  color: #ffffff;
-  background: var(--accent-strong);
+  color: var(--on-accent);
+  background: var(--accent-fill);
 }
 
 .score-beat-cell button.is-uncertain {
@@ -3207,7 +3207,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .technique-label {
-  fill: var(--accent-strong);
+  fill: var(--accent-ink);
   font-size: 7px;
   font-weight: 750;
   text-anchor: middle;
@@ -3215,7 +3215,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 .technique-connection {
   fill: none;
-  stroke: var(--accent-strong);
+  stroke: var(--accent-ink);
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 1.45;
@@ -3226,7 +3226,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .beat-style-label {
-  fill: var(--accent-strong);
+  fill: var(--accent-ink);
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 6px;
   font-weight: 750;
@@ -3260,12 +3260,12 @@ input[type="range"]::-webkit-slider-thumb {
 .strum-mark:hover,
 .strum-mark:focus-visible,
 .strum-mark.is-selected {
-  stroke: var(--accent-strong);
+  stroke: var(--accent-ink);
 }
 
 .arpeggio-mark {
   fill: none;
-  stroke: var(--accent-strong);
+  stroke: var(--accent-ink);
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 1;
@@ -3295,15 +3295,15 @@ input[type="range"]::-webkit-slider-thumb {
 
 .tab-glyph:hover rect,
 .tab-glyph:focus-visible rect {
-  stroke: var(--accent-strong);
+  stroke: var(--accent-ink);
 }
 
 .tab-glyph.is-selected rect {
-  fill: var(--accent-strong);
+  fill: var(--accent-fill);
 }
 
 .tab-glyph.is-selected text {
-  fill: #ffffff;
+  fill: var(--on-accent);
 }
 
 .tab-glyph.is-uncertain rect {
@@ -3522,7 +3522,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 .track-controls button.is-active {
   border-color: var(--accent);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -3780,7 +3780,7 @@ input[type="range"]::-webkit-slider-thumb {
   display: grid;
   place-items: center;
   border-radius: 6px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -3912,7 +3912,7 @@ input[type="range"]::-webkit-slider-thumb {
 .settings-language > div:first-child > svg {
   width: 20px;
   height: 20px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 .settings-language > div:first-child > span {
@@ -3948,7 +3948,7 @@ input[type="range"]::-webkit-slider-thumb {
 .settings-appearance > header > svg {
   width: 20px;
   height: 20px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 .settings-appearance > header > span {
@@ -4074,7 +4074,7 @@ input[type="range"]::-webkit-slider-thumb {
 .settings-theme-group button > svg {
   width: 12px;
   height: 12px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 .settings-dialog > footer {
@@ -4168,7 +4168,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .runtime-mode button.is-active {
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--surface-strong);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, var(--border));
 }
@@ -4472,7 +4472,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 .runtime-oauth-ready button {
   padding: 0;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: transparent;
   font: inherit;
   cursor: pointer;
@@ -4545,7 +4545,7 @@ input[type="range"]::-webkit-slider-thumb {
   border: 0;
   border-radius: 3px;
   background: var(--surface-muted);
-  accent-color: var(--accent-strong);
+  accent-color: var(--accent-fill);
 }
 
 .runtime-model-progress progress::-webkit-progress-bar {
@@ -4553,7 +4553,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .runtime-model-progress progress::-webkit-progress-value {
-  background: var(--accent-strong);
+  background: var(--accent-fill);
 }
 
 .runtime-model-progress small {
@@ -5042,7 +5042,7 @@ input[type="range"]::-webkit-slider-thumb {
   width: 30px;
   height: 30px;
   margin-bottom: 5px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 .drop-zone strong {
@@ -5106,7 +5106,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 .media-source-button:hover {
   border-color: var(--accent);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--active-surface);
 }
 
@@ -5181,7 +5181,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 .platform-list span.is-detected {
   border-color: var(--accent);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -5193,7 +5193,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .source-detection.is-valid {
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 .policy-copy,
@@ -5234,7 +5234,7 @@ input[type="range"]::-webkit-slider-thumb {
 .media-session-recovery > svg {
   width: 20px;
   height: 20px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 .media-session-recovery > div {
@@ -5359,7 +5359,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 .protected-media-consent .decoder-status.is-ready {
   border-color: var(--accent);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 .protected-media-actions {
@@ -5390,7 +5390,7 @@ input[type="range"]::-webkit-slider-thumb {
   place-items: center;
   margin-bottom: 5px;
   border-radius: 50%;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--accent-soft);
 }
 
@@ -5467,7 +5467,7 @@ input[type="range"]::-webkit-slider-thumb {
 .loading-screen > svg:first-child {
   width: 36px;
   height: 36px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 .loading-screen p {

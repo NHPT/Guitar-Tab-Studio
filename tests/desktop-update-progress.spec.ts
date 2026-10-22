@@ -128,7 +128,7 @@ test('shows desktop update download progress and dismisses it when ready', async
     ).__emitUpdateProgress
     emit({
       phase: 'downloading',
-      version: '0.1.0-preview.12',
+      version: '0.1.0-preview.13',
       percent: 37.4,
       transferredBytes: 225 * 1024 ** 2,
       totalBytes: 600 * 1024 ** 2,
@@ -139,7 +139,7 @@ test('shows desktop update download progress and dismisses it when ready', async
   const status = page.getByRole('status', { name: '应用更新下载进度' })
   await expect(status).toBeVisible()
   await expect(status.getByText('正在下载应用更新')).toBeVisible()
-  await expect(status.getByText('Guitar Tab Studio 0.1.0-preview.12')).toBeVisible()
+  await expect(status.getByText('Guitar Tab Studio 0.1.0-preview.13')).toBeVisible()
   await expect(status.getByText('37%')).toBeVisible()
   await expect(status.getByText('225.0 MB / 600.0 MB')).toBeVisible()
   await expect(status.getByText('10.0 MB/s')).toBeVisible()
@@ -187,7 +187,7 @@ test('shows desktop update download progress and dismisses it when ready', async
     ).__emitUpdateProgress
     emit({
       phase: 'ready',
-      version: '0.1.0-preview.12',
+      version: '0.1.0-preview.13',
       percent: 100,
       transferredBytes: 600 * 1024 ** 2,
       totalBytes: 600 * 1024 ** 2,

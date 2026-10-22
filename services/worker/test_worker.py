@@ -640,9 +640,11 @@ class RuntimeGuardTest(unittest.TestCase):
         with patch(
             "worker.subprocess.run",
             return_value=SimpleNamespace(returncode=228),
-        ):
+        ) as command:
             with self.assertRaisesRegex(RuntimeError, "可用磁盘空间不足"):
                 run(["ffmpeg", "normalized.wav"])
+        self.assertEqual(command.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(command.call_args.kwargs["errors"], "replace")
 
     def test_demucs_maps_enospc_traceback_to_a_storage_error(self) -> None:
         process = SimpleNamespace(
@@ -689,6 +691,28 @@ class RuntimeGuardTest(unittest.TestCase):
                     status="separating",
                     stage_label="正在分离人声与乐器",
                 )
+
+    def test_progress_subprocess_decodes_utf8_independent_of_system_locale(
+        self,
+    ) -> None:
+        process = SimpleNamespace(
+            stderr=StringIO("正在分离 50%|\n"),
+            wait=lambda: 0,
+        )
+        with (
+            patch("worker.subprocess.Popen", return_value=process) as command,
+            patch("sys.stderr"),
+        ):
+            run_with_percent_progress(
+                ["guitar-tab-worker.exe", "--internal-demucs"],
+                start=22,
+                end=50,
+                status="separating",
+                stage_label="正在分离人声与乐器",
+            )
+
+        self.assertEqual(command.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(command.call_args.kwargs["errors"], "replace")
 
     def test_separation_rechecks_space_after_normalization(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

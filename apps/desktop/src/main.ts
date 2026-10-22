@@ -1671,7 +1671,7 @@ async function startDesktop(): Promise<void> {
     }
     smokeWindow.webContents.send('studio:update-progress', {
       phase: 'downloading',
-      version: '0.1.0-preview.12',
+      version: '0.1.0-preview.13',
       percent: 37.4,
       transferredBytes: 225 * 1024 ** 2,
       totalBytes: 600 * 1024 ** 2,
@@ -1711,7 +1711,7 @@ async function startDesktop(): Promise<void> {
     }
     smokeWindow.webContents.send('studio:update-progress', {
       phase: 'ready',
-      version: '0.1.0-preview.12',
+      version: '0.1.0-preview.13',
       percent: 100,
       transferredBytes: 600 * 1024 ** 2,
       totalBytes: 600 * 1024 ** 2,

@@ -176,6 +176,34 @@ test('loads current Windows QQ Music Qt and binary credential formats', async ()
   }
 })
 
+test('falls back to the running Windows QQ Music session', async () => {
+  const homePath = resolve(process.cwd(), '.test-qqmusic-windows-runtime-home')
+  const configPath = resolve(
+    homePath,
+    'AppData/Roaming/Tencent/QQMusic/QQMusicServiceConfig.ini',
+  )
+  await rm(homePath, { recursive: true, force: true })
+  await mkdir(dirname(configPath), { recursive: true })
+  await writeFile(
+    configPath,
+    `[Account]\r\nUin=${credential.musicId}\r\n`,
+    'utf8',
+  )
+  let runtimeReads = 0
+  try {
+    assert.deepEqual(
+      await loadQQMusicWindowsCredential(homePath, async () => {
+        runtimeReads += 1
+        return credential
+      }),
+      credential,
+    )
+    assert.equal(runtimeReads, 1)
+  } finally {
+    await rm(homePath, { recursive: true, force: true })
+  }
+})
+
 test('extracts the media MID from a MusicEx encrypted filename', () => {
   assert.deepEqual(parseQQMusicMediaName(mediaName), {
     filename: mediaName,

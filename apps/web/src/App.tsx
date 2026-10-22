@@ -1935,13 +1935,27 @@ function App({ application = studioApplication }: AppProps) {
             nextJob.errorCode === 'media-session-unavailable') &&
           desktopControls.detectDefaultMediaBrowser
         ) {
-          setMediaSessionRecovery({
+          const recovery: MediaSessionRecovery = {
             url: nextJob.source.url,
             authorized: Boolean(nextJob.source.authorizedMedia),
             detecting: false,
             forceIsolatedLogin:
               nextJob.errorCode === 'media-session-unavailable',
-          })
+          }
+          try {
+            const detected =
+              await desktopControls.detectDefaultMediaBrowser()
+            if (detected.supported && detected.browser) {
+              recovery.browser = detected.browser
+              recovery.sessionMode =
+                recovery.forceIsolatedLogin
+                  ? 'isolated-login'
+                  : detected.sessionMode ?? 'browser-cookies'
+            }
+          } catch {
+            // Keep the manual browser detection action available.
+          }
+          setMediaSessionRecovery(recovery)
         } else {
           setMediaSessionRecovery(null)
         }
@@ -1970,6 +1984,17 @@ function App({ application = studioApplication }: AppProps) {
     policyVersion: 2,
   } as const
 
+  const changeImportMode = (
+    nextMode: 'upload' | 'score' | 'link',
+  ) => {
+    setImportMode(nextMode)
+    setError('')
+    setProtectedImport(null)
+    setMediaSessionRecovery(null)
+    setQQMusicLoginRecovery(null)
+    setMediaKeyNotice('')
+  }
+
   const startLinkImport = async (
     authorized = false,
     preparedUrl?: string,
@@ -1977,6 +2002,7 @@ function App({ application = studioApplication }: AppProps) {
   ) => {
     setError('')
     setMediaSessionRecovery(null)
+    setQQMusicLoginRecovery(null)
     try {
       const normalizedUrl = preparedUrl ?? extractSharedUrl(linkValue)
       if (!normalizedUrl || !detectInputPlatform(normalizedUrl, platforms)) {
@@ -2001,6 +2027,7 @@ function App({ application = studioApplication }: AppProps) {
     credentialSession?: string,
   ) => {
     setError('')
+    setMediaSessionRecovery(null)
     setQQMusicLoginRecovery(null)
     try {
       const nextJob = await application.submitUpload(
@@ -4443,8 +4470,10 @@ function App({ application = studioApplication }: AppProps) {
                 aria-label={t('关闭窗口')}
                 onClick={() => {
                   setImportOpen(false)
+                  setError('')
                   setProtectedImport(null)
                   setMediaSessionRecovery(null)
+                  setQQMusicLoginRecovery(null)
                   if (!job || jobTerminal) setJob(null)
                 }}
               >
@@ -4614,7 +4643,7 @@ function App({ application = studioApplication }: AppProps) {
                   <button
                     type="button"
                     className={importMode === 'upload' ? 'is-active' : ''}
-                    onClick={() => setImportMode('upload')}
+                    onClick={() => changeImportMode('upload')}
                   >
                     <Upload aria-hidden="true" />
                     {t('本地上传')}
@@ -4622,7 +4651,7 @@ function App({ application = studioApplication }: AppProps) {
                   <button
                     type="button"
                     className={importMode === 'score' ? 'is-active' : ''}
-                    onClick={() => setImportMode('score')}
+                    onClick={() => changeImportMode('score')}
                   >
                     <FileImage aria-hidden="true" />
                     {t('图片 / PDF')}
@@ -4630,7 +4659,7 @@ function App({ application = studioApplication }: AppProps) {
                   <button
                     type="button"
                     className={importMode === 'link' ? 'is-active' : ''}
-                    onClick={() => setImportMode('link')}
+                    onClick={() => changeImportMode('link')}
                   >
                     <Link2 aria-hidden="true" />
                     {t('在线链接')}
@@ -4808,7 +4837,7 @@ function App({ application = studioApplication }: AppProps) {
             {error ? (
               <>
                 <p className="dialog-error">{error}</p>
-                {mediaSessionRecovery ? (
+                {importMode === 'link' && mediaSessionRecovery ? (
                   <div className="media-session-recovery">
                     <Cookie aria-hidden="true" />
                     {mediaSessionRecovery.browser ? (
@@ -4824,7 +4853,7 @@ function App({ application = studioApplication }: AppProps) {
                             {mediaSessionRecovery.sessionMode ===
                             'isolated-login'
                               ? t(
-                                  'Windows Chromium 登录 Cookie 受系统加密保护。将在隔离窗口完成登录，仅导出目标站点 Cookie，并在任务结束后删除。',
+                                  '即使原浏览器已登录，Windows Chromium 登录 Cookie 仍受系统加密保护。请在隔离窗口完成一次登录；仅导出目标站点 Cookie，并在任务结束后删除。',
                                 )
                               : language === 'en-US'
                               ? `Read ${mediaSessionRecovery.browser.label}'s default profile cookies for this retry only. Cookies are not stored or uploaded.`
@@ -4832,7 +4861,9 @@ function App({ application = studioApplication }: AppProps) {
                           </p>
                         </div>
                         <div className="media-session-actions">
-                          {desktopControls.openExternalUrl ? (
+                          {mediaSessionRecovery.sessionMode !==
+                            'isolated-login' &&
+                          desktopControls.openExternalUrl ? (
                             <button
                               type="button"
                               className="secondary-button"
@@ -4900,14 +4931,14 @@ function App({ application = studioApplication }: AppProps) {
                     )}
                   </div>
                 ) : null}
-                {qqMusicLoginRecovery ? (
+                {importMode === 'upload' && qqMusicLoginRecovery ? (
                   <div className="media-session-recovery">
                     <KeyRound aria-hidden="true" />
                     <div>
                       <strong>{t('使用 QQ 音乐网页登录授权')}</strong>
                       <p>
                         {t(
-                          '新版 Windows 客户端未提供可读取的登录凭据。登录信息仅用于本次官方授权验证，任务结束后立即删除。',
+                          '应用会优先复用当前 QQ 音乐客户端登录态；仅在客户端会话令牌不可读时使用本次隔离授权，任务结束后立即删除。',
                         )}
                       </p>
                     </div>

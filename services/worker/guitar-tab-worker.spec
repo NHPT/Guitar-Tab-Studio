@@ -5,7 +5,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 worker_root = Path(SPECPATH).resolve()
-hidden_imports = []
+hidden_imports = ["qqmusic_windows"]
 runtime_hooks = []
 packages = ["basic_pitch", "demucs", "stringtrace_ml", "yt_dlp"]
 if os.environ.get("GTS_COMMERCIAL_BUILD") != "1":

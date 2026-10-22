@@ -354,11 +354,13 @@ credential from the application's sandbox preference plist.
 `AutoLoginUserInfo` is a nested binary `NSKeyedArchiver`, so the API converts
 both plist layers with the system `plutil`, resolves `$objects` / `CF$UID`
 references and extracts only `nUserId`, `strAuthst` and `loginType`. Windows
-checks the current-user QQ Music registry key and performs a bounded scan of
-small login/configuration files under the current user's Roaming and Local
-QQ Music roots. JSON, INI, XML, Cookie-style text and UTF-16 text are accepted;
-media/cache directories, symbolic links, oversized files and unrelated user
-directories are not scanned. The API then calls QQ Music's
+first identifies the active UIN from the current-user QQ Music configuration,
+then checks bounded `SetCookie.dat`, `_SetCookie.dat` and MMKV session records.
+If a newer client keeps the matching named token only in memory, the packaged
+Worker performs a read-only scan limited to verified QQ Music executables owned
+by the same Windows user, ten seconds and 512 MB. It accepts only named
+credentials bound to that UIN; unrelated processes and unbound Base64-looking
+data are never scanned or guessed. The API then calls QQ Music's
 `music.vkey.GetEVkey` endpoint using the matching macOS or Windows desktop
 request profile. The returned per-file result is treated as the authorization
 decision before local decryption continues.
@@ -375,6 +377,13 @@ application Full Disk Access. Permission denial, missing login state and
 unsupported archive structure are reported separately; the desktop renderer
 can open the exact Privacy settings page without receiving any credential
 material.
+
+For link imports, Chromium's Windows App-Bound encryption can prevent another
+application from decrypting Edge, Chrome, Brave, Opera or Vivaldi cookies even
+when the original browser is visibly signed in. The desktop detects this case
+before retry and uses an isolated in-app login session whose target-domain
+cookies are exported once and deleted after the task. Browsers without that
+restriction can still use the default profile directly.
 
 KWM v2 and KGM v5 use client-side separated keys rather than the QQ Music
 authorization endpoint. The Electron runtime exposes explicit native import

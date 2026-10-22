@@ -19,6 +19,8 @@ const MAX_WINDOWS_CREDENTIAL_BYTES = 2 * 1024 * 1024
 const MAX_WINDOWS_CREDENTIAL_FILES = 128
 const MAX_WINDOWS_CREDENTIAL_DEPTH = 5
 const WINDOWS_REGISTRY_TIMEOUT_MS = 5_000
+const WINDOWS_RUNTIME_CREDENTIAL_TIMEOUT_MS = 12_000
+const MAX_WINDOWS_RUNTIME_OUTPUT_BYTES = 128 * 1024
 const WINDOWS_CREDENTIAL_EXTENSIONS = new Set([
   '.cfg',
   '.config',
@@ -771,12 +773,82 @@ function readWindowsRegistryCredential(): Promise<
   })
 }
 
+function loadQQMusicWindowsRuntimeCredential(): Promise<
+  QQMusicCredential | undefined
+> {
+  const workerCommand = process.env.GTS_WORKER_COMMAND
+  if (
+    process.platform !== 'win32' ||
+    !workerCommand ||
+    !isAbsolute(workerCommand)
+  ) {
+    return Promise.resolve(undefined)
+  }
+  return new Promise((resolveValue) => {
+    const child = spawn(
+      workerCommand,
+      ['--internal-qqmusic-credential'],
+      {
+        env: {
+          ...process.env,
+          PYTHONUTF8: '1',
+          PYTHONIOENCODING: 'utf-8',
+        },
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      },
+    )
+    const stdout: Buffer[] = []
+    let stdoutBytes = 0
+    let settled = false
+    let invalidOutput = false
+    const finish = (credential?: QQMusicCredential) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolveValue(credential)
+    }
+    const timer = setTimeout(() => {
+      child.kill()
+      finish()
+    }, WINDOWS_RUNTIME_CREDENTIAL_TIMEOUT_MS)
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.byteLength
+      if (stdoutBytes > MAX_WINDOWS_RUNTIME_OUTPUT_BYTES) {
+        invalidOutput = true
+        child.kill()
+        return
+      }
+      stdout.push(chunk)
+    })
+    child.once('error', () => finish())
+    child.once('close', (code) => {
+      if (code !== 0 || invalidOutput) {
+        finish()
+        return
+      }
+      try {
+        finish(
+          parseQQMusicCredential(
+            JSON.parse(Buffer.concat(stdout).toString('utf8')),
+          ),
+        )
+      } catch {
+        finish()
+      }
+    })
+  })
+}
+
 export async function loadQQMusicWindowsCredential(
   homePath: string,
+  loadRuntimeCredential = loadQQMusicWindowsRuntimeCredential,
 ): Promise<QQMusicCredential | undefined> {
   if (!isAbsolute(homePath)) return undefined
   const registryCredential = await readWindowsRegistryCredential()
   if (registryCredential) return registryCredential
+  const runtimeCredential = await loadRuntimeCredential()
+  if (runtimeCredential) return runtimeCredential
 
   const candidates = await windowsCredentialFiles(homePath)
   let readableFileFound = false
@@ -810,7 +882,7 @@ export async function loadQQMusicWindowsCredential(
   }
   if (readableFileFound && unsupportedFormat) {
     throw new Error(
-      '已找到 QQ 音乐客户端配置，但当前登录格式无法安全读取。请在应用中选择“使用 QQ 音乐网页登录授权”，并登录下载该文件的账号后重试。',
+      '已读取 QQ 音乐客户端配置，但未取得当前账号的有效会话令牌。请保持 QQ 音乐运行且已登录，并确保 QQ 音乐与本应用使用相同的 Windows 用户和权限后重试；仍失败时可使用应用内 QQ 音乐授权。',
     )
   }
   return undefined

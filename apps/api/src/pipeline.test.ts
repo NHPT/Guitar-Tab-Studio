@@ -293,7 +293,7 @@ test('reports the actual media acquisition failure category', () => {
       bilibili,
       'ERROR: Sign in or provide cookies to continue',
     ),
-    /系统默认浏览器/u,
+    /安全策略.*复用会话.*隔离登录/u,
   )
   assert.equal(
     classifyMediaAcquisitionFailure(

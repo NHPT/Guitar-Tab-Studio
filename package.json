@@ -1,7 +1,7 @@
 {
   "name": "guitar-tab-studio",
   "private": true,
-  "version": "0.1.0-preview.12",
+  "version": "0.1.0-preview.13",
   "license": "Apache-2.0",
   "workspaces": [
     "apps/*",

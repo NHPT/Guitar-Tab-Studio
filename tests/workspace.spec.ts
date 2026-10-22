@@ -743,6 +743,16 @@ test('uses isolated login when Windows protects Edge cookies', async ({
         }
         if (method === 'job') {
           const id = String(payload?.id)
+          const submissionIndex =
+            Number(id.split('-').at(-1) ?? '0') - 1
+          const submitted = mediaSubmissions[submissionIndex]
+          const hasIsolatedSession = Boolean(
+            (
+              submitted?.mediaSession as
+                | { sessionToken?: string }
+                | undefined
+            )?.sessionToken,
+          )
           return {
             id,
             source: {
@@ -750,13 +760,13 @@ test('uses isolated login when Windows protects Edge cookies', async ({
               label: '哔哩哔哩',
               url: 'https://www.bilibili.com/video/BV1fixture',
             },
-            status: id.endsWith('-1') ? 'failed' : 'cancelled',
+            status: hasIsolatedSession ? 'cancelled' : 'failed',
             progress: 3,
-            stageLabel: id.endsWith('-1') ? '处理失败' : '任务已取消',
-            error: id.endsWith('-1')
+            stageLabel: hasIsolatedSession ? '任务已取消' : '处理失败',
+            error: !hasIsolatedSession
               ? '哔哩哔哩需要登录，但无法读取或解密系统默认浏览器的 Cookie'
               : undefined,
-            errorCode: id.endsWith('-1')
+            errorCode: !hasIsolatedSession
               ? 'media-session-unavailable'
               : undefined,
           }
@@ -783,11 +793,6 @@ test('uses isolated login when Windows protects Edge cookies', async ({
     .getByPlaceholder('粘贴 YouTube 或其他受支持的公开音视频链接')
     .fill('https://www.bilibili.com/video/BV1fixture')
   await dialog.getByRole('button', { name: '开始分析' }).click()
-  await expect(
-    dialog.getByRole('button', {
-      name: '使用默认浏览器登录状态重试',
-    }),
-  ).toBeVisible()
   expect(
     await page.evaluate(
       () =>
@@ -797,11 +802,24 @@ test('uses isolated login when Windows protects Edge cookies', async ({
     ),
   ).toBeUndefined()
 
-  await dialog
-    .getByRole('button', { name: '使用默认浏览器登录状态重试' })
-    .click()
   await expect(
-    dialog.getByText(/Windows Chromium 登录 Cookie 受系统加密保护/u),
+    dialog.getByText(/即使原浏览器已登录.*Windows Chromium.*系统加密保护/u),
+  ).toBeVisible()
+  await expect(
+    dialog.getByRole('button', { name: '打开原链接登录' }),
+  ).toHaveCount(0)
+  await dialog.getByRole('button', { name: '本地上传' }).click()
+  await expect(dialog.locator('.dialog-error')).toHaveCount(0)
+  await expect(
+    dialog.getByText(/即使原浏览器已登录.*Windows Chromium.*系统加密保护/u),
+  ).toHaveCount(0)
+  await dialog.getByRole('button', { name: '在线链接' }).click()
+  await expect(
+    dialog.getByText(/即使原浏览器已登录.*Windows Chromium.*系统加密保护/u),
+  ).toHaveCount(0)
+  await dialog.getByRole('button', { name: '开始分析' }).click()
+  await expect(
+    dialog.getByText(/即使原浏览器已登录.*Windows Chromium.*系统加密保护/u),
   ).toBeVisible()
   await dialog.getByRole('button', { name: '打开隔离登录窗口' }).click()
   await expect
@@ -813,13 +831,13 @@ test('uses isolated login when Windows protects Edge cookies', async ({
           }).__mediaSubmissions.length,
       ),
     )
-    .toBe(2)
+    .toBe(3)
   expect(
     await page.evaluate(
       () =>
         (window as Window & {
           __mediaSubmissions: Array<Record<string, unknown>>
-        }).__mediaSubmissions[1].mediaSession,
+        }).__mediaSubmissions[2].mediaSession,
     ),
   ).toEqual({
     browser: 'edge',
@@ -1820,6 +1838,128 @@ test('separates appearance mode from light and dark color themes', async ({
       .getByRole('dialog', { name: '主题选择' })
       .getByRole('button', { name: '黑夜模式' }),
   ).toHaveAttribute('aria-pressed', 'true')
+})
+
+test('keeps native controls and semantic accents legible in every dark theme', async ({
+  page,
+}) => {
+  await page.goto('/')
+  const darkThemes = [
+    'graphite',
+    'night',
+    'deepsea',
+    'pine',
+    'wine',
+    'moonstone',
+    'scarlet-night',
+    'nocturne',
+    'aurora',
+  ]
+
+  const audit = await page.evaluate((themes) => {
+    const root = document.documentElement
+    root.dataset.appearance = 'dark'
+    const host = document.createElement('div')
+    host.style.position = 'fixed'
+    host.style.left = '-10000px'
+    host.innerHTML = `
+      <select>
+        <optgroup label="Group">
+          <option>Enabled</option>
+          <option disabled>Disabled</option>
+        </optgroup>
+      </select>
+      <span data-sample="accent"></span>
+      <span data-sample="fill"></span>
+      <span data-sample="fill-hover"></span>
+      <span data-sample="active"></span>
+    `
+    document.body.append(host)
+
+    const select = host.querySelector('select')!
+    const enabledOption = select.querySelector('option:not(:disabled)')!
+    const disabledOption = select.querySelector('option:disabled')!
+    const optgroup = select.querySelector('optgroup')!
+    const accent = host.querySelector<HTMLElement>('[data-sample="accent"]')!
+    const fill = host.querySelector<HTMLElement>('[data-sample="fill"]')!
+    const fillHover = host.querySelector<HTMLElement>(
+      '[data-sample="fill-hover"]',
+    )!
+    const active = host.querySelector<HTMLElement>('[data-sample="active"]')!
+    accent.style.cssText =
+      'color: var(--accent-ink); background: var(--surface-strong)'
+    fill.style.cssText =
+      'color: var(--on-accent); background: var(--accent-fill)'
+    fillHover.style.cssText =
+      'color: var(--on-accent); background: var(--accent-fill-hover)'
+    active.style.cssText =
+      'color: var(--text); background: var(--active-surface)'
+
+    const channels = (value: string) => {
+      const values = [...value.matchAll(/[\d.]+/g)].map((match) =>
+        Number(match[0]),
+      )
+      return value.startsWith('color(srgb')
+        ? values.slice(0, 3).map((channel) => channel * 255)
+        : values.slice(0, 3)
+    }
+    const luminance = (value: string) =>
+      channels(value)
+        .map((channel) => {
+          const normalized = channel / 255
+          return normalized <= 0.04045
+            ? normalized / 12.92
+            : ((normalized + 0.055) / 1.055) ** 2.4
+        })
+        .reduce(
+          (total, channel, index) =>
+            total + channel * [0.2126, 0.7152, 0.0722][index],
+          0,
+        )
+    const contrast = (element: Element) => {
+      const style = getComputedStyle(element)
+      const foreground = luminance(style.color)
+      const background = luminance(style.backgroundColor)
+      return (
+        (Math.max(foreground, background) + 0.05) /
+        (Math.min(foreground, background) + 0.05)
+      )
+    }
+
+    const results = themes.map((theme) => {
+      root.dataset.theme = theme
+      return {
+        theme,
+        colorScheme: getComputedStyle(root).colorScheme,
+        selectBackground: getComputedStyle(select).backgroundColor,
+        optionBackground: getComputedStyle(enabledOption).backgroundColor,
+        optionContrast: contrast(enabledOption),
+        disabledOptionContrast: contrast(disabledOption),
+        optgroupContrast: contrast(optgroup),
+        accentContrast: contrast(accent),
+        fillContrast: contrast(fill),
+        fillHoverContrast: contrast(fillHover),
+        activeContrast: contrast(active),
+      }
+    })
+    host.remove()
+    return results
+  }, darkThemes)
+
+  for (const result of audit) {
+    expect(result.colorScheme, result.theme).toBe('dark')
+    expect(result.selectBackground, result.theme).not.toBe('rgba(0, 0, 0, 0)')
+    expect(result.optionBackground, result.theme).not.toBe('rgba(0, 0, 0, 0)')
+    expect(result.optionContrast, result.theme).toBeGreaterThanOrEqual(4.5)
+    expect(result.disabledOptionContrast, result.theme).toBeGreaterThanOrEqual(
+      4.5,
+    )
+    expect(result.optgroupContrast, result.theme).toBeGreaterThanOrEqual(4.5)
+    expect(result.accentContrast, result.theme).toBeGreaterThanOrEqual(4.5)
+    expect(result.fillContrast, result.theme).toBeGreaterThanOrEqual(4.5)
+    expect(result.fillHoverContrast, result.theme).toBeGreaterThanOrEqual(4.5)
+    expect(result.activeContrast, result.theme).toBeGreaterThanOrEqual(4.5)
+  }
 })
 
 test('requires explicit authorization before protected file or link processing', async ({ page }) => {

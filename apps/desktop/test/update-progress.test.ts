@@ -4,7 +4,7 @@ import { normalizeUpdateProgress } from '../src/update-progress.js'
 
 test('normalizes updater progress from transferred and total bytes', () => {
   assert.deepEqual(
-    normalizeUpdateProgress('0.1.0-preview.12', {
+    normalizeUpdateProgress('0.1.0-preview.13', {
       percent: 12,
       transferred: 300,
       total: 1_000,
@@ -12,7 +12,7 @@ test('normalizes updater progress from transferred and total bytes', () => {
     }),
     {
       phase: 'downloading',
-      version: '0.1.0-preview.12',
+      version: '0.1.0-preview.13',
       percent: 30,
       transferredBytes: 300,
       totalBytes: 1_000,
@@ -23,7 +23,7 @@ test('normalizes updater progress from transferred and total bytes', () => {
 
 test('clamps invalid updater metrics to safe display values', () => {
   assert.deepEqual(
-    normalizeUpdateProgress('0.1.0-preview.12', {
+    normalizeUpdateProgress('0.1.0-preview.13', {
       percent: Number.NaN,
       transferred: 2_000,
       total: 1_000,
@@ -31,7 +31,7 @@ test('clamps invalid updater metrics to safe display values', () => {
     }),
     {
       phase: 'downloading',
-      version: '0.1.0-preview.12',
+      version: '0.1.0-preview.13',
       percent: 100,
       transferredBytes: 1_000,
       totalBytes: 1_000,
