@@ -212,11 +212,17 @@ export function useLiveGuitar(): LiveGuitarController {
             smoothedTunerLevelRef.current =
               nextLevel < 0.00001 ? 0 : nextLevel
             const noiseFloor = tunerNoiseFloorRef.current
-            const attackFloor = Math.max(0.001, noiseFloor * 2.8)
+            const gateOpen = tunerGateOpenRef.current
+            const attackFloor = Math.max(0.00075, noiseFloor * 3.2)
+            const sustainFloor = Math.max(0.00016, noiseFloor * 1.15)
+            const trackingFloor = gateOpen
+              ? sustainFloor
+              : attackFloor
+            const minimumConfidence = gateOpen ? 0.54 : 0.68
             const reliableReading =
               detectedReading &&
-              detectedReading.confidence >= 0.64 &&
-              rawLevel >= attackFloor
+              detectedReading.confidence >= minimumConfidence &&
+              rawLevel >= trackingFloor
                 ? detectedReading
                 : null
             if (reliableReading) {
@@ -225,28 +231,27 @@ export function useLiveGuitar(): LiveGuitarController {
               tunerHistoryRef.current = [
                 ...tunerHistoryRef.current,
                 reliableReading,
-              ].slice(-9)
+              ].slice(-12)
               stableTunerReadingRef.current = stabilizeTunerReadings(
                 tunerHistoryRef.current,
                 stableTunerReadingRef.current,
                 {
-                  minimumConfidence: 0.64,
+                  minimumConfidence: 0.54,
                   minimumReadings: 2,
                   switchReadings: 3,
                 },
               )
             } else if (!tunerGateOpenRef.current) {
-              tunerNoiseFloorRef.current =
-                noiseFloor * 0.985 + rawLevel * 0.015
+              tunerNoiseFloorRef.current = Math.max(
+                0.00003,
+                Math.min(
+                  0.003,
+                  noiseFloor * 0.985 + rawLevel * 0.015,
+                ),
+              )
             }
             if (tunerGateOpenRef.current) {
-              const releaseFloor = Math.max(
-                0.00035,
-                tunerNoiseFloorRef.current * 1.5,
-              )
-              if (rawLevel >= releaseFloor) {
-                tunerLastSoundAtRef.current = now
-              } else if (now - tunerLastSoundAtRef.current >= 0.55) {
+              if (now - tunerLastSoundAtRef.current >= 1.4) {
                 tunerGateOpenRef.current = false
                 tunerHistoryRef.current = []
                 stableTunerReadingRef.current = null

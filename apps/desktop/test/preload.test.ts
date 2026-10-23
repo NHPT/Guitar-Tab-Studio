@@ -34,4 +34,15 @@ test('exposes update progress as a removable read-only event listener', () => {
     source,
     /ipcRenderer\.removeListener\('studio:update-progress'/u,
   )
+  for (const method of [
+    'update-status',
+    'update-download',
+    'update-pause',
+    'update-resume',
+    'update-cancel',
+    'update-dismiss',
+    'update-install',
+  ]) {
+    assert.match(source, new RegExp(`'${method}'`, 'u'))
+  }
 })

@@ -99,6 +99,13 @@ export interface DesktopStudioControls {
   onUpdateProgress?(
     listener: (progress: DesktopUpdateProgress) => void,
   ): () => void
+  updateStatus(): Promise<DesktopUpdateProgress | null>
+  downloadUpdate(): Promise<DesktopUpdateProgress | null>
+  pauseUpdate(): Promise<DesktopUpdateProgress | null>
+  resumeUpdate(): Promise<DesktopUpdateProgress | null>
+  cancelUpdate(): Promise<DesktopUpdateProgress | null>
+  dismissUpdate(): Promise<DesktopUpdateProgress | null>
+  installUpdate(): Promise<{ installing: true }>
   modelPackages(): Promise<InstalledModelPackage[]>
   installModelPackage(): Promise<InstalledModelPackage | null>
   downloadModelPackage(manifestUrl: string): Promise<InstalledModelPackage>
@@ -372,6 +379,34 @@ export class DesktopStudioApplication
     listener: (progress: DesktopUpdateProgress) => void,
   ): () => void {
     return this.bridge.onUpdateProgress?.(listener) ?? (() => undefined)
+  }
+
+  updateStatus(): Promise<DesktopUpdateProgress | null> {
+    return this.invoke('update-status')
+  }
+
+  downloadUpdate(): Promise<DesktopUpdateProgress | null> {
+    return this.invoke('update-download')
+  }
+
+  pauseUpdate(): Promise<DesktopUpdateProgress | null> {
+    return this.invoke('update-pause')
+  }
+
+  resumeUpdate(): Promise<DesktopUpdateProgress | null> {
+    return this.invoke('update-resume')
+  }
+
+  cancelUpdate(): Promise<DesktopUpdateProgress | null> {
+    return this.invoke('update-cancel')
+  }
+
+  dismissUpdate(): Promise<DesktopUpdateProgress | null> {
+    return this.invoke('update-dismiss')
+  }
+
+  installUpdate(): Promise<{ installing: true }> {
+    return this.invoke('update-install')
   }
 
   modelPackages(): Promise<InstalledModelPackage[]> {

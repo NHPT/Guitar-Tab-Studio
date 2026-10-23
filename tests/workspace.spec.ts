@@ -482,6 +482,10 @@ test('stabilizes a harmonic-rich low E as the correct guitar string', async ({
         master.gain.value = 0.32
         master.connect(destination)
         const nodes: AudioNode[] = [master, destination]
+        const oscillators: Array<{
+          multiple: number
+          oscillator: OscillatorNode
+        }> = []
         for (const [multiple, gainValue] of [
           [1, 0.03],
           [2, 0.75],
@@ -495,10 +499,17 @@ test('stabilizes a harmonic-rich low E as the correct guitar string', async ({
           oscillator.connect(gain).connect(master)
           oscillator.start()
           nodes.push(oscillator, gain)
+          oscillators.push({ multiple, oscillator })
         }
         await context.resume()
         Object.assign(window, {
-          __tunerFixture: { context, destination, master, nodes },
+          __tunerFixture: {
+            context,
+            destination,
+            master,
+            nodes,
+            oscillators,
+          },
         })
         return destination.stream
       },
@@ -513,9 +524,82 @@ test('stabilizes a harmonic-rich low E as the correct guitar string', async ({
   await expect(page.locator('.tuner-meter-labels strong')).toContainText(
     '0.0 cent',
   )
+  await expect(page.locator('.tuner-stage')).toHaveAttribute(
+    'data-confirmations',
+    '1',
+    { timeout: 2_000 },
+  )
+  await expect(page.locator('.tuner-trace-track i')).toHaveCount(180)
   await expect
     .poll(() => page.locator('.tuner-trace-track i.is-voiced').count())
     .toBeGreaterThan(0)
+  await page.evaluate(() => {
+    const fixture = (
+      window as typeof window & {
+        __tunerFixture: {
+          oscillators: Array<{
+            multiple: number
+            oscillator: OscillatorNode
+          }>
+        }
+      }
+    ).__tunerFixture
+    const frequency = 82.4069 * 2 ** (8 / 1200)
+    fixture.oscillators.forEach(({ multiple, oscillator }) => {
+      oscillator.frequency.value = frequency * multiple
+    })
+  })
+  await expect
+    .poll(async () =>
+      Number.parseFloat(
+        await page.locator('.tuner-meter-labels strong').innerText(),
+      ),
+    )
+    .toBeGreaterThan(5)
+  await page.evaluate(() => {
+    const fixture = (
+      window as typeof window & {
+        __tunerFixture: {
+          oscillators: Array<{
+            multiple: number
+            oscillator: OscillatorNode
+          }>
+        }
+      }
+    ).__tunerFixture
+    const frequency = 82.4069 * 2 ** (-6 / 1200)
+    fixture.oscillators.forEach(({ multiple, oscillator }) => {
+      oscillator.frequency.value = frequency * multiple
+    })
+  })
+  await expect
+    .poll(async () =>
+      Number.parseFloat(
+        await page.locator('.tuner-meter-labels strong').innerText(),
+      ),
+    )
+    .toBeLessThan(-3)
+  await page.evaluate(() => {
+    const fixture = (
+      window as typeof window & {
+        __tunerFixture: {
+          oscillators: Array<{
+            multiple: number
+            oscillator: OscillatorNode
+          }>
+        }
+      }
+    ).__tunerFixture
+    fixture.oscillators.forEach(({ multiple, oscillator }) => {
+      oscillator.frequency.value = 82.4069 * multiple
+    })
+  })
+  await expect(page.locator('.tuner-readout > b')).toHaveText('音准准确')
+  await expect(page.locator('.tuner-stage')).toHaveAttribute(
+    'data-confirmations',
+    '2',
+    { timeout: 2_000 },
+  )
   await page.evaluate(() => {
     const fixture = (
       window as typeof window & {

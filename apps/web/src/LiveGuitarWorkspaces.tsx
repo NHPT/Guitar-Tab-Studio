@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import {
   useEffect,
+  useRef,
   useState,
   type CSSProperties,
 } from 'react'
@@ -37,7 +38,34 @@ interface TunerTracePoint {
   voiced: boolean
 }
 
-const tunerTraceLength = 48
+const tunerTraceLength = 180
+
+function playTunerConfirmation(context: AudioContext): void {
+  const now = context.currentTime
+  const output = context.createGain()
+  output.gain.setValueAtTime(0.0001, now)
+  output.gain.exponentialRampToValueAtTime(0.032, now + 0.018)
+  output.gain.exponentialRampToValueAtTime(0.0001, now + 0.46)
+  output.connect(context.destination)
+
+  const tones = [
+    { frequency: 880, startsAt: now, stopsAt: now + 0.24 },
+    { frequency: 1318.51, startsAt: now + 0.11, stopsAt: now + 0.46 },
+  ]
+  tones.forEach((tone, index) => {
+    const oscillator = context.createOscillator()
+    oscillator.type = 'sine'
+    oscillator.frequency.setValueAtTime(tone.frequency, tone.startsAt)
+    oscillator.connect(output)
+    oscillator.start(tone.startsAt)
+    oscillator.stop(tone.stopsAt)
+    if (index === tones.length - 1) {
+      oscillator.addEventListener('ended', () => output.disconnect(), {
+        once: true,
+      })
+    }
+  })
+}
 
 function normalizedInputLevel(level: number): number {
   if (!Number.isFinite(level) || level <= 0) return 0
@@ -79,6 +107,11 @@ export function TunerWorkspace({
 }: WorkspaceProps) {
   const [targetMidi, setTargetMidi] = useState<number | null>(null)
   const [trace, setTrace] = useState<TunerTracePoint[]>([])
+  const [confirmationCount, setConfirmationCount] = useState(0)
+  const confirmationContextRef = useRef<AudioContext | null>(null)
+  const inTuneSinceRef = useRef(0)
+  const inTuneTargetRef = useRef<string | null>(null)
+  const confirmedTargetRef = useRef<string | null>(null)
   const active =
     controller.status === 'listening' && controller.mode === 'tuner'
   const instrument = tunerInstrument(controller.tunerInstrument)
@@ -113,6 +146,7 @@ export function TunerWorkspace({
   const meterStyle = {
     '--tuner-position': `${50 + Math.max(-50, Math.min(50, cents))}%`,
     '--tuner-signal-height': `${54 + signalStrength * 12}px`,
+    '--tuner-trace-columns': tunerTraceLength,
   } as CSSProperties
   const traceSlots = Array.from<TunerTracePoint | null>({
     length: tunerTraceLength,
@@ -138,6 +172,76 @@ export function TunerWorkspace({
     })
     return () => cancelAnimationFrame(frame)
   }, [active, reading, signalStrength])
+
+  useEffect(() => {
+    const cueTarget = reading
+      ? `${instrument.id}:${targetMidi ?? reading.midi}`
+      : null
+    const cueReady =
+      active &&
+      cueTarget !== null &&
+      reading !== null &&
+      reading.confidence >= 0.72 &&
+      signalStrength >= 0.08 &&
+      Math.abs(cents) <= 2
+    if (!cueReady) {
+      inTuneSinceRef.current = 0
+      inTuneTargetRef.current = cueTarget
+      if (!reading || Math.abs(cents) > 5) {
+        confirmedTargetRef.current = null
+      }
+      return
+    }
+    if (inTuneTargetRef.current !== cueTarget) {
+      inTuneTargetRef.current = cueTarget
+      inTuneSinceRef.current = performance.now()
+      confirmedTargetRef.current = null
+      return
+    }
+    if (inTuneSinceRef.current === 0) {
+      inTuneSinceRef.current = performance.now()
+      return
+    }
+    if (
+      confirmedTargetRef.current === cueTarget ||
+      performance.now() - inTuneSinceRef.current < 400
+    ) {
+      return
+    }
+    confirmedTargetRef.current = cueTarget
+    const context =
+      confirmationContextRef.current?.state === 'closed'
+        ? new AudioContext({ latencyHint: 'interactive' })
+        : confirmationContextRef.current ??
+          new AudioContext({ latencyHint: 'interactive' })
+    confirmationContextRef.current = context
+    void context
+      .resume()
+      .then(() => {
+        playTunerConfirmation(context)
+        setConfirmationCount((count) => count + 1)
+      })
+      .catch(() => {
+        confirmedTargetRef.current = null
+      })
+  }, [
+    active,
+    cents,
+    instrument.id,
+    reading,
+    signalStrength,
+    targetMidi,
+  ])
+
+  useEffect(
+    () => () => {
+      if (confirmationContextRef.current) {
+        void confirmationContextRef.current.close()
+        confirmationContextRef.current = null
+      }
+    },
+    [],
+  )
 
   const selectInstrument = (instrumentId: TunerInstrumentId) => {
     setTargetMidi(null)
@@ -175,6 +279,7 @@ export function TunerWorkspace({
         className={`tuner-stage${inTune ? ' is-in-tune' : ''}${
           signalStrength > 0 ? ' has-signal' : ''
         }`}
+        data-confirmations={confirmationCount}
         style={meterStyle}
       >
         <div
@@ -214,7 +319,10 @@ export function TunerWorkspace({
               {reading ? `${reading.frequency.toFixed(2)} Hz` : '-- Hz'}
             </small>
           </div>
-          <b>{stateLabel}</b>
+          <b>
+            {inTune ? <Volume2 aria-hidden="true" /> : null}
+            {stateLabel}
+          </b>
         </div>
 
         <div className="tuner-meter">
@@ -296,7 +404,8 @@ export function TunerWorkspace({
                       2 + (point?.strength ?? 0) * 13
                     }px`,
                     '--trace-opacity': (
-                      0.2 + (point?.strength ?? 0) * 0.8
+                      (0.18 + (point?.strength ?? 0) * 0.82) *
+                      (0.25 + (0.75 * (index + 1)) / tunerTraceLength)
                     ).toFixed(3),
                   } as CSSProperties
                 }

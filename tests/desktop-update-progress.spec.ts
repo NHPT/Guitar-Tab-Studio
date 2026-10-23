@@ -1,21 +1,34 @@
 import { expect, test } from '@playwright/test'
 
-test('shows desktop update download progress and dismisses it when ready', async ({
+test('renders the complete desktop update flow and controls', async ({
   page,
 }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop')
 
   await page.addInitScript(() => {
     type UpdateProgress = {
-      phase: 'downloading' | 'ready' | 'failed'
+      phase:
+        | 'available'
+        | 'downloading'
+        | 'paused'
+        | 'ready'
+        | 'failed'
+        | 'dismissed'
       version: string
       percent: number
       transferredBytes: number
       totalBytes: number
       bytesPerSecond: number
+      error?: string
     }
 
     let updateListener: ((progress: UpdateProgress) => void) | undefined
+    let latestUpdate: UpdateProgress | null = null
+    const updateInvocations: string[] = []
+    const emitUpdate = (progress: UpdateProgress) => {
+      latestUpdate = progress
+      updateListener?.(progress)
+    }
     const demoProject = {
       schemaVersion: 1,
       id: 'update-progress-demo',
@@ -87,6 +100,28 @@ test('shows desktop update download progress and dismisses it when ready', async
           }
         }
         if (method === 'set-background-job-state') return payload
+        if (method === 'update-status') return latestUpdate
+        if (method.startsWith('update-')) {
+          updateInvocations.push(method)
+          if (!latestUpdate) return null
+          if (method === 'update-install') return { installing: true }
+          const phase = {
+            'update-download': 'downloading',
+            'update-pause': 'paused',
+            'update-resume': 'downloading',
+            'update-cancel': 'dismissed',
+            'update-dismiss': 'dismissed',
+          }[method] as UpdateProgress['phase']
+          emitUpdate({
+            ...latestUpdate,
+            phase,
+            bytesPerSecond:
+              phase === 'downloading'
+                ? latestUpdate.bytesPerSecond
+                : 0,
+          })
+          return latestUpdate
+        }
         throw new Error(`Unexpected desktop method: ${method}`)
       },
       onOpenMedia: () => () => undefined,
@@ -104,8 +139,8 @@ test('shows desktop update download progress and dismisses it when ready', async
 
     Object.assign(window, {
       gtsDesktop: bridge,
-      __emitUpdateProgress: (progress: UpdateProgress) =>
-        updateListener?.(progress),
+      __emitUpdateProgress: emitUpdate,
+      __updateInvocations: updateInvocations,
     })
   })
 
@@ -113,22 +148,44 @@ test('shows desktop update download progress and dismisses it when ready', async
   await expect(
     page.getByRole('heading', { name: '更新测试项目' }),
   ).toBeVisible()
+
   await page.evaluate(() => {
     const emit = (
       window as typeof window & {
-        __emitUpdateProgress: (progress: {
-          phase: 'downloading'
-          version: string
-          percent: number
-          transferredBytes: number
-          totalBytes: number
-          bytesPerSecond: number
-        }) => void
+        __emitUpdateProgress: (progress: unknown) => void
+      }
+    ).__emitUpdateProgress
+    emit({
+      phase: 'available',
+      version: '0.1.0-preview.15',
+      percent: 0,
+      transferredBytes: 0,
+      totalBytes: 0,
+      bytesPerSecond: 0,
+    })
+  })
+
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  await expect(
+    dialog.getByRole('heading', { name: '发现新版本' }),
+  ).toBeVisible()
+  await expect(dialog.getByText('0.1.0-preview.15')).toBeVisible()
+  await page.waitForTimeout(250)
+  await page.screenshot({
+    path: `test-results/${testInfo.project.name}-update-available.png`,
+  })
+  await dialog.getByRole('button', { name: '下载更新' }).click()
+
+  await page.evaluate(() => {
+    const emit = (
+      window as typeof window & {
+        __emitUpdateProgress: (progress: unknown) => void
       }
     ).__emitUpdateProgress
     emit({
       phase: 'downloading',
-      version: '0.1.0-preview.13',
+      version: '0.1.0-preview.15',
       percent: 37.4,
       transferredBytes: 225 * 1024 ** 2,
       totalBytes: 600 * 1024 ** 2,
@@ -139,7 +196,6 @@ test('shows desktop update download progress and dismisses it when ready', async
   const status = page.getByRole('status', { name: '应用更新下载进度' })
   await expect(status).toBeVisible()
   await expect(status.getByText('正在下载应用更新')).toBeVisible()
-  await expect(status.getByText('Guitar Tab Studio 0.1.0-preview.13')).toBeVisible()
   await expect(status.getByText('37%')).toBeVisible()
   await expect(status.getByText('225.0 MB / 600.0 MB')).toBeVisible()
   await expect(status.getByText('10.0 MB/s')).toBeVisible()
@@ -148,51 +204,100 @@ test('shows desktop update download progress and dismisses it when ready', async
     '37',
   )
 
+  await status.getByRole('button', { name: '暂停下载' }).click()
+  await expect(status.getByText('更新下载已暂停')).toBeVisible()
+  await status.getByRole('button', { name: '继续下载' }).click()
+  await expect(status.getByText('正在下载应用更新')).toBeVisible()
+
+  await page.evaluate(() => {
+    const emit = (
+      window as typeof window & {
+        __emitUpdateProgress: (progress: unknown) => void
+      }
+    ).__emitUpdateProgress
+    emit({
+      phase: 'failed',
+      version: '0.1.0-preview.15',
+      percent: 37.4,
+      transferredBytes: 225 * 1024 ** 2,
+      totalBytes: 600 * 1024 ** 2,
+      bytesPerSecond: 0,
+      error: '网络连接已中断',
+    })
+  })
+  await expect(status.getByText('更新下载失败')).toBeVisible()
+  await expect(status.getByText('网络连接已中断')).toBeVisible()
+  await status.getByRole('button', { name: '重试下载' }).click()
+  await expect(status.getByText('正在下载应用更新')).toBeVisible()
+
+  await page.setViewportSize({ width: 390, height: 844 })
   const bounds = await status.boundingBox()
   expect(bounds).not.toBeNull()
   expect(bounds!.x).toBeGreaterThanOrEqual(0)
   expect(bounds!.y).toBeGreaterThanOrEqual(0)
-  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(1440)
-  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(1000)
-  await page.screenshot({
-    path: `test-results/${testInfo.project.name}-update-progress.png`,
-  })
-
-  await page.setViewportSize({ width: 900, height: 640 })
-  await expect(status).toBeVisible()
-  const compactBounds = await status.boundingBox()
-  expect(compactBounds).not.toBeNull()
-  expect(compactBounds!.x).toBeGreaterThanOrEqual(0)
-  expect(compactBounds!.y).toBeGreaterThanOrEqual(0)
-  expect(compactBounds!.x + compactBounds!.width).toBeLessThanOrEqual(900)
-  expect(compactBounds!.y + compactBounds!.height).toBeLessThanOrEqual(640)
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390)
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(844)
   expect(
     await status.evaluate(
       (element) => element.scrollWidth <= element.clientWidth,
     ),
   ).toBe(true)
+  await page.screenshot({
+    path: `test-results/${testInfo.project.name}-update-downloading.png`,
+  })
+
+  await status.getByRole('button', { name: '取消下载' }).click()
+  await expect(status).toHaveCount(0)
 
   await page.evaluate(() => {
     const emit = (
       window as typeof window & {
-        __emitUpdateProgress: (progress: {
-          phase: 'ready'
-          version: string
-          percent: number
-          transferredBytes: number
-          totalBytes: number
-          bytesPerSecond: number
-        }) => void
+        __emitUpdateProgress: (progress: unknown) => void
       }
     ).__emitUpdateProgress
     emit({
       phase: 'ready',
-      version: '0.1.0-preview.13',
+      version: '0.1.0-preview.15',
       percent: 100,
       transferredBytes: 600 * 1024 ** 2,
       totalBytes: 600 * 1024 ** 2,
       bytesPerSecond: 0,
     })
   })
-  await expect(status).toHaveCount(0)
+  await expect(dialog).toBeVisible()
+  await expect(
+    dialog.getByRole('heading', { name: '更新已准备好' }),
+  ).toBeVisible()
+  await expect(
+    dialog.getByRole('button', { name: '重启并安装' }),
+  ).toBeVisible()
+  await expect(
+    dialog.getByRole('button', { name: '退出时安装' }),
+  ).toBeVisible()
+  expect(
+    await dialog.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true)
+  await page.waitForTimeout(250)
+  await page.screenshot({
+    path: `test-results/${testInfo.project.name}-update-ready.png`,
+  })
+
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __updateInvocations: string[]
+          }
+        ).__updateInvocations,
+    ),
+  ).toEqual([
+    'update-download',
+    'update-pause',
+    'update-resume',
+    'update-resume',
+    'update-cancel',
+  ])
 })

@@ -167,6 +167,13 @@ export type DesktopStudioMethod =
   | 'authorize-qqmusic'
   | 'open-external-url'
   | 'set-background-job-state'
+  | 'update-status'
+  | 'update-download'
+  | 'update-pause'
+  | 'update-resume'
+  | 'update-cancel'
+  | 'update-dismiss'
+  | 'update-install'
 
 export interface DesktopInvokeRequest {
   method: DesktopStudioMethod
@@ -288,7 +295,13 @@ export interface TranscriptionSetupProgress {
 }
 
 export interface DesktopUpdateProgress {
-  phase: 'downloading' | 'ready' | 'failed'
+  phase:
+    | 'available'
+    | 'downloading'
+    | 'paused'
+    | 'ready'
+    | 'failed'
+    | 'dismissed'
   version: string
   percent: number
   transferredBytes: number

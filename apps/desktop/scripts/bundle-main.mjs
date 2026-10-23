@@ -9,7 +9,7 @@ await build({
   platform: 'node',
   format: 'cjs',
   target: 'node22',
-  external: ['electron', 'electron-updater'],
+  external: ['builder-util-runtime', 'electron', 'electron-updater'],
   outfile: resolve('dist/main.cjs'),
   define: {
     'process.env.GTS_COMMERCIAL_BUILD': JSON.stringify(

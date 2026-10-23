@@ -100,6 +100,10 @@ function median(values: readonly number[]): number {
     : sorted[middle]
 }
 
+function frequencyDistanceCents(left: number, right: number): number {
+  return 1200 * Math.log2(left / right)
+}
+
 export function midiFrequency(midi: number): number {
   return 440 * 2 ** ((midi - 69) / 12)
 }
@@ -139,7 +143,7 @@ export function tunerReading(
 export function tunerReadingForTarget(
   reading: TunerReading,
   targetMidi: number,
-  maximumDistanceCents = 80,
+  maximumDistanceCents = 420,
 ): TunerReading | null {
   if (!Number.isInteger(targetMidi)) return null
   const targetFrequency = midiFrequency(targetMidi)
@@ -246,12 +250,50 @@ export function stabilizeTunerReadings(
   if (selected.length < minimumReadings) return previous ?? null
 
   const latest = selected.at(-1)!
-  const measuredFrequency = median(
-    selected.slice(-5).map((reading) => reading.frequency),
+  const recent = selected.slice(-5)
+  const medianFrequency = median(recent.map((reading) => reading.frequency))
+  const deviations = recent.map((reading) =>
+    Math.abs(frequencyDistanceCents(reading.frequency, medianFrequency)),
   )
+  const deviationLimit = Math.max(7, median(deviations) * 3.5)
+  const latestIsOutlier =
+    recent.length >= 4 &&
+    Math.abs(frequencyDistanceCents(latest.frequency, medianFrequency)) >
+      deviationLimit
+  const measuredFrequency = latestIsOutlier
+    ? medianFrequency
+    : latest.frequency
   const frequency =
     previous?.midi === selectedMidi
-      ? previous.frequency * 0.58 + measuredFrequency * 0.42
+      ? (() => {
+          const delta = Math.abs(
+            frequencyDistanceCents(measuredFrequency, previous.frequency),
+          )
+          const trend = selected.slice(-3)
+          const trendSteps = trend.slice(1).map((reading, index) =>
+            frequencyDistanceCents(
+              reading.frequency,
+              trend[index].frequency,
+            ),
+          )
+          const coherentTrend =
+            trendSteps.length === 2 &&
+            trendSteps.every((step) => Math.abs(step) <= 12) &&
+            Math.sign(trendSteps[0]) === Math.sign(trendSteps[1])
+          const response = latestIsOutlier
+            ? 0.24
+            : coherentTrend
+              ? 0.82
+              : delta <= 1.5
+                ? 0.48
+                : delta <= 5
+                  ? 0.68
+                  : 0.78
+          return (
+            previous.frequency *
+            (measuredFrequency / previous.frequency) ** response
+          )
+        })()
       : measuredFrequency
   return tunerReading({
     frequency,
@@ -286,7 +328,11 @@ export function detectFundamentalFrequency(
   const samples = new Float32Array(length)
   let mean = 0
   for (let index = 0; index < length; index += 1) {
-    const value = input[index * decimation]
+    const sourceIndex = index * decimation
+    const value =
+      decimation === 1
+        ? input[sourceIndex]
+        : (input[sourceIndex] + input[sourceIndex + 1]) * 0.5
     samples[index] = value
     mean += value
   }
@@ -330,67 +376,83 @@ export function detectFundamentalFrequency(
         ? (difference[lag] * (lag - minimumLag + 1)) / cumulative
         : 1
   }
-  if (preferredFrequencies.length > 0) {
-    const toleranceRatio = 2 ** (preferredToleranceCents / 1200)
-    const candidates: Array<{ lag: number; value: number }> = []
-    for (const frequency of preferredFrequencies) {
-      if (
-        !Number.isFinite(frequency) ||
-        frequency < minimumFrequency ||
-        frequency > maximumFrequency
-      ) {
-        continue
-      }
-      const start = Math.max(
-        minimumLag,
-        Math.floor(effectiveRate / (frequency * toleranceRatio)),
-      )
-      const end = Math.min(
-        maximumLag,
-        Math.ceil(effectiveRate / (frequency / toleranceRatio)),
-      )
-      let candidateLag = -1
-      let candidateValue = Number.POSITIVE_INFINITY
-      for (let lag = start; lag <= end; lag += 1) {
-        if (normalized[lag] < candidateValue) {
-          candidateLag = lag
-          candidateValue = normalized[lag]
-        }
-      }
-      if (candidateLag >= minimumLag) {
-        candidates.push({ lag: candidateLag, value: candidateValue })
-      }
-    }
-    const reliable = candidates
-      .filter((candidate) => candidate.value <= 0.03)
-      .sort((left, right) => left.lag - right.lag)
-    const fallback = [...candidates].sort(
-      (left, right) => left.value - right.value,
-    )
-    const selected = reliable[0] ?? fallback[0]
-    if (selected) {
-      selectedLag = selected.lag
-      selectedValue = selected.value
-    }
-  } else {
-    for (let lag = minimumLag + 1; lag < maximumLag; lag += 1) {
-      if (
-        normalized[lag] < 0.16 &&
-        normalized[lag] <= normalized[lag - 1] &&
-        normalized[lag] <= normalized[lag + 1]
-      ) {
+  const localMinima: Array<{ lag: number; value: number }> = []
+  for (let lag = minimumLag + 1; lag < maximumLag; lag += 1) {
+    if (
+      normalized[lag] <= normalized[lag - 1] &&
+      normalized[lag] <= normalized[lag + 1]
+    ) {
+      localMinima.push({ lag, value: normalized[lag] })
+      if (selectedLag < 0 && normalized[lag] < 0.16) {
         selectedLag = lag
         selectedValue = normalized[lag]
-        break
       }
     }
-    if (selectedLag < 0) {
-      for (let lag = minimumLag; lag <= maximumLag; lag += 1) {
-        if (normalized[lag] < selectedValue) {
-          selectedLag = lag
-          selectedValue = normalized[lag]
-        }
+  }
+  if (selectedLag < 0) {
+    for (let lag = minimumLag; lag <= maximumLag; lag += 1) {
+      if (normalized[lag] < selectedValue) {
+        selectedLag = lag
+        selectedValue = normalized[lag]
       }
+    }
+  }
+  const usablePreferences = preferredFrequencies.filter(
+    (frequency) =>
+      Number.isFinite(frequency) &&
+      frequency >= minimumFrequency &&
+      frequency <= maximumFrequency,
+  )
+  if (selectedLag >= minimumLag && usablePreferences.length > 0) {
+    const spectralRatios = new Map<number, number>()
+    const spectralRatio = (lag: number) => {
+      const cached = spectralRatios.get(lag)
+      if (cached !== undefined) return cached
+      let real = 0
+      let imaginary = 0
+      let weightSum = 0
+      for (let index = 0; index < samples.length; index += 1) {
+        const weight =
+          0.5 -
+          0.5 * Math.cos((2 * Math.PI * index) / (samples.length - 1))
+        const phase = (2 * Math.PI * index) / lag
+        real += samples[index] * weight * Math.cos(phase)
+        imaginary -= samples[index] * weight * Math.sin(phase)
+        weightSum += weight
+      }
+      const ratio =
+        (2 * Math.hypot(real, imaginary)) /
+        Math.max(weightSum * level, 1e-9)
+      spectralRatios.set(lag, ratio)
+      return ratio
+    }
+    const targetDistance = (lag: number) => {
+      const frequency = effectiveRate / lag
+      return Math.min(
+        ...usablePreferences.map((preferred) =>
+          Math.abs(frequencyDistanceCents(frequency, preferred)),
+        ),
+      )
+    }
+    const selectedDistance = targetDistance(selectedLag)
+    const harmonicCorrection = localMinima
+      .filter(
+        (candidate) =>
+          candidate.lag > selectedLag &&
+          candidate.value <= selectedValue * 0.65 &&
+          spectralRatio(candidate.lag) >= 0.02 &&
+          targetDistance(candidate.lag) <= preferredToleranceCents &&
+          (targetDistance(candidate.lag) + 60 < selectedDistance ||
+            candidate.value <= selectedValue * 0.2),
+      )
+      .sort(
+        (left, right) =>
+          targetDistance(left.lag) - targetDistance(right.lag) ||
+          left.value - right.value,
+      )[0]
+    if (harmonicCorrection) {
+      selectedLag = harmonicCorrection.lag
+      selectedValue = harmonicCorrection.value
     }
   }
   if (selectedLag < minimumLag || selectedValue > 0.32) return null
@@ -420,15 +482,15 @@ export function detectTunerFrequency(
     .filter(Number.isInteger)
     .map(midiFrequency)
   if (targetFrequencies.length === 0) return null
-  const rangeMargin = 2 ** (260 / 1200)
+  const rangeMargin = 2 ** (480 / 1200)
   return detectFundamentalFrequency(
     input,
     sampleRate,
     Math.min(...targetFrequencies) / rangeMargin,
     Math.max(...targetFrequencies) * rangeMargin,
     targetFrequencies,
-    0.001,
-    70,
+    0.00018,
+    420,
   )
 }
 

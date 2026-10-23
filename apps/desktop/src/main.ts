@@ -84,6 +84,10 @@ app.setPath(
   desktopDataRoot(app.getPath('appData'), configuredDataRoot),
 )
 
+function isPackagedRuntime(): boolean {
+  return app.isPackaged && process.env.GTS_DESKTOP_SMOKE !== '1'
+}
+
 let mainWindow: BrowserWindow | undefined
 let stateStore: DesktopStateStore | undefined
 let localApi: LocalApiService | undefined
@@ -131,7 +135,7 @@ function applicationSettings(): DesktopApplicationSettings {
 }
 
 function desktopIconPath(): string {
-  return app.isPackaged
+  return isPackagedRuntime()
     ? resolve(process.resourcesPath, 'icon.ico')
     : resolve(repositoryRoot, 'apps/desktop/build-resources/icon.ico')
 }
@@ -160,7 +164,7 @@ function sendTranscriptionProgress(
 }
 
 function runtimePaths() {
-  if (!app.isPackaged) {
+  if (!isPackagedRuntime()) {
     return {
       apiEntry: developmentApiEntry,
       apiWorkingDirectory: resolve(repositoryRoot, 'apps/api'),
@@ -338,7 +342,7 @@ async function restartLocalApi(): Promise<void> {
     ),
     homePath: app.getPath('home'),
     workerCommand:
-      (!app.isPackaged ? paths.workerCommand : undefined) ??
+      (!isPackagedRuntime() ? paths.workerCommand : undefined) ??
       modelPackages.resolveActiveFile('worker') ??
       paths.workerCommand,
     ffmpegBinary:
@@ -1135,7 +1139,7 @@ async function invoke(request: DesktopInvokeRequest): Promise<unknown> {
         generatedAt: new Date().toISOString(),
         application: {
           version: app.getVersion(),
-          packaged: app.isPackaged,
+          packaged: isPackagedRuntime(),
           platform: process.platform,
           arch: process.arch,
         },
@@ -1198,6 +1202,26 @@ async function invoke(request: DesktopInvokeRequest): Promise<unknown> {
       await shell.openExternal(url.toString())
       return { opened: true }
     }
+    case 'update-status':
+      return updater?.status() ?? null
+    case 'update-download':
+      if (!updater) throw new Error('Desktop updater is not ready')
+      return updater.download()
+    case 'update-pause':
+      if (!updater) throw new Error('Desktop updater is not ready')
+      return updater.pause()
+    case 'update-resume':
+      if (!updater) throw new Error('Desktop updater is not ready')
+      return updater.resume()
+    case 'update-cancel':
+      if (!updater) throw new Error('Desktop updater is not ready')
+      return updater.cancel()
+    case 'update-dismiss':
+      return updater?.dismiss() ?? null
+    case 'update-install':
+      if (!updater) throw new Error('Desktop updater is not ready')
+      updater.install()
+      return { installing: true }
     case 'set-background-job-state': {
       const active = payload.active === true
       backgroundJobState = active
@@ -1592,13 +1616,13 @@ async function startDesktop(): Promise<void> {
     resolve(app.getPath('userData'), 'model-cache', 'huggingface', 'hub'),
     stateStore,
     () =>
-      (!app.isPackaged ? runtimePaths().workerCommand : undefined) ??
+      (!isPackagedRuntime() ? runtimePaths().workerCommand : undefined) ??
       modelPackages?.resolveActiveFile('worker') ??
       runtimePaths().workerCommand,
     sendTranscriptionProgress,
     () =>
       modelPackages?.resolveActiveFile('transcription-model') ??
-      (!app.isPackaged && existsSync(developmentGuitarResearchModel)
+      (!isPackagedRuntime() && existsSync(developmentGuitarResearchModel)
         ? developmentGuitarResearchModel
         : undefined),
     (signal) => huggingFaceOAuth!.accessToken(signal),
@@ -1624,7 +1648,7 @@ async function startDesktop(): Promise<void> {
     resolve(app.getPath('userData'), 'runtime'),
     resolve(app.getPath('userData'), 'cache'),
   )
-  updater = new DesktopUpdater(() => mainWindow)
+  updater = new DesktopUpdater(() => mainWindow, isPackagedRuntime())
   await restartLocalApi()
   ipcMain.handle(
     'studio:invoke',
@@ -1697,6 +1721,8 @@ async function startDesktop(): Promise<void> {
               ?.textContent?.replace(/\\s+/g, ' ').trim(),
             ariaValue: panel?.querySelector('[role="progressbar"]')
               ?.getAttribute('aria-valuenow'),
+            actions: Array.from(panel?.querySelectorAll('button') ?? [])
+              .map((button) => button.getAttribute('aria-label')),
           }
         })()
       `)
@@ -1705,7 +1731,9 @@ async function startDesktop(): Promise<void> {
       updateProgressState.percentage !== '37%' ||
       updateProgressState.ariaValue !== '37' ||
       !String(updateProgressState.metrics).includes('225.0 MB / 600.0 MB') ||
-      !String(updateProgressState.metrics).includes('10.0 MB/s')
+      !String(updateProgressState.metrics).includes('10.0 MB/s') ||
+      !updateProgressState.actions?.includes('暂停下载') ||
+      !updateProgressState.actions?.includes('取消下载')
     ) {
       throw new Error('Desktop update download progress did not render')
     }
@@ -1718,12 +1746,30 @@ async function startDesktop(): Promise<void> {
       bytesPerSecond: 0,
     } satisfies DesktopUpdateProgress)
     await new Promise((resolveWait) => setTimeout(resolveWait, 50))
-    const updateProgressDismissed =
-      await smokeWindow.webContents.executeJavaScript(
-        `document.querySelector('.update-progress-panel') === null`,
-      )
-    if (!updateProgressDismissed) {
-      throw new Error('Completed desktop update progress did not dismiss')
+    const updateReadyState =
+      await smokeWindow.webContents.executeJavaScript(`
+        (() => {
+          const dialog = document.querySelector('.update-dialog')
+          const bounds = dialog?.getBoundingClientRect()
+          return {
+            visible: Boolean(
+              dialog &&
+              bounds &&
+              bounds.width > 300 &&
+              bounds.height > 180 &&
+              bounds.right <= window.innerWidth &&
+              bounds.bottom <= window.innerHeight
+            ),
+            text: dialog?.textContent?.replace(/\\s+/g, ' ').trim(),
+          }
+        })()
+      `)
+    if (
+      !updateReadyState?.visible ||
+      !String(updateReadyState.text).includes('更新已准备好') ||
+      !String(updateReadyState.text).includes('重启并安装')
+    ) {
+      throw new Error('Completed desktop update dialog did not render')
     }
     await smokeWindow.webContents.executeJavaScript(
       `Array.from(document.querySelectorAll('button'))

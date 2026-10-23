@@ -446,6 +446,109 @@ test('detects quiet sustain across guitar, bass and ukulele tunings', () => {
   }
 })
 
+test('tracks a string across the useful tuning range without boundary pinning', () => {
+  const sampleRate = 48_000
+  const targetFrequency = midiFrequency(40)
+  for (const cents of [-180, -120, 120, 180]) {
+    const frequency = targetFrequency * 2 ** (cents / 1200)
+    const samples = Float32Array.from(
+      { length: 8192 },
+      (_, index) =>
+        Math.sin((2 * Math.PI * frequency * index) / sampleRate) * 0.02,
+    )
+    const detection = detectTunerFrequency(samples, sampleRate, [40])
+    assert.ok(detection)
+    assert.ok(
+      Math.abs(1200 * Math.log2(detection.frequency / frequency)) < 2,
+      `expected ${cents} cent detune, got ${1200 *
+        Math.log2(detection.frequency / targetFrequency)} cents`,
+    )
+  }
+})
+
+test('keeps detecting a clean string through a weak decaying sustain', () => {
+  const sampleRate = 48_000
+  const frequency = midiFrequency(40)
+  for (const amplitude of [0.0014, 0.0008, 0.00045]) {
+    const samples = Float32Array.from(
+      { length: 8192 },
+      (_, index) =>
+        Math.sin((2 * Math.PI * frequency * index) / sampleRate) * amplitude,
+    )
+    const detection = detectTunerFrequency(samples, sampleRate, [40])
+    assert.ok(detection, `expected detection at amplitude ${amplitude}`)
+    assert.ok(
+      Math.abs(1200 * Math.log2(detection.frequency / frequency)) < 2,
+    )
+  }
+})
+
+test('follows gradual tuning changes while rejecting an isolated octave', () => {
+  const targetFrequency = midiFrequency(40)
+  const readings = [0, 2, 4, 6, 8, 1208, 10, 12]
+    .map((cents) =>
+      tunerReading({
+        frequency: targetFrequency * 2 ** (cents / 1200),
+        confidence: 0.97,
+        level: 0.02,
+      }),
+    )
+    .filter((reading) => reading !== null)
+  let stable = null
+  const history = []
+  for (const reading of readings) {
+    history.push(reading)
+    stable = stabilizeTunerReadings(history, stable, {
+      minimumConfidence: 0.64,
+      minimumReadings: 2,
+      switchReadings: 3,
+    })
+  }
+  assert.equal(stable?.midi, 40)
+  assert.ok(
+    Math.abs((stable?.cents ?? -100) - 12) < 2,
+    `expected the tracker near 12 cents, got ${stable?.cents}`,
+  )
+})
+
+test('returns consistent pitch across repeated harmonic-rich plucks', () => {
+  const sampleRate = 48_000
+  const frequency = midiFrequency(45) * 2 ** (7 / 1200)
+  const measuredCents = []
+  for (const { phase, amplitude, harmonics } of [
+    { phase: 0, amplitude: 0.08, harmonics: [0.35, 0.42, 0.18] },
+    { phase: 0.7, amplitude: 0.05, harmonics: [0.18, 0.48, 0.24] },
+    { phase: 1.4, amplitude: 0.03, harmonics: [0.12, 0.5, 0.2] },
+  ]) {
+    const samples = Float32Array.from(
+      { length: 8192 },
+      (_, index) => {
+        const at = index / sampleRate
+        return harmonics.reduce(
+          (sum, harmonicAmplitude, harmonicIndex) =>
+            sum +
+            amplitude *
+              harmonicAmplitude *
+              Math.sin(
+                2 *
+                  Math.PI *
+                  frequency *
+                  (harmonicIndex + 1) *
+                  at +
+                  phase,
+              ),
+          0,
+        )
+      },
+    )
+    const detection = detectTunerFrequency(samples, sampleRate, [45])
+    assert.ok(detection)
+    measuredCents.push(1200 * Math.log2(detection.frequency / midiFrequency(45)))
+  }
+  assert.ok(Math.max(...measuredCents) - Math.min(...measuredCents) < 1)
+  assert.ok(measuredCents.every((cents) => Math.abs(cents - 7) < 1))
+})
+
 test('provides standard tunings and maps readings to the nearest string', () => {
   assert.deepEqual(
     TUNER_INSTRUMENTS.map((instrument) => ({

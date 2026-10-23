@@ -58,6 +58,13 @@ const allowedMethods = new Set<DesktopStudioMethod>([
   'authorize-qqmusic',
   'open-external-url',
   'set-background-job-state',
+  'update-status',
+  'update-download',
+  'update-pause',
+  'update-resume',
+  'update-cancel',
+  'update-dismiss',
+  'update-install',
 ])
 
 const bridge: DesktopBridge = {

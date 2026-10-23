@@ -754,6 +754,7 @@ function App({ application = studioApplication }: AppProps) {
     useState<TranscriptionSetupProgress | null>(null)
   const [updateProgress, setUpdateProgress] =
     useState<DesktopUpdateProgress | null>(null)
+  const [updateActionBusy, setUpdateActionBusy] = useState(false)
   const [transcriptionSetupError, setTranscriptionSetupError] = useState('')
   const [storageCleanup, setStorageCleanup] =
     useState<StorageCleanupStatus | null>(null)
@@ -969,7 +970,21 @@ function App({ application = studioApplication }: AppProps) {
 
   useEffect(() => {
     if (!desktopControls.onUpdateProgress) return
-    return desktopControls.onUpdateProgress(setUpdateProgress)
+    let active = true
+    const applyProgress = (progress: DesktopUpdateProgress | null) => {
+      if (!active) return
+      setUpdateProgress(
+        progress?.phase === 'dismissed' ? null : progress,
+      )
+    }
+    const unsubscribe = desktopControls.onUpdateProgress(applyProgress)
+    void desktopControls.updateStatus?.().then(applyProgress).catch(() => {
+      // Update state remains event-driven when the older bridge has no status.
+    })
+    return () => {
+      active = false
+      unsubscribe()
+    }
   }, [desktopControls])
 
   useEffect(() => {
@@ -1175,6 +1190,40 @@ function App({ application = studioApplication }: AppProps) {
       }
     } finally {
       setRuntimeBusy(false)
+    }
+  }
+
+  const runUpdateAction = async (
+    action: () => Promise<
+      DesktopUpdateProgress | null | { installing: true }
+    >,
+  ) => {
+    setUpdateActionBusy(true)
+    try {
+      const result = await action()
+      if (
+        result &&
+        'phase' in result
+      ) {
+        setUpdateProgress(
+          result.phase === 'dismissed' ? null : result,
+        )
+      }
+    } catch (cause) {
+      const message =
+        cause instanceof Error ? cause.message : t('更新操作失败')
+      setUpdateProgress((current) =>
+        current
+          ? {
+              ...current,
+              phase: 'failed',
+              bytesPerSecond: 0,
+              error: message,
+            }
+          : current,
+      )
+    } finally {
+      setUpdateActionBusy(false)
     }
   }
 
@@ -6436,22 +6485,191 @@ function App({ application = studioApplication }: AppProps) {
           </section>
         </div>
       ) : null}
-      {updateProgress?.phase === 'downloading' ? (
+      {updateProgress &&
+      (updateProgress.phase === 'available' ||
+        updateProgress.phase === 'ready') ? (
+        <div className="modal-backdrop update-modal-backdrop">
+          <section
+            className="update-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="update-dialog-title"
+          >
+            <header>
+              <span
+                className={`update-dialog-icon ${
+                  updateProgress.phase === 'ready' ? 'is-ready' : ''
+                }`}
+              >
+                {updateProgress.phase === 'ready' ? (
+                  <Check aria-hidden="true" />
+                ) : (
+                  <Download aria-hidden="true" />
+                )}
+              </span>
+              <div>
+                <span>{t('Guitar Tab Studio 更新')}</span>
+                <h2 id="update-dialog-title">
+                  {updateProgress.phase === 'ready'
+                    ? t('更新已准备好')
+                    : t('发现新版本')}
+                </h2>
+                <p>
+                  {updateProgress.phase === 'ready'
+                    ? t('下载与校验已完成，重启应用即可安装。')
+                    : t('新版本已经可以下载，项目与本地设置会保留。')}
+                </p>
+              </div>
+            </header>
+            <div className="update-dialog-version">
+              <span>{t('版本')}</span>
+              <strong>{updateProgress.version}</strong>
+            </div>
+            <footer>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={
+                  updateActionBusy || !desktopControls.dismissUpdate
+                }
+                onClick={() =>
+                  void runUpdateAction(() =>
+                    desktopControls.dismissUpdate!(),
+                  )
+                }
+              >
+                {updateProgress.phase === 'ready'
+                  ? t('退出时安装')
+                  : t('稍后')}
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={
+                  updateActionBusy ||
+                  (updateProgress.phase === 'ready'
+                    ? !desktopControls.installUpdate
+                    : !desktopControls.downloadUpdate)
+                }
+                onClick={() =>
+                  void runUpdateAction(() =>
+                    updateProgress.phase === 'ready'
+                      ? desktopControls.installUpdate!()
+                      : desktopControls.downloadUpdate!(),
+                  )
+                }
+              >
+                {updateActionBusy ? (
+                  <LoaderCircle
+                    className="is-spinning"
+                    aria-hidden="true"
+                  />
+                ) : updateProgress.phase === 'ready' ? (
+                  <RotateCcw aria-hidden="true" />
+                ) : (
+                  <Download aria-hidden="true" />
+                )}
+                {updateProgress.phase === 'ready'
+                  ? t('重启并安装')
+                  : t('下载更新')}
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+      {updateProgress &&
+      (updateProgress.phase === 'downloading' ||
+        updateProgress.phase === 'paused' ||
+        updateProgress.phase === 'failed') ? (
         <section
-          className="update-progress-panel"
+          className={`update-progress-panel is-${updateProgress.phase}`}
           role="status"
           aria-live="polite"
           aria-label={t('应用更新下载进度')}
         >
           <header className="update-progress-header">
             <span className="update-progress-icon">
-              <Download aria-hidden="true" />
+              {updateProgress.phase === 'paused' ? (
+                <Pause aria-hidden="true" />
+              ) : updateProgress.phase === 'failed' ? (
+                <CircleAlert aria-hidden="true" />
+              ) : (
+                <Download aria-hidden="true" />
+              )}
             </span>
             <div>
-              <strong>{t('正在下载应用更新')}</strong>
+              <strong>
+                {updateProgress.phase === 'paused'
+                  ? t('更新下载已暂停')
+                  : updateProgress.phase === 'failed'
+                    ? t('更新下载失败')
+                    : t('正在下载应用更新')}
+              </strong>
               <span>Guitar Tab Studio {updateProgress.version}</span>
             </div>
             <output>{Math.round(updateProgress.percent)}%</output>
+            <div className="update-progress-actions">
+              {updateProgress.phase === 'downloading' ? (
+                <button
+                  type="button"
+                  title={t('暂停下载')}
+                  aria-label={t('暂停下载')}
+                  disabled={
+                    updateActionBusy || !desktopControls.pauseUpdate
+                  }
+                  onClick={() =>
+                    void runUpdateAction(() =>
+                      desktopControls.pauseUpdate!(),
+                    )
+                  }
+                >
+                  <Pause aria-hidden="true" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  title={
+                    updateProgress.phase === 'failed'
+                      ? t('重试下载')
+                      : t('继续下载')
+                  }
+                  aria-label={
+                    updateProgress.phase === 'failed'
+                      ? t('重试下载')
+                      : t('继续下载')
+                  }
+                  disabled={
+                    updateActionBusy || !desktopControls.resumeUpdate
+                  }
+                  onClick={() =>
+                    void runUpdateAction(() =>
+                      desktopControls.resumeUpdate!(),
+                    )
+                  }
+                >
+                  {updateProgress.phase === 'failed' ? (
+                    <RotateCcw aria-hidden="true" />
+                  ) : (
+                    <Play aria-hidden="true" />
+                  )}
+                </button>
+              )}
+              <button
+                type="button"
+                title={t('取消下载')}
+                aria-label={t('取消下载')}
+                disabled={
+                  updateActionBusy || !desktopControls.cancelUpdate
+                }
+                onClick={() =>
+                  void runUpdateAction(() =>
+                    desktopControls.cancelUpdate!(),
+                  )
+                }
+              >
+                <X aria-hidden="true" />
+              </button>
+            </div>
           </header>
           <div className="update-progress-metrics">
             <span>
@@ -6460,7 +6678,8 @@ function App({ application = studioApplication }: AppProps) {
                 ? ` / ${formatTransferSize(updateProgress.totalBytes)}`
                 : ''}
             </span>
-            {updateProgress.bytesPerSecond > 0 ? (
+            {updateProgress.phase === 'downloading' &&
+            updateProgress.bytesPerSecond > 0 ? (
               <span>
                 {formatTransferSize(updateProgress.bytesPerSecond)}/s
               </span>
@@ -6476,7 +6695,12 @@ function App({ application = studioApplication }: AppProps) {
           >
             <span style={{ width: `${updateProgress.percent}%` }} />
           </div>
-          <small>{t('下载完成后可选择立即重启安装')}</small>
+          {updateProgress.phase === 'failed' &&
+          updateProgress.error ? (
+            <p className="update-progress-error">
+              {updateProgress.error}
+            </p>
+          ) : null}
         </section>
       ) : null}
     </div>
