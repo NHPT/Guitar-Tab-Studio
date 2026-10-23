@@ -1222,11 +1222,56 @@ button {
 
 .tuner-stage {
   width: min(900px, 100%);
-  min-height: 560px;
+  min-height: 600px;
   margin: 0 auto;
   display: grid;
   align-content: center;
-  gap: 24px;
+  gap: 18px;
+}
+
+.tuner-instrument-tabs {
+  width: min(360px, 100%);
+  min-height: 38px;
+  margin: 0 auto 2px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-bottom: 1px solid var(--border);
+}
+
+.tuner-instrument-tabs button {
+  min-width: 0;
+  min-height: 38px;
+  position: relative;
+  border: 0;
+  color: var(--text-muted);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.tuner-instrument-tabs button::after {
+  width: 100%;
+  height: 2px;
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  content: "";
+  background: transparent;
+  transition: background 120ms ease-out;
+}
+
+.tuner-instrument-tabs button:hover {
+  color: var(--text);
+}
+
+.tuner-instrument-tabs button.is-active {
+  color: var(--text);
+}
+
+.tuner-instrument-tabs button.is-active::after {
+  background: var(--accent-fill);
 }
 
 .tuner-readout {
@@ -1268,6 +1313,13 @@ button {
   font-weight: 760;
   line-height: 0.94;
   letter-spacing: 0;
+  transition:
+    color 120ms ease-out,
+    transform 100ms ease-out;
+}
+
+.tuner-stage.has-signal .tuner-note strong {
+  transform: scale(1.012);
 }
 
 .tuner-note strong.is-empty {
@@ -1359,8 +1411,13 @@ button {
   transform: translateX(-50%);
   transition:
     left 100ms ease-out,
+    height 100ms ease-out,
     background 120ms ease-out,
     box-shadow 120ms ease-out;
+}
+
+.tuner-stage.has-signal .tuner-scale b {
+  height: var(--tuner-signal-height);
 }
 
 .tuner-stage.is-in-tune .tuner-scale b {
@@ -1384,6 +1441,82 @@ button {
 
 .tuner-scale-values span:last-child {
   text-align: right;
+}
+
+.tuner-trace {
+  display: grid;
+  gap: 6px;
+}
+
+.tuner-trace-heading {
+  min-height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tuner-trace-heading b {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.tuner-trace-track {
+  height: 66px;
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(48, minmax(0, 1fr));
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.tuner-trace-track::after {
+  height: 1px;
+  position: absolute;
+  top: 50%;
+  right: 0;
+  left: 0;
+  content: "";
+  background: var(--border-strong);
+  opacity: 0.55;
+}
+
+.tuner-trace-track i {
+  height: 100%;
+  position: relative;
+  z-index: 1;
+}
+
+.tuner-trace-track i::before {
+  width: 2px;
+  height: var(--trace-height);
+  position: absolute;
+  top: var(--trace-position);
+  left: 50%;
+  content: "";
+  border-radius: 1px;
+  background: var(--text-muted);
+  opacity: var(--trace-opacity);
+  transform: translate(-50%, -50%);
+  transition:
+    top 70ms linear,
+    height 70ms linear,
+    opacity 100ms linear;
+}
+
+.tuner-trace-track i.is-empty::before {
+  opacity: 0;
+}
+
+.tuner-trace-track i.is-voiced::before {
+  background: var(--accent-fill);
+}
+
+.tuner-stage.is-in-tune .tuner-trace-track i.is-voiced::before {
+  background: var(--success);
 }
 
 .tuner-telemetry {
@@ -1463,7 +1596,7 @@ button {
 
 .tuner-strings {
   display: grid;
-  grid-template-columns: repeat(7, minmax(72px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
   gap: 6px;
 }
 
@@ -5834,8 +5967,8 @@ input[type="range"]::-webkit-slider-thumb {
   }
 
   .tuner-stage {
-    min-height: 480px;
-    gap: 20px;
+    min-height: 540px;
+    gap: 16px;
   }
 
   .tuner-note strong {
@@ -5851,6 +5984,10 @@ input[type="range"]::-webkit-slider-thumb {
     height: 68px;
   }
 
+  .tuner-trace-track {
+    height: 58px;
+  }
+
   .tuner-telemetry {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px 18px;
@@ -5861,7 +5998,7 @@ input[type="range"]::-webkit-slider-thumb {
   }
 
   .tuner-strings {
-    grid-template-columns: repeat(4, minmax(62px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(62px, 1fr));
   }
 
   .live-transcription-status {

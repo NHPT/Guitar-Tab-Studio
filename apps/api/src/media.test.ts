@@ -3,12 +3,24 @@ import test from 'node:test'
 import {
   authorizedMediaProvider,
   authorizedMediaProviderForContent,
+  normalizeUploadedFilename,
+  repairLegacyUtf8Mojibake,
   requiresAuthorizedMediaDecode,
   scoreImageContentValidationError,
   scoreUploadPrefilterError,
   uploadContentValidationError,
   uploadPrefilterError,
 } from './media.js'
+
+test('preserves explicit UTF-8 upload names across multipart runtimes', () => {
+  const name = '薛之谦-我好像在哪见过你.mgg'
+  const multipartMojibake = Buffer.from(name, 'utf8').toString('latin1')
+
+  assert.equal(normalizeUploadedFilename(name, multipartMojibake), name)
+  assert.equal(normalizeUploadedFilename(undefined, multipartMojibake), name)
+  assert.equal(repairLegacyUtf8Mojibake(multipartMojibake), name)
+  assert.equal(repairLegacyUtf8Mojibake('Beyoncé - Déjà Vu.mp3'), 'Beyoncé - Déjà Vu.mp3')
+})
 
 test('accepts standard audio and video containers', () => {
   assert.equal(uploadPrefilterError('song.flac', 'application/octet-stream'), null)

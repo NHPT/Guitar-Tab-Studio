@@ -72,6 +72,7 @@ import {
 } from './community.js'
 import {
   authorizedMediaProviderForContent,
+  normalizeUploadedFilename,
   requiresAuthorizedMediaDecode,
   scoreImageContentValidationError,
   scoreUploadPrefilterError,
@@ -1614,13 +1615,17 @@ app.post('/api/import/upload', upload.single('media'), (request, response) => {
   const descriptor = openSync(request.file.path, 'r')
   const bytesRead = readSync(descriptor, header, 0, header.length, 0)
   closeSync(descriptor)
-  const validationError = uploadContentValidationError(
+  const originalName = normalizeUploadedFilename(
+    request.body?.originalName,
     request.file.originalname,
+  )
+  const validationError = uploadContentValidationError(
+    originalName,
     request.file.mimetype,
     header.subarray(0, bytesRead),
   )
   const requiresAuthorizedDecode = requiresAuthorizedMediaDecode(
-    request.file.originalname,
+    originalName,
     header.subarray(0, bytesRead),
   )
   const authorizedProcessing =
@@ -1628,7 +1633,7 @@ app.post('/api/import/upload', upload.single('media'), (request, response) => {
     request.body?.authorizationPolicyVersion === '2'
   const protectedProvider =
     authorizedMediaProviderForContent(
-      request.file.originalname,
+      originalName,
       header.subarray(0, bytesRead),
     ) ?? 'unknown'
   if (requiresAuthorizedDecode && !authorizedProcessing) {
@@ -1679,7 +1684,7 @@ app.post('/api/import/upload', upload.single('media'), (request, response) => {
   const source = {
     kind: 'upload' as const,
     label: '本地上传',
-    filename: request.file.originalname,
+    filename: originalName,
     authorizedMedia: requiresAuthorizedDecode
       ? {
           provider: protectedProvider,

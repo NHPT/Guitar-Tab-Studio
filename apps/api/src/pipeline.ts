@@ -119,6 +119,66 @@ export type WorkerAnalysis = Omit<AnalysisDocument, 'version'> & {
   version: number
 }
 
+export interface AcquiredSourceMetadata {
+  title?: string
+  artist?: string
+  webpage_url?: string
+}
+
+function boundedMetadataText(
+  value: unknown,
+  maximumLength: number,
+): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim()
+  return normalized.length > 0
+    ? normalized.slice(0, maximumLength)
+    : undefined
+}
+
+export function parseAcquiredSourceMetadata(
+  value: unknown,
+): AcquiredSourceMetadata {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const candidate = value as Record<string, unknown>
+  const title = boundedMetadataText(candidate.title, 512)
+  const artist = boundedMetadataText(candidate.artist, 512)
+  const rawWebpageUrl = boundedMetadataText(candidate.webpage_url, 4096)
+  let webpageUrl: string | undefined
+  if (rawWebpageUrl) {
+    try {
+      const parsed = new URL(rawWebpageUrl)
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        webpageUrl = parsed.toString()
+      }
+    } catch {
+      // Ignore malformed metadata without discarding the downloaded media.
+    }
+  }
+  return {
+    ...(title ? { title } : {}),
+    ...(artist ? { artist } : {}),
+    ...(webpageUrl ? { webpage_url: webpageUrl } : {}),
+  }
+}
+
+export function mergeAcquiredSourceMetadata(
+  analysis: WorkerAnalysis,
+  acquired?: AcquiredSourceMetadata,
+): WorkerAnalysis {
+  if (!acquired || Object.keys(acquired).length === 0) return analysis
+  return {
+    ...analysis,
+    metadata: {
+      ...analysis.metadata,
+      ...acquired,
+      ...(analysis.metadata?.duration === undefined
+        ? {}
+        : { duration: analysis.metadata.duration }),
+    },
+  }
+}
+
 export interface WorkerProgress {
   progress: number
   status: Extract<
@@ -872,12 +932,26 @@ function confirmedGuitarTracks(analysis: WorkerAnalysis) {
 export function workerProject(
   analysis: WorkerAnalysis,
   source: SourceDescriptor,
-  jobId: string,
 ): StudioProject {
+  const originalTitle = source.filename?.replace(/\.[^.]+$/u, '').trim()
+  const analyzedTitle = analysis.metadata?.title?.trim()
+  const analyzedArtist = analysis.metadata?.artist?.trim()
+  const genericArtist =
+    analyzedArtist === '本地上传' || analyzedArtist === '在线媒体'
+  const title =
+    (source.kind === 'upload' ? originalTitle : analyzedTitle) ||
+    originalTitle ||
+    analyzedTitle ||
+    (source.kind === 'upload' ? '未命名录音' : `${source.label} 导入`)
+  const artist =
+    analyzedArtist && !genericArtist
+      ? analyzedArtist
+      : source.kind === 'upload'
+        ? '未知艺术家'
+        : source.label
   const base = createStudioProject(
     source,
-    source.filename?.replace(/\.[^.]+$/, '') ??
-      (source.kind === 'upload' ? '未命名录音' : `${source.label} 导入`),
+    title,
   )
   const tab = tabFromWorker(analysis)
   const guitarArrangement = guitarPartsFromWorker(analysis, tab)
@@ -906,8 +980,8 @@ export function workerProject(
   return {
     ...base,
     id: randomUUID(),
-    title: analysis.metadata?.title ?? base.title,
-    artist: analysis.metadata?.artist ?? base.artist,
+    title,
+    artist,
     bpm: analysis.bpm,
     key: analysis.key ?? 'Unknown',
     duration,
@@ -949,7 +1023,7 @@ export function workerProject(
     warnings: analysis.warnings,
     source: {
       ...source,
-      label: `${source.label} · Worker ${jobId.slice(0, 6)}`,
+      label: analyzedArtist && !genericArtist ? analyzedArtist : source.label,
     },
   }
 }
@@ -1207,6 +1281,7 @@ async function runPreparedInferencePipeline(
   onUpdate: (job: AnalysisJob) => void,
   inputPath?: string,
   options: PipelineExecutionOptions = {},
+  acquiredMetadata?: AcquiredSourceMetadata,
 ): Promise<StudioProject> {
   const workerCommand = getWorkerCommand()
   const ffmpegCommand = getFfmpegCommand()
@@ -1326,6 +1401,7 @@ async function runPreparedInferencePipeline(
     analysis = fallbackAnalysis
     if (job.deployment) job.deployment.fallbackUsed = true
   }
+  analysis = mergeAcquiredSourceMetadata(analysis, acquiredMetadata)
 
   throwIfAborted(options.signal)
   Object.assign(job, {
@@ -1335,7 +1411,7 @@ async function runPreparedInferencePipeline(
     updatedAt: new Date().toISOString(),
   })
   onUpdate(job)
-  const project = workerProject(analysis, job.source, job.id)
+  const project = workerProject(analysis, job.source)
   throwIfAborted(options.signal)
   Object.assign(job, {
     status: 'completed',
@@ -1374,7 +1450,12 @@ async function acquireAuthorizedLink(
   job: AnalysisJob,
   onUpdate: (job: AnalysisJob) => void,
   options: PipelineExecutionOptions,
-): Promise<{ root: string; path: string; name: string }> {
+): Promise<{
+  root: string
+  path: string
+  name: string
+  metadata: AcquiredSourceMetadata
+}> {
   const workerCommand = getWorkerCommand()
   const ffmpegCommand = getFfmpegCommand()
   if (!workerCommand || !ffmpegCommand || !job.source.url) {
@@ -1420,7 +1501,13 @@ async function acquireAuthorizedLink(
     )
     .sort()[0]
   if (!name) throw new Error('本地媒体提取器未生成可分析文件')
-  return { root, path: resolve(root, name), name }
+  const metadata = await readFile(
+    resolve(root, 'source.metadata.json'),
+    'utf8',
+  )
+    .then((content) => parseAcquiredSourceMetadata(JSON.parse(content)))
+    .catch(() => ({}))
+  return { root, path: resolve(root, name), name, metadata }
 }
 
 async function runInferencePipeline(
@@ -1442,6 +1529,7 @@ async function runInferencePipeline(
   let preparedPath = inputPath
   let preparedName = job.source.filename
   let acquiredRoot: string | undefined
+  let acquiredMetadata: AcquiredSourceMetadata | undefined
   const decodedPath = resolve(
     runtimeDataRoot(),
     'uploads',
@@ -1453,6 +1541,7 @@ async function runInferencePipeline(
       acquiredRoot = acquired.root
       preparedPath = acquired.path
       preparedName = acquired.name
+      acquiredMetadata = acquired.metadata
     }
     if (!preparedName) preparedName = basename(preparedPath)
     const encryptedHeader = await readMediaHeader(preparedPath)
@@ -1466,6 +1555,7 @@ async function runInferencePipeline(
         onUpdate,
         preparedPath,
         { ...options, skipShadow: true },
+        acquiredMetadata,
       )
     }
     Object.assign(job, {
@@ -1514,6 +1604,7 @@ async function runInferencePipeline(
       onUpdate,
       decodedPath,
       { ...options, skipShadow: true },
+      acquiredMetadata,
     )
   } finally {
     await rm(decodedPath, { force: true }).catch(() => undefined)

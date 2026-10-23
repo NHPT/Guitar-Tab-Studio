@@ -10,9 +10,11 @@ import {
   createEasyArrangement,
   detectFundamentalFrequency,
   detectStandardGuitarFrequency,
+  detectTunerFrequency,
   detectStandardAudioSignature,
   guitarPositionForPitch,
   MemoryProjectRepository,
+  midiFrequency,
   notationPositionAt,
   parseModelPackageManifest,
   parseProjectRevision,
@@ -28,7 +30,10 @@ import {
   rhythmEventPosition,
   stabilizeTunerReadings,
   tempoMapFromBeats,
+  TUNER_INSTRUMENTS,
+  tunerInstrument,
   tunerReading,
+  tunerReadingForNearestTarget,
   tunerReadingForTarget,
   uploadContentValidationError,
   uploadPrefilterError,
@@ -68,6 +73,26 @@ test('migrates an unversioned project to schema version 2', () => {
   assert.equal(project.guitarParts.length, 1)
   assert.equal(project.primaryGuitarPartId, project.guitarParts[0].id)
   assert.equal(project.guitarParts[0].tab, project.tab)
+})
+
+test('repairs legacy UTF-8 filenames decoded as Latin-1', () => {
+  const expected = '薛之谦-我好像在哪见过你'
+  const brokenFilename = Buffer.from(
+    `${expected}.mgg`,
+    'utf8',
+  ).toString('latin1')
+  const brokenTitle = brokenFilename.replace(/\.[^.]+$/u, '').trim()
+  const project = migrateStudioProject({
+    ...legacyProject(),
+    title: brokenTitle,
+    source: {
+      ...legacyProject().source,
+      filename: brokenFilename,
+    },
+  })
+
+  assert.equal(project.title, expected)
+  assert.equal(project.source.filename, `${expected}.mgg`)
 })
 
 test('keeps the top-level TAB authoritative for the primary guitar part', () => {
@@ -391,6 +416,70 @@ test('stabilizes tuner readings and supports a locked guitar string', () => {
   const targeted = tunerReadingForTarget(octaveReading, 40)
   assert.equal(targeted?.midi, 40)
   assert.ok(Math.abs(targeted?.cents ?? 100) < 0.1)
+})
+
+test('detects quiet sustain across guitar, bass and ukulele tunings', () => {
+  const sampleRate = 48_000
+  for (const { instrumentId, midi } of [
+    { instrumentId: 'guitar' as const, midi: 40 },
+    { instrumentId: 'bass' as const, midi: 28 },
+    { instrumentId: 'ukulele' as const, midi: 69 },
+  ]) {
+    const instrument = tunerInstrument(instrumentId)
+    const frequency = midiFrequency(midi)
+    const samples = Float32Array.from(
+      { length: 8192 },
+      (_, index) =>
+        Math.sin((2 * Math.PI * frequency * index) / sampleRate) *
+        0.002,
+    )
+    const detection = detectTunerFrequency(
+      samples,
+      sampleRate,
+      instrument.strings.map((string) => string.midi),
+    )
+    assert.ok(detection)
+    assert.ok(detection.level < 0.006)
+    assert.ok(
+      Math.abs(1200 * Math.log2(detection.frequency / frequency)) < 2,
+    )
+  }
+})
+
+test('provides standard tunings and maps readings to the nearest string', () => {
+  assert.deepEqual(
+    TUNER_INSTRUMENTS.map((instrument) => ({
+      id: instrument.id,
+      notes: instrument.strings.map((string) => string.note),
+    })),
+    [
+      {
+        id: 'guitar',
+        notes: ['E2', 'A2', 'D3', 'G3', 'B3', 'E4'],
+      },
+      {
+        id: 'bass',
+        notes: ['E1', 'A1', 'D2', 'G2'],
+      },
+      {
+        id: 'ukulele',
+        notes: ['G4', 'C4', 'E4', 'A4'],
+      },
+    ],
+  )
+  const highE = tunerReading({
+    frequency: midiFrequency(64),
+    confidence: 0.95,
+    level: 0.02,
+  })
+  assert.ok(highE)
+  assert.equal(
+    tunerReadingForNearestTarget(
+      highE,
+      tunerInstrument('guitar').strings.map((string) => string.midi),
+    )?.midi,
+    64,
+  )
 })
 
 test('provides advanced drum fills with cymbal or tom transitions', () => {

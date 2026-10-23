@@ -1,10 +1,12 @@
 import {
   detectFundamentalFrequency,
-  detectStandardGuitarFrequency,
+  detectTunerFrequency,
   guitarPositionForPitch,
   stabilizeTunerReadings,
+  tunerInstrument as getTunerInstrument,
   tunerReading,
   type GuitarPosition,
+  type TunerInstrumentId,
   type TunerReading,
 } from '@gts/core'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -38,18 +40,31 @@ interface ActiveNote {
 export interface LiveGuitarController {
   status: LiveInputStatus
   mode: LiveInputMode | null
+  tunerInstrument: TunerInstrumentId
   reading: TunerReading | null
   level: number
   notes: LiveTabNote[]
   error: string
   start: (mode: LiveInputMode) => Promise<void>
+  setTunerInstrument: (instrument: TunerInstrumentId) => void
   stop: () => void
   clear: () => void
+}
+
+function audioLevel(samples: Float32Array): number {
+  let mean = 0
+  for (const sample of samples) mean += sample
+  mean /= samples.length
+  let energy = 0
+  for (const sample of samples) energy += (sample - mean) ** 2
+  return Math.sqrt(energy / samples.length)
 }
 
 export function useLiveGuitar(): LiveGuitarController {
   const [status, setStatus] = useState<LiveInputStatus>('idle')
   const [mode, setMode] = useState<LiveInputMode | null>(null)
+  const [tunerInstrument, setTunerInstrumentState] =
+    useState<TunerInstrumentId>('guitar')
   const [reading, setReading] = useState<TunerReading | null>(null)
   const [level, setLevel] = useState(0)
   const [notes, setNotes] = useState<LiveTabNote[]>([])
@@ -68,7 +83,11 @@ export function useLiveGuitar(): LiveGuitarController {
   const previousPositionRef = useRef<GuitarPosition | undefined>(undefined)
   const tunerHistoryRef = useRef<TunerReading[]>([])
   const stableTunerReadingRef = useRef<TunerReading | null>(null)
-  const missingTunerFramesRef = useRef(0)
+  const tunerInstrumentRef = useRef<TunerInstrumentId>('guitar')
+  const tunerGateOpenRef = useRef(false)
+  const tunerNoiseFloorRef = useRef(0.0002)
+  const tunerLastSoundAtRef = useRef(0)
+  const smoothedTunerLevelRef = useRef(0)
 
   const publishActiveNote = useCallback((active: ActiveNote) => {
     const note = {
@@ -119,7 +138,10 @@ export function useLiveGuitar(): LiveGuitarController {
     candidateFramesRef.current = 0
     tunerHistoryRef.current = []
     stableTunerReadingRef.current = null
-    missingTunerFramesRef.current = 0
+    tunerGateOpenRef.current = false
+    tunerNoiseFloorRef.current = 0.0002
+    tunerLastSoundAtRef.current = 0
+    smoothedTunerLevelRef.current = 0
     setReading(null)
     setLevel(0)
     setMode(null)
@@ -165,38 +187,73 @@ export function useLiveGuitar(): LiveGuitarController {
         const update = () => {
           if (contextRef.current !== context) return
           analyser.getFloatTimeDomainData(samples)
+          const rawLevel = audioLevel(samples)
+          const currentTuner = getTunerInstrument(
+            tunerInstrumentRef.current,
+          )
           const detection =
             nextMode === 'tuner'
-              ? detectStandardGuitarFrequency(samples, context.sampleRate)
+              ? detectTunerFrequency(
+                  samples,
+                  context.sampleRate,
+                  currentTuner.strings.map((string) => string.midi),
+                )
               : detectFundamentalFrequency(samples, context.sampleRate)
           const now = context.currentTime
           const detectedReading = detection ? tunerReading(detection) : null
           let nextReading = detectedReading
+          let nextLevel = detection?.level ?? 0
           if (nextMode === 'tuner') {
-            if (
+            const previousLevel = smoothedTunerLevelRef.current
+            nextLevel =
+              rawLevel >= previousLevel
+                ? previousLevel * 0.28 + rawLevel * 0.72
+                : previousLevel * 0.88 + rawLevel * 0.12
+            smoothedTunerLevelRef.current =
+              nextLevel < 0.00001 ? 0 : nextLevel
+            const noiseFloor = tunerNoiseFloorRef.current
+            const attackFloor = Math.max(0.001, noiseFloor * 2.8)
+            const reliableReading =
               detectedReading &&
-              detectedReading.confidence >= 0.72 &&
-              detectedReading.level >= 0.006
-            ) {
-              missingTunerFramesRef.current = 0
+              detectedReading.confidence >= 0.64 &&
+              rawLevel >= attackFloor
+                ? detectedReading
+                : null
+            if (reliableReading) {
+              tunerGateOpenRef.current = true
+              tunerLastSoundAtRef.current = now
               tunerHistoryRef.current = [
                 ...tunerHistoryRef.current,
-                detectedReading,
+                reliableReading,
               ].slice(-9)
               stableTunerReadingRef.current = stabilizeTunerReadings(
                 tunerHistoryRef.current,
                 stableTunerReadingRef.current,
+                {
+                  minimumConfidence: 0.64,
+                  minimumReadings: 2,
+                  switchReadings: 3,
+                },
               )
-            } else {
-              missingTunerFramesRef.current += 1
-              if (missingTunerFramesRef.current >= 10) {
+            } else if (!tunerGateOpenRef.current) {
+              tunerNoiseFloorRef.current =
+                noiseFloor * 0.985 + rawLevel * 0.015
+            }
+            if (tunerGateOpenRef.current) {
+              const releaseFloor = Math.max(
+                0.00035,
+                tunerNoiseFloorRef.current * 1.5,
+              )
+              if (rawLevel >= releaseFloor) {
+                tunerLastSoundAtRef.current = now
+              } else if (now - tunerLastSoundAtRef.current >= 0.55) {
+                tunerGateOpenRef.current = false
                 tunerHistoryRef.current = []
                 stableTunerReadingRef.current = null
               }
             }
             nextReading = stableTunerReadingRef.current
           }
-          const nextLevel = detection?.level ?? 0
           if (now - lastUiUpdateRef.current >= 0.05) {
             lastUiUpdateRef.current = now
             setReading(nextReading)
@@ -292,6 +349,19 @@ export function useLiveGuitar(): LiveGuitarController {
     [finishActiveNote, publishActiveNote, stop],
   )
 
+  const setTunerInstrument = useCallback(
+    (instrument: TunerInstrumentId) => {
+      tunerInstrumentRef.current = instrument
+      setTunerInstrumentState(instrument)
+      tunerHistoryRef.current = []
+      stableTunerReadingRef.current = null
+      tunerGateOpenRef.current = false
+      tunerLastSoundAtRef.current = 0
+      setReading(null)
+    },
+    [],
+  )
+
   const clear = useCallback(() => {
     activeNoteRef.current = undefined
     previousPositionRef.current = undefined
@@ -303,11 +373,13 @@ export function useLiveGuitar(): LiveGuitarController {
   return {
     status,
     mode,
+    tunerInstrument,
     reading,
     level,
     notes,
     error,
     start,
+    setTunerInstrument,
     stop,
     clear,
   }

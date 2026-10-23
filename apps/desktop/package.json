@@ -1,7 +1,7 @@
 {
   "name": "@gts/desktop",
   "private": true,
-  "version": "0.1.0-preview.13",
+  "version": "0.1.0-preview.14",
   "description": "Offline-capable guitar transcription and practice workspace",
   "author": "Guitar Tab Studio",
   "type": "module",

@@ -28,6 +28,7 @@ interface TemporarySession {
 interface LoginTarget {
   acceptedDomains: string[]
   authenticated: (cookies: Cookie[]) => boolean
+  id: 'bilibili' | 'qqmusic'
   startUrl: string
   title: string
 }
@@ -52,6 +53,7 @@ function mediaLoginTarget(url: string): LoginTarget {
         const names = new Set(cookies.map((cookie) => cookie.name))
         return names.has('SESSDATA') && names.has('DedeUserID')
       },
+      id: 'bilibili',
       startUrl: 'https://passport.bilibili.com/login',
       title: '登录哔哩哔哩',
     }
@@ -63,6 +65,7 @@ const qqMusicLoginTarget: LoginTarget = {
   acceptedDomains: ['qq.com'],
   authenticated: (cookies) =>
     qqMusicCredentialFromCookies(cookies) !== undefined,
+  id: 'qqmusic',
   startUrl: 'https://y.qq.com/',
   title: '登录 QQ 音乐',
 }
@@ -70,6 +73,7 @@ const qqMusicLoginTarget: LoginTarget = {
 export class DesktopMediaSessions {
   private readonly cookieSessions = new Map<string, TemporarySession>()
   private readonly credentialSessions = new Map<string, TemporarySession>()
+  private readonly loginSessions = new Map<LoginTarget['id'], Session>()
   private readonly windows = new Set<BrowserWindow>()
 
   constructor(
@@ -134,7 +138,14 @@ export class DesktopMediaSessions {
     this.windows.clear()
     this.cookieSessions.clear()
     this.credentialSessions.clear()
-    await rm(this.root, { recursive: true, force: true })
+    const loginSessions = [...this.loginSessions.values()]
+    this.loginSessions.clear()
+    await Promise.all([
+      ...loginSessions.map((loginSession) =>
+        this.clearLoginSession(loginSession),
+      ),
+      rm(this.root, { recursive: true, force: true }),
+    ])
   }
 
   private consume(
@@ -150,9 +161,11 @@ export class DesktopMediaSessions {
     return entry.path
   }
 
-  private authorize(target: LoginTarget): Promise<Cookie[]> {
-    const partition = `gts-media-login-${randomUUID()}`
-    const loginSession = session.fromPartition(partition, { cache: false })
+  private async authorize(target: LoginTarget): Promise<Cookie[]> {
+    const loginSession = this.loginSession(target)
+    const existingCookies = await loginSession.cookies.get({}).catch(() => [])
+    if (target.authenticated(existingCookies)) return existingCookies
+
     const parent = this.windowProvider()
     const window = new BrowserWindow({
       width: 1060,
@@ -192,7 +205,6 @@ export class DesktopMediaSessions {
         clearTimeout(timeout)
         this.windows.delete(window)
         if (!window.isDestroyed()) window.destroy()
-        void this.clearLoginSession(loginSession)
         if (error) reject(error)
         else resolveCookies(cookies ?? [])
       }
@@ -216,9 +228,7 @@ export class DesktopMediaSessions {
       window.once('closed', () => {
         if (!settled) finish(new Error('登录授权已取消'))
       })
-      void loginSession.clearStorageData().then(() =>
-        window.loadURL(target.startUrl),
-      ).catch((error: unknown) =>
+      void window.loadURL(target.startUrl).catch((error: unknown) =>
         finish(
           error instanceof Error
             ? error
@@ -226,6 +236,17 @@ export class DesktopMediaSessions {
         ),
       )
     })
+  }
+
+  private loginSession(target: LoginTarget): Session {
+    const existing = this.loginSessions.get(target.id)
+    if (existing) return existing
+    const loginSession = session.fromPartition(
+      `gts-media-login-${target.id}`,
+      { cache: false },
+    )
+    this.loginSessions.set(target.id, loginSession)
+    return loginSession
   }
 
   private allowedLoginUrl(url: string, target: LoginTarget): boolean {

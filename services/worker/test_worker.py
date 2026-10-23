@@ -1,4 +1,5 @@
 import hashlib
+import json
 import tempfile
 import unittest
 import zipfile
@@ -343,7 +344,16 @@ class RuntimeGuardTest(unittest.TestCase):
             with (
                 patch(
                     "worker.acquire_url",
-                    return_value=(source, {"title": "fixture"}),
+                    return_value=(
+                        source,
+                        {
+                            "title": "示例歌曲",
+                            "artist": "示例歌手",
+                            "duration": 182.5,
+                            "webpage_url": "https://music.example/song/1",
+                            "timed_lyrics": [{"at": 0, "text": "ignored"}],
+                        },
+                    ),
                 ),
                 patch("worker.normalize_audio") as normalize,
                 patch(
@@ -361,6 +371,18 @@ class RuntimeGuardTest(unittest.TestCase):
                 main()
 
             normalize.assert_not_called()
+            self.assertEqual(
+                json.loads(
+                    (root / "source.metadata.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                {
+                    "title": "示例歌曲",
+                    "artist": "示例歌手",
+                    "webpage_url": "https://music.example/song/1",
+                },
+            )
 
     def test_spatially_distinct_guitars_become_independent_tracks(self) -> None:
         import numpy as np

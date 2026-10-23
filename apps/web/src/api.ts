@@ -156,6 +156,7 @@ export class HttpStudioApplication implements StudioApplication<File> {
     authorizedMedia?: AuthorizedMediaConsent,
   ): Promise<AnalysisJob> {
     const body = new FormData()
+    body.append('originalName', file.name)
     body.append('media', file)
     if (authorizedMedia?.accepted) {
       body.append('authorizedProcessingConsent', 'true')

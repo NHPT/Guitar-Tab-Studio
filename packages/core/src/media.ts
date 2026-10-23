@@ -87,6 +87,45 @@ function fileExtension(filename: string): string {
   return extensionStart <= 0 ? '' : basename.slice(extensionStart).toLowerCase()
 }
 
+export function repairLegacyUtf8Mojibake(value: string): string {
+  const normalized = value.normalize('NFC')
+  if (
+    !/[^\u0000-\u007f]/u.test(normalized) ||
+    [...normalized].some((character) => character.codePointAt(0)! > 0xff)
+  ) {
+    return normalized
+  }
+  try {
+    const bytes = Uint8Array.from(
+      [...normalized],
+      (character) => character.codePointAt(0)!,
+    )
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    return decoded === normalized ? normalized : decoded.normalize('NFC')
+  } catch {
+    return normalized
+  }
+}
+
+export function normalizeUploadedFilename(
+  preferred: unknown,
+  multipartFallback: string,
+): string {
+  const explicit =
+    typeof preferred === 'string' && preferred.trim()
+      ? preferred
+      : undefined
+  const repaired = repairLegacyUtf8Mojibake(
+    explicit ?? multipartFallback,
+  )
+  const basename = repaired.split(/[\\/]/u).at(-1)?.trim() ?? ''
+  const safe = basename
+    .replace(/[\u0000-\u001f\u007f]/gu, '')
+    .trim()
+    .slice(0, 255)
+  return safe || 'upload.bin'
+}
+
 export function requiresContentInspection(filename: string): boolean {
   return encryptedExtensions.has(fileExtension(filename))
 }

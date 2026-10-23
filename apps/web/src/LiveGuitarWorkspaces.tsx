@@ -1,6 +1,10 @@
 import {
   midiFrequency,
+  TUNER_INSTRUMENTS,
+  tunerInstrument,
+  tunerReadingForNearestTarget,
   tunerReadingForTarget,
+  type TunerInstrumentId,
 } from '@gts/core'
 import {
   Activity,
@@ -14,7 +18,11 @@ import {
   Trash2,
   Volume2,
 } from 'lucide-react'
-import { useState, type CSSProperties } from 'react'
+import {
+  useEffect,
+  useState,
+  type CSSProperties,
+} from 'react'
 import type { LiveGuitarController } from './useLiveGuitar'
 
 interface WorkspaceProps {
@@ -23,14 +31,21 @@ interface WorkspaceProps {
   t: (source: string) => string
 }
 
-const standardTuning = [
-  { midi: 40, note: 'E2', string: 6 },
-  { midi: 45, note: 'A2', string: 5 },
-  { midi: 50, note: 'D3', string: 4 },
-  { midi: 55, note: 'G3', string: 3 },
-  { midi: 59, note: 'B3', string: 2 },
-  { midi: 64, note: 'E4', string: 1 },
-] as const
+interface TunerTracePoint {
+  cents: number
+  strength: number
+  voiced: boolean
+}
+
+const tunerTraceLength = 48
+
+function normalizedInputLevel(level: number): number {
+  if (!Number.isFinite(level) || level <= 0) return 0
+  return Math.max(
+    0,
+    Math.min(1, (20 * Math.log10(level) + 72) / 54),
+  )
+}
 
 function InputToggle({
   active,
@@ -63,16 +78,25 @@ export function TunerWorkspace({
   t,
 }: WorkspaceProps) {
   const [targetMidi, setTargetMidi] = useState<number | null>(null)
+  const [trace, setTrace] = useState<TunerTracePoint[]>([])
   const active =
     controller.status === 'listening' && controller.mode === 'tuner'
-  const target = standardTuning.find(
+  const instrument = tunerInstrument(controller.tunerInstrument)
+  const target = instrument.strings.find(
     (candidate) => candidate.midi === targetMidi,
   )
+  const automaticReading = controller.reading
+    ? tunerReadingForNearestTarget(
+        controller.reading,
+        instrument.strings.map((string) => string.midi),
+      )
+    : null
   const reading =
     controller.reading && targetMidi !== null
       ? tunerReadingForTarget(controller.reading, targetMidi)
-      : controller.reading
+      : automaticReading ?? controller.reading
   const cents = reading?.cents ?? 0
+  const signalStrength = normalizedInputLevel(controller.level)
   const inTune = Boolean(reading && Math.abs(cents) <= 3)
   const stateLabel = !active
     ? t('调音器已停止')
@@ -88,7 +112,39 @@ export function TunerWorkspace({
     : target?.note ?? '--'
   const meterStyle = {
     '--tuner-position': `${50 + Math.max(-50, Math.min(50, cents))}%`,
+    '--tuner-signal-height': `${54 + signalStrength * 12}px`,
   } as CSSProperties
+  const traceSlots = Array.from<TunerTracePoint | null>({
+    length: tunerTraceLength,
+  }).fill(null)
+  trace.forEach((point, index) => {
+    traceSlots[tunerTraceLength - trace.length + index] = point
+  })
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      if (!active) {
+        setTrace([])
+        return
+      }
+      setTrace((current) => [
+        ...current,
+        {
+          cents: reading?.cents ?? current.at(-1)?.cents ?? 0,
+          strength: signalStrength,
+          voiced: reading !== null,
+        },
+      ].slice(-tunerTraceLength))
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [active, reading, signalStrength])
+
+  const selectInstrument = (instrumentId: TunerInstrumentId) => {
+    setTargetMidi(null)
+    setTrace([])
+    controller.setTunerInstrument(instrumentId)
+  }
+
   return (
     <section className="live-tool tuner-workspace" aria-labelledby="tuner-title">
       <header>
@@ -115,7 +171,35 @@ export function TunerWorkspace({
         />
       </header>
 
-      <div className={`tuner-stage${inTune ? ' is-in-tune' : ''}`}>
+      <div
+        className={`tuner-stage${inTune ? ' is-in-tune' : ''}${
+          signalStrength > 0 ? ' has-signal' : ''
+        }`}
+        style={meterStyle}
+      >
+        <div
+          className="tuner-instrument-tabs"
+          role="tablist"
+          aria-label={t('选择调音乐器')}
+        >
+          {TUNER_INSTRUMENTS.map((candidate) => {
+            const selected = candidate.id === instrument.id
+            return (
+              <button
+                className={selected ? 'is-active' : ''}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                tabIndex={selected ? 0 : -1}
+                onClick={() => selectInstrument(candidate.id)}
+                key={candidate.id}
+              >
+                {t(candidate.label)}
+              </button>
+            )
+          })}
+        </div>
+
         <div className="tuner-readout">
           <span>
             {target
@@ -150,7 +234,6 @@ export function TunerWorkspace({
             aria-valuemax={50}
             aria-valuenow={Number(cents.toFixed(1))}
             role="meter"
-            style={meterStyle}
           >
             <div aria-hidden="true">
               {Array.from({ length: 21 }, (_, index) => {
@@ -180,6 +263,49 @@ export function TunerWorkspace({
           </div>
         </div>
 
+        <div
+          className="tuner-trace"
+          aria-label={t('声音轨迹')}
+          data-active={active}
+        >
+          <div className="tuner-trace-heading">
+            <span>{t('声音轨迹')}</span>
+            <b>
+              {controller.level > 0
+                ? `${Math.max(-72, 20 * Math.log10(controller.level)).toFixed(1)} dB`
+                : '-- dB'}
+            </b>
+          </div>
+          <div className="tuner-trace-track" aria-hidden="true">
+            {traceSlots.map((point, index) => (
+              <i
+                className={
+                  point
+                    ? point.voiced
+                      ? 'is-voiced'
+                      : 'has-point'
+                    : 'is-empty'
+                }
+                style={
+                  {
+                    '--trace-position': `${
+                      50 -
+                      Math.max(-50, Math.min(50, point?.cents ?? 0))
+                    }%`,
+                    '--trace-height': `${
+                      2 + (point?.strength ?? 0) * 13
+                    }px`,
+                    '--trace-opacity': (
+                      0.2 + (point?.strength ?? 0) * 0.8
+                    ).toFixed(3),
+                  } as CSSProperties
+                }
+                key={index}
+              />
+            ))}
+          </div>
+        </div>
+
         <div className="tuner-telemetry">
           <span>
             <Gauge aria-hidden="true" />
@@ -194,7 +320,7 @@ export function TunerWorkspace({
             <i>
               <b
                 style={{
-                  width: `${Math.min(100, controller.level * 850)}%`,
+                  width: `${signalStrength * 100}%`,
                 }}
               />
             </i>
@@ -204,7 +330,9 @@ export function TunerWorkspace({
         <div className="tuner-targets">
           <div>
             <strong>{t('目标弦')}</strong>
-            <small>{t('标准调弦')}</small>
+            <small>
+              {t(instrument.label)} · {t('标准调弦')}
+            </small>
           </div>
           <div className="tuner-strings" aria-label={t('标准调弦')}>
             <button
@@ -216,7 +344,7 @@ export function TunerWorkspace({
               <span>AUTO</span>
               <small>{t('自动')}</small>
             </button>
-            {standardTuning.map((candidate) => {
+            {instrument.strings.map((candidate) => {
               const detected =
                 reading &&
                 reading.midi === candidate.midi &&

@@ -1847,19 +1847,15 @@ function App({ application = studioApplication }: AppProps) {
       return
     }
     const currentPosition = playbackPositionRef.current
-    const firstMeasureStart = scoreProject?.tab.measures[0]?.start ?? 0
     if (
       loopEnabled &&
       (currentPosition < loopRange.start || currentPosition >= loopRange.end)
     ) {
       seekPosition(loopRange.start)
-    } else if (countInBars > 0) {
-      if (currentPosition < firstMeasureStart) {
-        seekPosition(firstMeasureStart)
-      }
     }
+    const firstMeasureStart = scoreProject?.tab.measures[0]?.start ?? 0
     const startsAtSongOpening =
-      Math.abs(playbackPositionRef.current - firstMeasureStart) <= 0.05
+      playbackPositionRef.current <= firstMeasureStart + 0.05
     const shouldCountIn =
       countInBars > 0 &&
       startsAtSongOpening &&
@@ -2514,7 +2510,7 @@ function App({ application = studioApplication }: AppProps) {
           </span>
         </div>
         <div className="header-actions">
-          {job && !jobTerminal ? (
+          {job && !jobTerminal && !importOpen ? (
             <button
               className="background-job-button"
               type="button"
@@ -4853,7 +4849,7 @@ function App({ application = studioApplication }: AppProps) {
                             {mediaSessionRecovery.sessionMode ===
                             'isolated-login'
                               ? t(
-                                  '即使原浏览器已登录，Windows Chromium 登录 Cookie 仍受系统加密保护。请在隔离窗口完成一次登录；仅导出目标站点 Cookie，并在任务结束后删除。',
+                                  'Windows 会保护 Chromium 登录 Cookie。请在隔离窗口登录一次；登录状态仅在本次应用运行期间复用，每次任务导出的临时 Cookie 会在任务结束后删除。',
                                 )
                               : language === 'en-US'
                               ? `Read ${mediaSessionRecovery.browser.label}'s default profile cookies for this retry only. Cookies are not stored or uploaded.`
@@ -4938,7 +4934,7 @@ function App({ application = studioApplication }: AppProps) {
                       <strong>{t('使用 QQ 音乐网页登录授权')}</strong>
                       <p>
                         {t(
-                          '应用会优先复用当前 QQ 音乐客户端登录态；仅在客户端会话令牌不可读时使用本次隔离授权，任务结束后立即删除。',
+                          '应用会优先复用当前 QQ 音乐客户端登录态；客户端会话令牌不可读时可使用隔离登录。本次运行可复用网页登录状态，每次任务导出的临时凭据会在任务结束后删除。',
                         )}
                       </p>
                     </div>

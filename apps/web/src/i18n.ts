@@ -141,6 +141,9 @@ const english: Record<string, string> = {
   '自动': 'Auto',
   '目标弦': 'Target string',
   '标准调弦': 'Standard tuning',
+  '选择调音乐器': 'Choose tuning instrument',
+  '尤克里里': 'Ukulele',
+  '声音轨迹': 'Sound trace',
   '清空实时曲谱': 'Clear live score',
   '开始实时记谱': 'Start live transcription',
   '停止实时记谱': 'Stop live transcription',
@@ -254,12 +257,12 @@ const english: Record<string, string> = {
   '使用系统默认浏览器登录状态':
     'Use the system default browser session',
   '在应用内登录后重试': 'Sign in within the app and retry',
-  '即使原浏览器已登录，Windows Chromium 登录 Cookie 仍受系统加密保护。请在隔离窗口完成一次登录；仅导出目标站点 Cookie，并在任务结束后删除。':
-    'Even when the original browser is signed in, Windows protects Chromium cookies with system encryption. Sign in once within an isolated window; only target-site cookies are exported and deleted when the task ends.',
+  'Windows 会保护 Chromium 登录 Cookie。请在隔离窗口登录一次；登录状态仅在本次应用运行期间复用，每次任务导出的临时 Cookie 会在任务结束后删除。':
+    'Windows protects Chromium sign-in cookies. Sign in once in the isolated window; the session is reused only while this app is running, and each temporary task cookie file is deleted when that task ends.',
   '打开隔离登录窗口': 'Open isolated sign-in',
   '使用 QQ 音乐网页登录授权': 'Authorize with QQ Music web sign-in',
-  '应用会优先复用当前 QQ 音乐客户端登录态；仅在客户端会话令牌不可读时使用本次隔离授权，任务结束后立即删除。':
-    'The app first reuses the active QQ Music desktop session. This isolated authorization is used only when that session token is unavailable and is deleted when the task ends.',
+  '应用会优先复用当前 QQ 音乐客户端登录态；客户端会话令牌不可读时可使用隔离登录。本次运行可复用网页登录状态，每次任务导出的临时凭据会在任务结束后删除。':
+    'The app first reuses the active QQ Music desktop session. If that token is unavailable, isolated web sign-in can be reused for this app run; each temporary task credential file is deleted when that task ends.',
   '登录并重试': 'Sign in and retry',
   '打开原链接登录': 'Open original link to sign in',
   '确认并重试': 'Confirm and retry',

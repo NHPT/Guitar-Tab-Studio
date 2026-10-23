@@ -32,6 +32,7 @@ import {
   stringsAt,
 } from './validation.js'
 import { tempoMapAt } from './timing.js'
+import { repairLegacyUtf8Mojibake } from './media.js'
 
 const platformIds = [
   'upload',
@@ -99,6 +100,7 @@ const tuning = ['E4', 'B3', 'G3', 'D3', 'A2', 'E2'] as const
 
 function sourceAt(value: unknown, path: string): SourceDescriptor {
   const source = recordAt(value, path)
+  const filename = optionalStringAt(source.filename, `${path}.filename`)
   const authorizedMedia =
     source.authorizedMedia === undefined
       ? undefined
@@ -107,7 +109,10 @@ function sourceAt(value: unknown, path: string): SourceDescriptor {
     kind: enumAt(source.kind, platformIds, `${path}.kind`),
     label: stringAt(source.label, `${path}.label`),
     url: optionalStringAt(source.url, `${path}.url`),
-    filename: optionalStringAt(source.filename, `${path}.filename`),
+    filename:
+      filename === undefined
+        ? undefined
+        : repairLegacyUtf8Mojibake(filename),
     authorizedMedia: authorizedMedia
       ? {
           provider: enumAt(
@@ -568,6 +573,17 @@ export function migrateStudioProject(value: unknown): StudioProject {
   const tracks = arrayAt(project.tracks, 'project.tracks').map(
     (track, index) => stemTrackAt(track, `project.tracks[${index}]`),
   )
+  const source = sourceAt(project.source, 'project.source')
+  const storedTitle = stringAt(project.title, 'project.title')
+  const repairedTitle = repairLegacyUtf8Mojibake(storedTitle)
+  const sourceTitle = source.filename?.replace(/\.[^.]+$/u, '').trim()
+  const title =
+    repairedTitle === storedTitle &&
+    /[\u0080-\u009f]/u.test(storedTitle) &&
+    source.kind === 'upload' &&
+    sourceTitle
+      ? sourceTitle
+      : repairedTitle
   const tab = tabDocumentAt(project.tab, 'project.tab')
   const transcriptionModel =
     project.transcriptionModel === undefined
@@ -618,9 +634,9 @@ export function migrateStudioProject(value: unknown): StudioProject {
   const migrated: StudioProject = {
     schemaVersion: STUDIO_PROJECT_SCHEMA_VERSION,
     id: stringAt(project.id, 'project.id'),
-    title: stringAt(project.title, 'project.title'),
+    title,
     artist: stringAt(project.artist, 'project.artist'),
-    source: sourceAt(project.source, 'project.source'),
+    source,
     bpm: numberAt(project.bpm, 'project.bpm'),
     key: stringAt(project.key, 'project.key'),
     duration: numberAt(project.duration, 'project.duration'),

@@ -11,7 +11,9 @@ import {
   describeWorkerFailure,
   detectPlatform,
   executeWorker,
+  mergeAcquiredSourceMetadata,
   normalizeSharedUrl,
+  parseAcquiredSourceMetadata,
   parseWorkerProgress,
   resolveInferenceExecution,
   sourceFromLink,
@@ -67,6 +69,44 @@ test('accepts only structured worker progress and caps incomplete jobs below 100
     ),
     null,
   )
+})
+
+test('keeps acquired page metadata while preserving decoded duration', () => {
+  const acquired = parseAcquiredSourceMetadata({
+    title: '  示例标题  ',
+    artist: '示例歌手',
+    duration: 300,
+    webpage_url: 'https://www.bilibili.com/video/BV1fixture',
+  })
+  assert.deepEqual(acquired, {
+    title: '示例标题',
+    artist: '示例歌手',
+    webpage_url: 'https://www.bilibili.com/video/BV1fixture',
+  })
+
+  const analysis = mergeAcquiredSourceMetadata(
+    {
+      version: 10,
+      bpm: 120,
+      metadata: {
+        title: 'temporary-source-hash',
+        artist: '本地上传',
+        duration: 182.5,
+      },
+      stems: {},
+      notes: [],
+      chords: [],
+      warnings: [],
+    },
+    acquired,
+  )
+
+  assert.deepEqual(analysis.metadata, {
+    title: '示例标题',
+    artist: '示例歌手',
+    duration: 182.5,
+    webpage_url: 'https://www.bilibili.com/video/BV1fixture',
+  })
 })
 
 test('preserves UTF-8 progress text split across worker output chunks', {
@@ -585,7 +625,6 @@ test('exposes separate guitar tracks only when each track has its own TAB', () =
       label: 'Two confirmed guitars',
       filename: 'two-guitars.wav',
     },
-    'job-two-guitars',
   )
 
   assert.deepEqual(
@@ -599,6 +638,56 @@ test('exposes separate guitar tracks only when each track has its own TAB', () =
     ['guitar-1', 'guitar-2'],
   )
   assert.notEqual(project.guitarParts[0].tab, project.guitarParts[1].tab)
+})
+
+test('uses the original upload filename and online artist instead of worker hashes', () => {
+  const local = workerProject(
+    {
+      version: 10,
+      bpm: 120,
+      metadata: {
+        title: '9e107d9d372bb6826bd81d3542a419d6',
+        artist: '本地上传',
+        duration: 12,
+      },
+      stems: {},
+      notes: [],
+      chords: [],
+      warnings: [],
+    },
+    {
+      kind: 'upload',
+      label: '本地上传',
+      filename: '真实歌曲标题.flac',
+    },
+  )
+  assert.equal(local.title, '真实歌曲标题')
+  assert.equal(local.artist, '未知艺术家')
+  assert.equal(local.source.label, '本地上传')
+
+  const online = workerProject(
+    {
+      version: 10,
+      bpm: 120,
+      metadata: {
+        title: '页面歌曲标题',
+        artist: '页面歌手',
+        duration: 12,
+      },
+      stems: {},
+      notes: [],
+      chords: [],
+      warnings: [],
+    },
+    {
+      kind: 'bilibili',
+      label: '哔哩哔哩',
+      url: 'https://www.bilibili.com/video/BV1fixture',
+    },
+  )
+  assert.equal(online.title, '页面歌曲标题')
+  assert.equal(online.artist, '页面歌手')
+  assert.equal(online.source.label, '页面歌手')
 })
 
 test('maps worker technique candidates and only valid note relations', () => {

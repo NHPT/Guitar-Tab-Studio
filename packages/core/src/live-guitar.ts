@@ -15,6 +15,55 @@ const noteNames = [
 
 const openStringMidi = [64, 59, 55, 50, 45, 40] as const
 
+export type TunerInstrumentId = 'guitar' | 'bass' | 'ukulele'
+
+export interface TunerString {
+  midi: number
+  note: string
+  string: number
+}
+
+export interface TunerInstrument {
+  id: TunerInstrumentId
+  label: string
+  strings: readonly TunerString[]
+}
+
+export const TUNER_INSTRUMENTS: readonly TunerInstrument[] = [
+  {
+    id: 'guitar',
+    label: '吉他',
+    strings: [
+      { midi: 40, note: 'E2', string: 6 },
+      { midi: 45, note: 'A2', string: 5 },
+      { midi: 50, note: 'D3', string: 4 },
+      { midi: 55, note: 'G3', string: 3 },
+      { midi: 59, note: 'B3', string: 2 },
+      { midi: 64, note: 'E4', string: 1 },
+    ],
+  },
+  {
+    id: 'bass',
+    label: '贝斯',
+    strings: [
+      { midi: 28, note: 'E1', string: 4 },
+      { midi: 33, note: 'A1', string: 3 },
+      { midi: 38, note: 'D2', string: 2 },
+      { midi: 43, note: 'G2', string: 1 },
+    ],
+  },
+  {
+    id: 'ukulele',
+    label: '尤克里里',
+    strings: [
+      { midi: 67, note: 'G4', string: 4 },
+      { midi: 60, note: 'C4', string: 3 },
+      { midi: 64, note: 'E4', string: 2 },
+      { midi: 69, note: 'A4', string: 1 },
+    ],
+  },
+]
+
 export interface DetectedPitch {
   frequency: number
   confidence: number
@@ -53,6 +102,16 @@ function median(values: readonly number[]): number {
 
 export function midiFrequency(midi: number): number {
   return 440 * 2 ** ((midi - 69) / 12)
+}
+
+export function tunerInstrument(
+  instrumentId: TunerInstrumentId,
+): TunerInstrument {
+  return (
+    TUNER_INSTRUMENTS.find(
+      (instrument) => instrument.id === instrumentId,
+    ) ?? TUNER_INSTRUMENTS[0]
+  )
 }
 
 export function tunerReading(
@@ -107,6 +166,29 @@ export function tunerReadingForTarget(
     note: noteNames[(targetMidi + 120) % 12],
     octave: Math.floor(targetMidi / 12) - 1,
     cents: clamp((exactMidi - targetMidi) * 100, -50, 50),
+  }
+}
+
+export function tunerReadingForNearestTarget(
+  reading: TunerReading,
+  targetMidis: readonly number[],
+  maximumDistanceCents = 250,
+): TunerReading | null {
+  const exactMidi = 69 + 12 * Math.log2(reading.frequency / 440)
+  const targetMidi = targetMidis
+    .filter(Number.isInteger)
+    .map((midi) => ({
+      midi,
+      distance: Math.abs((exactMidi - midi) * 100),
+    }))
+    .sort((left, right) => left.distance - right.distance)[0]
+  if (!targetMidi || targetMidi.distance > maximumDistanceCents) return null
+  return {
+    ...reading,
+    midi: targetMidi.midi,
+    note: noteNames[(targetMidi.midi + 120) % 12],
+    octave: Math.floor(targetMidi.midi / 12) - 1,
+    cents: clamp((exactMidi - targetMidi.midi) * 100, -50, 50),
   }
 }
 
@@ -186,6 +268,8 @@ export function detectFundamentalFrequency(
   minimumFrequency = 70,
   maximumFrequency = 1200,
   preferredFrequencies: readonly number[] = [],
+  minimumLevel = 0.006,
+  preferredToleranceCents = 70,
 ): DetectedPitch | null {
   if (
     input.length < 512 ||
@@ -213,7 +297,7 @@ export function detectFundamentalFrequency(
     energy += samples[index] ** 2
   }
   const level = Math.sqrt(energy / length)
-  if (level < 0.006) return null
+  if (level < minimumLevel) return null
 
   const effectiveRate = sampleRate / decimation
   const minimumLag = Math.max(
@@ -247,7 +331,7 @@ export function detectFundamentalFrequency(
         : 1
   }
   if (preferredFrequencies.length > 0) {
-    const toleranceRatio = 2 ** (70 / 1200)
+    const toleranceRatio = 2 ** (preferredToleranceCents / 1200)
     const candidates: Array<{ lag: number; value: number }> = []
     for (const frequency of preferredFrequencies) {
       if (
@@ -327,17 +411,32 @@ export function detectFundamentalFrequency(
   }
 }
 
+export function detectTunerFrequency(
+  input: Float32Array,
+  sampleRate: number,
+  targetMidis: readonly number[],
+): DetectedPitch | null {
+  const targetFrequencies = targetMidis
+    .filter(Number.isInteger)
+    .map(midiFrequency)
+  if (targetFrequencies.length === 0) return null
+  const rangeMargin = 2 ** (260 / 1200)
+  return detectFundamentalFrequency(
+    input,
+    sampleRate,
+    Math.min(...targetFrequencies) / rangeMargin,
+    Math.max(...targetFrequencies) * rangeMargin,
+    targetFrequencies,
+    0.001,
+    70,
+  )
+}
+
 export function detectStandardGuitarFrequency(
   input: Float32Array,
   sampleRate: number,
 ): DetectedPitch | null {
-  return detectFundamentalFrequency(
-    input,
-    sampleRate,
-    70,
-    400,
-    openStringMidi.map(midiFrequency),
-  )
+  return detectTunerFrequency(input, sampleRate, openStringMidi)
 }
 
 export function guitarPositionForPitch(

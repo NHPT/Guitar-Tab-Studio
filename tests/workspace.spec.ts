@@ -282,6 +282,42 @@ test('counts in before playback and filters the rhythm library', async ({
   await expect(page.locator('.count-in-status')).toHaveCount(0)
 })
 
+test('schedules exactly one click per count-in beat', async ({ page }) => {
+  await page.addInitScript(() => {
+    const trackedWindow = window as typeof window & {
+      __gtsOscillatorStarts: number[]
+    }
+    trackedWindow.__gtsOscillatorStarts = []
+    const createOscillator = AudioContext.prototype.createOscillator
+    AudioContext.prototype.createOscillator = function () {
+      const oscillator = createOscillator.call(this)
+      const start = oscillator.start.bind(oscillator)
+      oscillator.start = (when?: number) => {
+        trackedWindow.__gtsOscillatorStarts.push(when ?? this.currentTime)
+        start(when)
+      }
+      return oscillator
+    }
+  })
+
+  await page.goto('/')
+  await page.getByLabel('预备小节数').selectOption('1')
+  await page.getByLabel('预备节拍音色').selectOption('click')
+  await page.getByRole('button', { name: '播放', exact: true }).click()
+  await expect(page.locator('.count-in-status')).toContainText('预备 1/1 小节')
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as typeof window & {
+            __gtsOscillatorStarts: number[]
+          }).__gtsOscillatorStarts.length,
+      ),
+    )
+    .toBe(4)
+  await page.getByRole('button', { name: '取消预备' }).click()
+})
+
 test('runs the metronome and drum machine without starting song playback', async ({
   page,
 }) => {
@@ -374,6 +410,12 @@ test('opens the tuner and live transcription as separate tools', async ({
   await expect(
     page.getByRole('button', { name: '开始调音' }),
   ).toBeVisible()
+  const instrumentTabs = page.getByRole('tablist', {
+    name: '选择调音乐器',
+  })
+  await expect(
+    instrumentTabs.getByRole('tab', { name: '吉他' }),
+  ).toHaveAttribute('aria-selected', 'true')
   await expect(page.locator('.tuner-strings button > span')).toHaveText([
     'AUTO',
     'E2',
@@ -383,6 +425,23 @@ test('opens the tuner and live transcription as separate tools', async ({
     'B3',
     'E4',
   ])
+  await instrumentTabs.getByRole('tab', { name: '贝斯' }).click()
+  await expect(page.locator('.tuner-strings button > span')).toHaveText([
+    'AUTO',
+    'E1',
+    'A1',
+    'D2',
+    'G2',
+  ])
+  await instrumentTabs.getByRole('tab', { name: '尤克里里' }).click()
+  await expect(page.locator('.tuner-strings button > span')).toHaveText([
+    'AUTO',
+    'G4',
+    'C4',
+    'E4',
+    'A4',
+  ])
+  await instrumentTabs.getByRole('tab', { name: '吉他' }).click()
   const lowE = page.getByRole('button', { name: '6弦 E2' })
   await lowE.click()
   await expect(lowE).toHaveAttribute('aria-pressed', 'true')
@@ -439,7 +498,7 @@ test('stabilizes a harmonic-rich low E as the correct guitar string', async ({
         }
         await context.resume()
         Object.assign(window, {
-          __tunerFixture: { context, destination, nodes },
+          __tunerFixture: { context, destination, master, nodes },
         })
         return destination.stream
       },
@@ -454,37 +513,120 @@ test('stabilizes a harmonic-rich low E as the correct guitar string', async ({
   await expect(page.locator('.tuner-meter-labels strong')).toContainText(
     '0.0 cent',
   )
+  await expect
+    .poll(() => page.locator('.tuner-trace-track i.is-voiced').count())
+    .toBeGreaterThan(0)
+  await page.evaluate(() => {
+    const fixture = (
+      window as typeof window & {
+        __tunerFixture: { master: GainNode }
+      }
+    ).__tunerFixture
+    fixture.master.gain.value = 0.003
+  })
+  await page.waitForTimeout(900)
+  await expect(page.locator('.tuner-note strong')).toHaveText('E2')
+  await expect(page.locator('.tuner-readout > b')).toHaveText('音准准确')
+
+  await page.evaluate(() => {
+    const fixture = (
+      window as typeof window & {
+        __tunerFixture: { master: GainNode }
+      }
+    ).__tunerFixture
+    fixture.master.gain.value = 0
+  })
+  await expect(page.locator('.tuner-note strong')).toHaveText('--', {
+    timeout: 3_000,
+  })
+  await expect(page.locator('.tuner-readout > b')).toHaveText('等待音频输入')
   await page.getByRole('button', { name: '停止调音' }).click()
 })
 
-test('starts the song at its first detected measure after count-in', async ({
+test('keeps the song at its real opening during and after count-in', async ({
   page,
 }) => {
-  const projectId = 'a1028519-3b28-4160-bbdb-d0f94871b2ee'
+  await page.addInitScript(() => {
+    const trackedWindow = window as typeof window & {
+      __gtsTrackedAudio: HTMLAudioElement[]
+    }
+    trackedWindow.__gtsTrackedAudio = []
+    const NativeAudio = window.Audio
+    window.Audio = new Proxy(NativeAudio, {
+      construct(Target, argumentsList) {
+        const audio = Reflect.construct(
+          Target,
+          argumentsList,
+        ) as HTMLAudioElement
+        trackedWindow.__gtsTrackedAudio.push(audio)
+        return audio
+      },
+    })
+  })
   const response = await page.request.get(
-    `http://127.0.0.1:8787/api/projects/${projectId}`,
+    'http://127.0.0.1:8787/api/projects/demo',
   )
   const project = await response.json()
-  const firstMeasureStart = project.tab.measures[0].start
+  const firstMeasureStart = 5
+  project.tab.measures[0].start = firstMeasureStart
+  for (const part of project.guitarParts ?? []) {
+    part.tab.measures[0].start = firstMeasureStart
+  }
+  await page.route('**/api/projects/demo', async (route) => {
+    await route.fulfill({ json: project })
+  })
 
-  await page.goto(`/?project=${projectId}`)
-  await expect(page.getByText('通用基线', { exact: true })).toBeVisible()
-  await expect(page.getByText(/4\/4 · 117–129 BPM · \d+\/46 可用/)).toBeVisible()
+  await page.goto('/')
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as typeof window & {
+          __gtsTrackedAudio: HTMLAudioElement[]
+        }).__gtsTrackedAudio.length,
+      ),
+    )
+    .toBe(project.tracks.length)
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        Math.min(
+          ...(window as typeof window & {
+            __gtsTrackedAudio: HTMLAudioElement[]
+          }).__gtsTrackedAudio.map((audio) => audio.readyState),
+        ),
+      ),
+      { timeout: 20_000 },
+    )
+    .toBeGreaterThanOrEqual(1)
   await page.getByLabel('播放可视化模式').selectOption('ecg')
   await page.getByLabel('预备小节数').selectOption('1')
   await page.getByRole('button', { name: '播放', exact: true }).click()
   await expect(page.getByRole('button', { name: '取消预备' })).toBeVisible()
-  await expect(page.getByText('预备 1/1 小节 · 123 BPM')).toBeVisible()
+  await expect(page.locator('.count-in-status')).toContainText('预备 1/1 小节')
 
   const cursorPercent = await page
     .locator('.waveform-cursor')
     .evaluate((cursor) => Number.parseFloat((cursor as HTMLElement).style.left))
-  expect(cursorPercent).toBeCloseTo(
-    (firstMeasureStart / project.duration) * 100,
-    1,
-  )
+  expect(cursorPercent).toBeCloseTo(0, 4)
+  expect(
+    await page.evaluate(() =>
+      (window as typeof window & {
+        __gtsTrackedAudio: HTMLAudioElement[]
+      }).__gtsTrackedAudio.map((audio) => audio.currentTime),
+    ),
+  ).toEqual(Array.from({ length: project.tracks.length }, () => 0))
 
-  await page.getByRole('button', { name: '取消预备' }).click()
+  await expect(page.getByRole('button', { name: '暂停' })).toBeVisible({
+    timeout: 6_000,
+  })
+  await page.getByRole('button', { name: '暂停' }).click()
+  const playbackTimes = await page.evaluate(() =>
+    (window as typeof window & {
+      __gtsTrackedAudio: HTMLAudioElement[]
+    }).__gtsTrackedAudio.map((audio) => audio.currentTime),
+  )
+  expect(playbackTimes.length).toBe(project.tracks.length)
+  expect(Math.max(...playbackTimes)).toBeLessThan(firstMeasureStart)
 })
 
 test('uses the project tempo for count-in when the first measure is irregular', async ({
@@ -803,7 +945,7 @@ test('uses isolated login when Windows protects Edge cookies', async ({
   ).toBeUndefined()
 
   await expect(
-    dialog.getByText(/即使原浏览器已登录.*Windows Chromium.*系统加密保护/u),
+    dialog.getByText(/Windows.*Chromium.*本次应用运行期间复用/u),
   ).toBeVisible()
   await expect(
     dialog.getByRole('button', { name: '打开原链接登录' }),
@@ -811,15 +953,15 @@ test('uses isolated login when Windows protects Edge cookies', async ({
   await dialog.getByRole('button', { name: '本地上传' }).click()
   await expect(dialog.locator('.dialog-error')).toHaveCount(0)
   await expect(
-    dialog.getByText(/即使原浏览器已登录.*Windows Chromium.*系统加密保护/u),
+    dialog.getByText(/Windows.*Chromium.*本次应用运行期间复用/u),
   ).toHaveCount(0)
   await dialog.getByRole('button', { name: '在线链接' }).click()
   await expect(
-    dialog.getByText(/即使原浏览器已登录.*Windows Chromium.*系统加密保护/u),
+    dialog.getByText(/Windows.*Chromium.*本次应用运行期间复用/u),
   ).toHaveCount(0)
   await dialog.getByRole('button', { name: '开始分析' }).click()
   await expect(
-    dialog.getByText(/即使原浏览器已登录.*Windows Chromium.*系统加密保护/u),
+    dialog.getByText(/Windows.*Chromium.*本次应用运行期间复用/u),
   ).toBeVisible()
   await dialog.getByRole('button', { name: '打开隔离登录窗口' }).click()
   await expect
@@ -891,6 +1033,9 @@ test('shows the numeric percentage while an import job is running', async ({ pag
   const progress = page.getByRole('progressbar', { name: '歌曲分析进度' })
   await expect(progress).toHaveAttribute('aria-valuenow', '65')
   await expect(page.locator('.job-progress-value')).toHaveText('65%')
+  await expect(
+    page.getByRole('button', { name: '打开分析进度' }),
+  ).toHaveCount(0)
   await page
     .getByRole('dialog', { name: '导入歌曲' })
     .getByRole('button', { name: '关闭窗口' })

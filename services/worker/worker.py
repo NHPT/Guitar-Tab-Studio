@@ -4758,6 +4758,19 @@ def main() -> None:
     if not source.exists():
         raise FileNotFoundError(source)
     if arguments.acquire_only:
+        acquired_metadata = {
+            key: metadata[key]
+            for key in ("title", "artist", "webpage_url")
+            if metadata.get(key) is not None
+        }
+        (output / "source.metadata.json").write_text(
+            json.dumps(
+                acquired_metadata,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         emit_progress(100, "acquiring", "在线媒体已保存到本机临时目录")
         return
 

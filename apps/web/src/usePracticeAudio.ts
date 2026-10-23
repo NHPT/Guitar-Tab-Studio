@@ -806,15 +806,6 @@ export function usePracticeAudio({
         elapsed += beatDurations[beat - 1] / playbackSpeed
       }
       const songStartsAt = startsAt + elapsed
-      const songStartNodes = schedulePercussion(
-        context,
-        'click-high',
-        kit,
-        0.82 * volume,
-        songStartsAt,
-        practiceOutput,
-      )
-      nodes.push(...songStartNodes)
 
       if (project && !hasRealStems && sourceScoreNotes.length === 0) {
         const beatIndex = Math.floor(songPosition / (60 / project.bpm))
@@ -892,9 +883,6 @@ export function usePracticeAudio({
         countInNodesRef.current = []
         onComplete()
       }
-      songStartNodes[0]?.addEventListener('ended', finishCountIn, {
-        once: true,
-      })
       timers.push(
         window.setTimeout(
           finishCountIn,

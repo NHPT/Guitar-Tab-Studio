@@ -332,6 +332,7 @@ export class LocalApiService implements StudioApiTransport {
     qqMusicCredentialFile?: string,
   ): Promise<AnalysisJob> {
     const body = new FormData()
+    body.append('originalName', upload.name)
     const arrayBuffer = new ArrayBuffer(upload.bytes.byteLength)
     new Uint8Array(arrayBuffer).set(upload.bytes)
     body.append(

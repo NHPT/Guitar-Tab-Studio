@@ -2,6 +2,8 @@ export {
   authorizedMediaProvider,
   authorizedMediaProviderForContent,
   detectStandardAudioSignature,
+  normalizeUploadedFilename,
+  repairLegacyUtf8Mojibake,
   requiresAuthorizedMediaDecode,
   requiresContentInspection,
   scoreImageContentValidationError,
