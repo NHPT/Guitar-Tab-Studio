@@ -4,6 +4,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import test from 'node:test'
 import {
+  classifyBeatErrors,
   evaluateBeatGold,
   listBeatEvaluationRuns,
   saveBeatEvaluationRun,
@@ -38,6 +39,14 @@ import {
   submitBeatReview,
   type BeatReviewPackage,
 } from './beat-reviews.js'
+import {
+  beatStructureAudioPath,
+  beatStructureContentDigest,
+  getBeatStructureReview,
+  listBeatStructureReviews,
+  saveBeatStructureDraft,
+  submitBeatStructureReview,
+} from './beat-structure-reviews.js'
 
 function sha256(value: Buffer): string {
   return createHash('sha256').update(value).digest('hex')
@@ -46,10 +55,14 @@ function sha256(value: Buffer): string {
 async function fixtureRoot(): Promise<string> {
   const root = resolve(process.cwd(), '.test-beat-reviews')
   const reviewerRoot = resolve(root, 'reviews', 'reviewer-a')
+  const sourceRoot = resolve(root, 'sources')
   await rm(root, { recursive: true, force: true })
   await mkdir(reviewerRoot, { recursive: true })
   await mkdir(resolve(root, 'analysis'), { recursive: true })
+  await mkdir(sourceRoot, { recursive: true })
   const audio = Buffer.from('RIFF-beat-review-fixture')
+  const sourceAudio = Buffer.from('OggS-full-song-structure-fixture')
+  await writeFile(resolve(sourceRoot, 'song.media'), sourceAudio)
   await writeFile(resolve(reviewerRoot, 'song-01.wav'), audio)
   const review: BeatReviewPackage = {
     schema_version: 2,
@@ -130,6 +143,9 @@ async function fixtureRoot(): Promise<string> {
   await writeFile(
     resolve(root, 'analysis', 'song.json'),
     `${JSON.stringify({
+      source_audio_sha256: sha256(sourceAudio),
+      duration: 15.5,
+      bpm: 60,
       time_signature: [4, 4],
       pickup_beats: 0,
       beats: Array.from({ length: 15 }, (_, index) => index + 0.5),
@@ -137,6 +153,43 @@ async function fixtureRoot(): Promise<string> {
   )
   return root
 }
+
+test('classifies beat timing failures without gold-data leakage', () => {
+  const clean = {
+    true_positive: 16,
+    false_positive: 0,
+    false_negative: 0,
+    precision: 1,
+    recall: 1,
+    f1: 1,
+    mean_error_ms: 5,
+    median_error_ms: 5,
+    p95_error_ms: 8,
+    tolerance_ms: 70,
+  }
+  const halfTempo = {
+    ...clean,
+    true_positive: 8,
+    false_negative: 8,
+    recall: 0.5,
+    f1: 2 / 3,
+  }
+  assert.deepEqual(
+    classifyBeatErrors(16, 8, halfTempo, clean, true, true),
+    ['tempo-half'],
+  )
+  assert.deepEqual(
+    classifyBeatErrors(
+      16,
+      16,
+      { ...clean, median_error_ms: 25, p95_error_ms: 60 },
+      { ...clean, f1: 0.5 },
+      false,
+      false,
+    ),
+    ['timing-offset', 'downbeat-phase', 'meter', 'pickup'],
+  )
+})
 
 test('lists only manifest-backed beat reviews and verifies audio', async () => {
   const root = await fixtureRoot()
@@ -168,6 +221,113 @@ test('lists only manifest-backed beat reviews and verifies audio', async () => {
       () => listBeatReviews('../reviewer-a', root),
       BeatReviewRequestError,
     )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('reviews full-song structure before clip timing without changing clips', async () => {
+  const root = await fixtureRoot()
+  const sourceRoot = resolve(root, 'sources')
+  try {
+    const originalClip = await readFile(
+      resolve(root, 'reviews', 'reviewer-a', 'song-01.json'),
+      'utf8',
+    )
+    const reviews = listBeatStructureReviews('reviewer-a', root)
+    assert.equal(reviews.length, 1)
+    assert.equal(reviews[0].recordingId, 'song')
+    assert.equal(reviews[0].status, 'draft')
+    const document = getBeatStructureReview(
+      'song',
+      'reviewer-a',
+      root,
+      sourceRoot,
+    )
+    assert.equal(document.candidateBeats.length, 15)
+    assert.equal(document.review.first_downbeat_at, 0.5)
+    assert.equal(
+      beatStructureAudioPath('song', root, sourceRoot),
+      resolve(sourceRoot, 'song.media'),
+    )
+
+    const draft = saveBeatStructureDraft(
+      'song',
+      'reviewer-a',
+      {
+        time_signature: [3, 4],
+        pickup_beats: 1,
+        phase_status: 'confirmed',
+        first_downbeat_at: 1.5,
+        meter_changes: [{ at: 8.5, time_signature: [4, 4] }],
+        checks: {
+          meter: true,
+          downbeat_phase: true,
+          pickup: true,
+          meter_changes: false,
+        },
+      },
+      root,
+      sourceRoot,
+    )
+    assert.deepEqual(draft.review.time_signature, [3, 4])
+    assert.equal(draft.review.first_downbeat_at, 1.5)
+    assert.equal(draft.review.meter_changes[0].at, 8.5)
+    assert.throws(
+      () =>
+        submitBeatStructureReview(
+          'song',
+          'reviewer-a',
+          { checks: draft.review.checks },
+          root,
+          sourceRoot,
+        ),
+      /提交前需完成检查/u,
+    )
+    const submitted = submitBeatStructureReview(
+      'song',
+      'reviewer-a',
+      {
+        checks: {
+          meter: true,
+          downbeat_phase: true,
+          pickup: true,
+          meter_changes: true,
+        },
+      },
+      root,
+      sourceRoot,
+      { adminUserId: 'user-a', adminUsername: 'owner' },
+    )
+    assert.equal(submitted.review.status, 'submitted')
+    assert.equal(
+      submitted.review.submission?.content_sha256,
+      beatStructureContentDigest(submitted.review),
+    )
+    assert.equal(
+      await readFile(
+        resolve(root, 'reviews', 'reviewer-a', 'song-01.json'),
+        'utf8',
+      ),
+      originalClip,
+    )
+    const backup = createBeatBackup(root)
+    restoreBeatBackup(backup.id, root)
+    const restoredStructure = JSON.parse(
+      await readFile(
+        resolve(
+          root,
+          '.restores',
+          backup.id,
+          '.test-beat-reviews',
+          'structure-reviews',
+          'reviewer-a',
+          'song.json',
+        ),
+        'utf8',
+      ),
+    ) as { status: string }
+    assert.equal(restoredStructure.status, 'submitted')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

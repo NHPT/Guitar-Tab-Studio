@@ -1,48 +1,41 @@
-# Guitar Tab Studio v0.1.0-preview.15
+# Guitar Tab Studio v0.1.0-preview.16
 
-This desktop preview improves tuner precision and weak-sustain tracking, adds
-an in-tune confirmation sound, and replaces the desktop update prompt with a
-resumable in-app download flow. It remains a functional preview: generated
-notation still requires human review.
+This preview establishes a strict boundary between the user-facing desktop
+application and the Web-only administration system. It also improves beat and
+downbeat analysis and streamlines the full-song review workflow used to
+validate those improvements.
 
 ## Highlights
 
-- The tuner searches a wider detune range and uses spectral harmonic evidence
-  to avoid locking a low string onto an overtone. Fine pitch movement now
-  follows gradual peg adjustments instead of being damped into a stale value.
-- Attack and sustain use separate adaptive gates. A ringing string remains
-  visible down to a much quieter input level, while a delayed release prevents
-  brief signal dips from clearing the reading.
-- The pitch trace retains roughly nine seconds of recent movement so tuning
-  changes remain visible after the initial pick attack.
-- A short confirmation sound plays once after the selected string remains
-  within two cents for about 0.4 seconds. Hysteresis prevents repeated sounds
-  while the reading stays near the target.
-- Update availability and install readiness now use dialogs consistent with
-  the application UI. Active downloads move into a compact progress controller
-  instead of relying on native confirmation prompts.
-- Update downloads can be paused, resumed, cancelled, or retried. HTTP Range
-  requests preserve partial data across pauses and application restarts;
-  explicit cancellation removes the partial file.
-- Completed updates are verified against the release SHA-512 or SHA-256 digest
-  before installation. Existing platform signature checks remain in the update
-  path where signing is available.
+- The desktop package now uses a dedicated renderer entry containing only the
+  user workspace. Admin, review, and community control pages are not included
+  in the packaged renderer.
+- The local desktop API is built without Admin routes, authentication,
+  dashboards, review management, adjudication, training, backup, or gold
+  release endpoints.
+- Electron rejects Admin, review, and community navigation at the main-process
+  boundary. Packaged builds ignore renderer URL overrides.
+- Packaging fails if the desktop renderer or local API contains an Admin route,
+  Admin session, or Admin workspace marker.
+- Beat analysis now preserves stronger full-song phase evidence, changing
+  meters, pickup context, tempo structure, and representative listening
+  positions for human correction.
+- The Web-only beat review flow starts with full-song structure confirmation,
+  then opens a reduced core clip queue while retaining all original candidates.
+  Confirmed structure can be applied without replacing reviewed beat times.
 
-## Cross-Platform Coverage
+## Cross-Platform Builds
 
-- The same update state contract and progress UI are used on packaged macOS and
-  Windows builds.
-- Partial downloads are stored in the application-managed user-data directory
-  and moved to the updater destination only after checksum verification.
-- macOS builds target Apple Silicon. Windows builds target x64.
+- macOS installer and ZIP archive for Apple Silicon.
+- Windows NSIS installer and ZIP archive for x64.
+- Update metadata and blockmaps are generated for both supported platforms.
+- A source TAR.GZ, release notes, and SHA-256 manifest are published with the
+  binary assets.
 
 ## Preview Limitations
 
 - The transcription model has not passed the production gate of TAB F1 0.75
-  and repeated-note recall 0.85. Results still require human review.
-- Tuner performance still depends on microphone placement, room noise, and
-  instrument sustain, although the adaptive gates now tolerate much weaker
-  signals.
+  and repeated-note recall 0.85. Generated notation still requires review.
 - Installers are unsigned and not notarized. macOS Gatekeeper and Windows
   SmartScreen may display warnings.
 - Research providers remain experimental, hidden by default, and subject to
@@ -50,15 +43,16 @@ notation still requires human review.
 
 ## Verification
 
-- Core, API, and desktop suites plus web lint pass with 192 automated checks.
-- Focused browser audio coverage verifies harmonic disambiguation, gradual
-  pitch tracking, weak sustain, delayed release, and one-shot confirmation.
-- Desktop update coverage verifies the available, downloading, paused, resumed,
-  failed, cancelled, and ready states.
-- The packaged Electron preview was checked at desktop and 390-pixel responsive
-  viewports with no horizontal overflow.
-- Release assets include macOS DMG/ZIP, Windows EXE/ZIP, blockmaps,
-  `latest-mac.yml`, `latest.yml`, this release note, and `SHA256SUMS`.
+- Core, API, and desktop unit suites pass with 197 checks; Web lint passes
+  without warnings.
+- The Worker audio-analysis suite passes 78 checks.
+- The Web-only beat review workflow passes 10 desktop and mobile browser tests.
+- Focused score-timing and responsive mobile checks pass in an isolated
+  Playwright runtime.
+- The packaged macOS application loads only the user renderer, has no Admin
+  navigation, and rejects a forced Admin file navigation.
+- CI rebuilds and checks macOS and Windows packages before creating the
+  prerelease.
 
 ## Downloads
 

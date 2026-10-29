@@ -2004,20 +2004,110 @@ def beat_grid_irregularity(beat_times: Iterable[float]) -> float:
     )
     if beats.size < 8:
         return math.inf
-    intervals = np.diff(beats)
-    intervals = intervals[
-        np.isfinite(intervals) & (intervals >= 0.15) & (intervals <= 3.0)
-    ]
+    raw_intervals = np.diff(beats)
+    valid_mask = (
+        np.isfinite(raw_intervals)
+        & (raw_intervals >= 0.15)
+        & (raw_intervals <= 3.0)
+    )
+    intervals = raw_intervals[valid_mask]
     if intervals.size < 7:
         return math.inf
     median_interval = float(np.median(intervals))
     relative_errors = np.abs(intervals / median_interval - 1.0)
     opening_error = float(np.mean(relative_errors[: min(2, len(relative_errors))]))
+    invalid_interval_ratio = 1.0 - intervals.size / max(1, raw_intervals.size)
     return float(
         np.median(relative_errors)
         + np.quantile(relative_errors, 0.9)
         + opening_error * 0.5
+        + invalid_interval_ratio * 2.0
     )
+
+
+def _grid_alignment(
+    reference: Iterable[float],
+    candidate: Iterable[float],
+) -> tuple[float, float | None]:
+    import numpy as np
+
+    reference_beats = sorted(float(value) for value in reference)
+    candidate_beats = sorted(float(value) for value in candidate)
+    if len(reference_beats) < 2 or not candidate_beats:
+        return 0.0, None
+    intervals = np.diff(np.asarray(reference_beats, dtype=np.float64))
+    intervals = intervals[
+        np.isfinite(intervals) & (intervals >= 0.15) & (intervals <= 3.0)
+    ]
+    if intervals.size == 0:
+        return 0.0, None
+    tolerance = min(0.07, max(0.025, float(np.median(intervals)) * 0.2))
+    errors: list[float] = []
+    for beat in candidate_beats:
+        position = bisect_left(reference_beats, beat)
+        neighbours = reference_beats[
+            max(0, position - 1) : min(len(reference_beats), position + 1)
+        ]
+        if neighbours:
+            errors.append(min(abs(beat - value) for value in neighbours))
+    if not errors:
+        return 0.0, None
+    aligned = [error for error in errors if error <= tolerance]
+    coverage = len(aligned) / len(errors)
+    median_error = float(np.median(aligned)) if aligned else None
+    return coverage, median_error
+
+
+def timing_grid_diagnostics(
+    mix_bpm: float,
+    mix_beats: Iterable[float],
+    percussion_bpm: float,
+    percussion_beats: Iterable[float],
+) -> dict[str, object]:
+    mix = [float(value) for value in mix_beats]
+    percussion = [float(value) for value in percussion_beats]
+    ratio = percussion_bpm / max(mix_bpm, 1e-8)
+    if 0.9 <= ratio <= 1.1:
+        relationship = "same-tempo"
+        alignment_reference = mix
+        alignment_candidate = percussion
+    elif 0.45 <= ratio <= 0.55:
+        relationship = "percussion-half-tempo"
+        alignment_reference = mix
+        alignment_candidate = percussion
+    elif 1.8 <= ratio <= 2.2:
+        relationship = "percussion-double-tempo"
+        alignment_reference = percussion
+        alignment_candidate = mix
+    else:
+        relationship = "tempo-mismatch"
+        alignment_reference = mix
+        alignment_candidate = percussion
+    alignment_coverage, median_alignment_error = _grid_alignment(
+        alignment_reference,
+        alignment_candidate,
+    )
+
+    def finite_score(values: list[float]) -> float | None:
+        score = beat_grid_irregularity(values)
+        return round(score, 6) if math.isfinite(score) else None
+
+    return {
+        "mix_bpm": round(float(mix_bpm), 4),
+        "percussion_bpm": round(float(percussion_bpm), 4),
+        "bpm_ratio": round(float(ratio), 6),
+        "relationship": relationship,
+        "mix_beat_count": len(mix),
+        "percussion_beat_count": len(percussion),
+        "mix_irregularity": finite_score(mix),
+        "percussion_irregularity": finite_score(percussion),
+        "alignment_coverage": round(alignment_coverage, 6),
+        "median_alignment_error_ms": (
+            round(median_alignment_error * 1000, 3)
+            if median_alignment_error is not None
+            else None
+        ),
+    }
 
 
 def select_timing_grid(
@@ -2029,30 +2119,59 @@ def select_timing_grid(
     """Prefer a coherent percussion grid without accepting tempo mismatches."""
     mix = [float(value) for value in mix_beats]
     percussion = [float(value) for value in percussion_beats]
-    ratio = percussion_bpm / max(mix_bpm, 1e-8)
-    if (
-        len(percussion) < 16
-        or len(percussion) < len(mix) * 0.75
-        or not 0.9 <= ratio <= 1.1
-    ):
+    diagnostics = timing_grid_diagnostics(
+        mix_bpm,
+        mix,
+        percussion_bpm,
+        percussion,
+    )
+    if len(percussion) < 16:
         return mix, "mix"
     mix_error = beat_grid_irregularity(mix)
     percussion_error = beat_grid_irregularity(percussion)
-    if percussion_error + 0.005 < mix_error:
+    relationship = diagnostics["relationship"]
+    if (
+        relationship == "same-tempo"
+        and len(percussion) >= len(mix) * 0.75
+        and percussion_error + 0.005 < mix_error
+    ):
+        return percussion, "drums"
+    if (
+        relationship == "percussion-half-tempo"
+        and 0.4 <= len(percussion) / max(1, len(mix)) <= 0.6
+        and float(diagnostics["alignment_coverage"]) >= 0.9
+        and diagnostics["median_alignment_error_ms"] is not None
+        and float(diagnostics["median_alignment_error_ms"]) <= 35
+        and percussion_error <= mix_error + 0.005
+    ):
         return percussion, "drums"
     return mix, "mix"
 
 
-def align_beats_to_downbeats(
+def timing_grid_selection_reason(
+    diagnostics: dict[str, object],
+    selected_source: str,
+) -> str:
+    relationship = diagnostics["relationship"]
+    if selected_source == "drums":
+        return (
+            "aligned-half-tempo"
+            if relationship == "percussion-half-tempo"
+            else "lower-grid-irregularity"
+        )
+    if relationship == "percussion-half-tempo":
+        return "half-tempo-alignment-insufficient"
+    if relationship == "same-tempo":
+        return "mix-grid-not-worse"
+    return "tempo-relationship-rejected"
+
+
+def _beat_meter_features(
     beat_times: Iterable[float],
     notes: Iterable[NoteEvent],
-    beats_per_measure: int = 4,
-) -> tuple[list[float], int, float]:
-    """Align beat zero to the strongest recurring harmonic-change phase."""
+) -> tuple[list[float], list[float]]:
     beats = [float(value) for value in beat_times]
     note_list = list(notes)
-    if len(beats) < beats_per_measure * 6 or not note_list:
-        return beats, 0, 0.0
     intervals = [
         current - previous
         for previous, current in zip(beats, beats[1:])
@@ -2064,6 +2183,7 @@ def align_beats_to_downbeats(
         else 0.5
     )
     vectors: list[list[float]] = []
+    attack_strengths: list[float] = []
     for index, start in enumerate(beats):
         end = (
             beats[index + 1]
@@ -2071,20 +2191,23 @@ def align_beats_to_downbeats(
             else start + fallback_interval
         )
         vector = [0.0] * 12
+        attack_strength = 0.0
         for note in note_list:
+            weight = (
+                max(1, note.velocity)
+                / 127.0
+                * max(0.05, note.confidence)
+            )
             overlap = max(
                 0.0,
                 min(end, note.end) - max(start, note.start),
             )
-            if overlap <= 0:
-                continue
-            vector[note.pitch % 12] += (
-                overlap
-                * max(1, note.velocity)
-                / 127.0
-                * max(0.05, note.confidence)
-            )
+            if overlap > 0:
+                vector[note.pitch % 12] += overlap * weight
+            if start <= note.start < end:
+                attack_strength += weight
         vectors.append(vector)
+        attack_strengths.append(attack_strength)
 
     novelty: list[float] = []
     for index, current in enumerate(vectors):
@@ -2101,6 +2224,217 @@ def align_beats_to_downbeats(
                 for left, right in zip(previous, current)
             ) / (previous_norm * current_norm)
             novelty.append(max(0.0, min(1.0, 1.0 - similarity)))
+
+    positive_attacks = sorted(
+        value for value in attack_strengths if value > 0
+    )
+    if positive_attacks:
+        scale_index = round((len(positive_attacks) - 1) * 0.9)
+        attack_scale = max(positive_attacks[scale_index], 1e-8)
+        attacks = [
+            max(0.0, min(1.0, value / attack_scale))
+            for value in attack_strengths
+        ]
+    else:
+        attacks = [0.0] * len(attack_strengths)
+    return novelty, attacks
+
+
+def _average(values: Iterable[float]) -> float:
+    items = list(values)
+    return sum(items) / len(items) if items else 0.0
+
+
+def _meter_candidate_score(
+    novelty: list[float],
+    attacks: list[float],
+    signature: tuple[int, int],
+) -> dict[str, object]:
+    numerator, _denominator = signature
+    margin = numerator
+    usable = list(range(margin, max(margin, len(novelty) - margin)))
+    novelty_profiles = [
+        _average(
+            novelty[index]
+            for index in usable
+            if index % numerator == phase
+        )
+        for phase in range(numerator)
+    ]
+    attack_profiles = [
+        _average(
+            attacks[index]
+            for index in usable
+            if index % numerator == phase
+        )
+        for phase in range(numerator)
+    ]
+    best: dict[str, object] | None = None
+    for phase in range(numerator):
+        other_phases = [
+            candidate
+            for candidate in range(numerator)
+            if candidate != phase
+        ]
+        harmonic_contrast = max(
+            0.0,
+            novelty_profiles[phase]
+            - _average(novelty_profiles[index] for index in other_phases),
+        )
+        accent_contrast = max(
+            0.0,
+            attack_profiles[phase]
+            - _average(attack_profiles[index] for index in other_phases),
+        )
+        primary_values = [
+            attacks[index]
+            for index in usable
+            if index % numerator == phase
+        ]
+        alternating_imbalance = abs(
+            _average(primary_values[::2])
+            - _average(primary_values[1::2])
+        )
+        compound_support = 0.0
+        compound_hierarchy = 0.0
+        score = (
+            harmonic_contrast * 0.7
+            + accent_contrast * 0.3
+            - (
+                alternating_imbalance * 0.4
+                if numerator == 3
+                else 0.0
+            )
+        )
+        if signature == (6, 8):
+            secondary = (phase + 3) % numerator
+            unaccented = [
+                candidate
+                for candidate in range(numerator)
+                if candidate not in {phase, secondary}
+            ]
+            compound_support = max(
+                0.0,
+                attack_profiles[secondary]
+                - _average(attack_profiles[index] for index in unaccented),
+            )
+            compound_hierarchy = max(
+                0.0,
+                attack_profiles[phase] - attack_profiles[secondary],
+            )
+            score = (
+                harmonic_contrast * 0.55
+                + accent_contrast * 0.25
+                + compound_support * 0.15
+                + compound_hierarchy * 0.05
+            )
+        candidate_result: dict[str, object] = {
+            "time_signature": list(signature),
+            "score": max(0.0, score),
+            "phase": phase,
+            "measure_count": len(primary_values),
+            "harmonic_contrast": harmonic_contrast,
+            "accent_contrast": accent_contrast,
+            "alternating_imbalance": alternating_imbalance,
+            "compound_support": compound_support,
+            "compound_hierarchy": compound_hierarchy,
+        }
+        if (
+            best is None
+            or float(candidate_result["score"]) > float(best["score"])
+        ):
+            best = candidate_result
+    assert best is not None
+    return best
+
+
+def select_time_signature(
+    beat_times: Iterable[float],
+    notes: Iterable[NoteEvent],
+) -> tuple[tuple[int, int], dict[str, object]]:
+    """Select a stable 3/4, 4/4, or 6/8 meter, otherwise keep 4/4."""
+    beats = [float(value) for value in beat_times]
+    novelty, attacks = _beat_meter_features(beats, notes)
+    signatures = ((3, 4), (4, 4), (6, 8))
+    candidates = [
+        _meter_candidate_score(novelty, attacks, signature)
+        for signature in signatures
+    ]
+
+    def eligible(candidate: dict[str, object]) -> bool:
+        signature = tuple(candidate["time_signature"])
+        if int(candidate["measure_count"]) < 6:
+            return False
+        if float(candidate["score"]) < 0.14:
+            return False
+        if signature == (3, 4):
+            return float(candidate["alternating_imbalance"]) <= 0.12
+        if signature == (6, 8):
+            return (
+                float(candidate["compound_support"]) >= 0.08
+                and float(candidate["compound_hierarchy"]) >= 0.04
+            )
+        return True
+
+    ranked = sorted(
+        (candidate for candidate in candidates if eligible(candidate)),
+        key=lambda candidate: float(candidate["score"]),
+        reverse=True,
+    )
+    selected = (4, 4)
+    reason = "default-4-4-insufficient-evidence"
+    confidence = 0.0
+    if ranked:
+        best = ranked[0]
+        second_score = (
+            float(ranked[1]["score"])
+            if len(ranked) > 1
+            else 0.0
+        )
+        confidence = max(0.0, float(best["score"]) - second_score)
+        best_signature = tuple(int(value) for value in best["time_signature"])
+        if best_signature == (4, 4) or confidence >= 0.04:
+            selected = best_signature
+            reason = "recurring-meter-evidence"
+        else:
+            confidence = 0.0
+
+    rounded_candidates = [
+        {
+            **candidate,
+            **{
+                key: round(float(candidate[key]), 6)
+                for key in (
+                    "score",
+                    "harmonic_contrast",
+                    "accent_contrast",
+                    "alternating_imbalance",
+                    "compound_support",
+                    "compound_hierarchy",
+                )
+            },
+        }
+        for candidate in candidates
+    ]
+    return selected, {
+        "selected_time_signature": list(selected),
+        "confidence": round(confidence, 6),
+        "reason": reason,
+        "candidates": rounded_candidates,
+    }
+
+
+def align_beats_to_downbeats(
+    beat_times: Iterable[float],
+    notes: Iterable[NoteEvent],
+    beats_per_measure: int = 4,
+) -> tuple[list[float], int, float]:
+    """Align beat zero to the strongest recurring harmonic-change phase."""
+    beats = [float(value) for value in beat_times]
+    note_list = list(notes)
+    if len(beats) < beats_per_measure * 6 or not note_list:
+        return beats, 0, 0.0
+    novelty, _attacks = _beat_meter_features(beats, note_list)
 
     margin = beats_per_measure * 2
     usable = range(margin, max(margin, len(beats) - margin))
@@ -4830,15 +5164,27 @@ def main() -> None:
     bpm = mix_bpm
     beat_times = mix_beats
     tempo_map = mix_tempo_map
+    timing_diagnostics: dict[str, object] | None = None
     try:
         drum_bpm, drum_beats, _drum_onsets, drum_tempo_map = (
             estimate_tempo(stems["drums"])
+        )
+        timing_diagnostics = timing_grid_diagnostics(
+            mix_bpm,
+            mix_beats,
+            drum_bpm,
+            drum_beats,
         )
         beat_times, timing_source = select_timing_grid(
             mix_bpm,
             mix_beats,
             drum_bpm,
             drum_beats,
+        )
+        timing_diagnostics["selected_source"] = timing_source
+        timing_diagnostics["selection_reason"] = timing_grid_selection_reason(
+            timing_diagnostics,
+            timing_source,
         )
         if timing_source == "drums":
             bpm = drum_bpm
@@ -5062,16 +5408,34 @@ def main() -> None:
         part["technique_model"] = part_technique_model
     notes = primary_transcription["notes"]
     technique_model = primary_transcription["technique_model"]
+    timing_notes = sorted(
+        (
+            note
+            for part in part_transcriptions
+            for note in part["notes"]
+        ),
+        key=lambda note: (note.start, note.pitch, note.string),
+    )
+    time_signature, meter_diagnostics = select_time_signature(
+        beat_times,
+        timing_notes,
+    )
+    beats_per_measure = time_signature[0]
     beat_times, downbeat_shift, downbeat_confidence = (
-        align_beats_to_downbeats(beat_times, notes)
+        align_beats_to_downbeats(
+            beat_times,
+            timing_notes,
+            beats_per_measure=beats_per_measure,
+        )
     )
     beat_times, pickup_beats = prepend_pickup_beats(
         beat_times,
-        notes,
+        timing_notes,
+        maximum_pickup_beats=beats_per_measure - 1,
     )
     tempo_map = tempo_map_from_beats(beat_times, bpm)
     bpm = round(float(tempo_map["median_bpm"]), 2)
-    transcription_model["timing_model"] = "percussion-downbeat-grid-v2"
+    transcription_model["timing_model"] = "meter-aware-downbeat-grid-v3"
     emit_progress(89, "transcribing", "演奏技法分析完成")
     emit_progress(91, "mapping", "正在提取人声旋律与歌词")
     vocal_melody = extract_vocal_melody(stems["vocals"])
@@ -5173,8 +5537,10 @@ def main() -> None:
         "of estimated stem energy removed)."
     )
     warnings.append(
-        "Quarter-note timing uses the "
-        f"{timing_source} grid, harmonic downbeat phase {downbeat_shift} "
+        f"Timing uses the {timing_source} grid, "
+        f"{time_signature[0]}/{time_signature[1]} meter "
+        f"(confidence {float(meter_diagnostics['confidence']):.3f}), "
+        f"harmonic downbeat phase {downbeat_shift} "
         f"(confidence {downbeat_confidence:.3f}), and "
         f"{pickup_beats} reconstructed pickup beat(s)."
     )
@@ -5188,12 +5554,18 @@ def main() -> None:
         "technique_model": technique_model,
         "metadata": metadata,
         "bpm": bpm,
-        "time_signature": [4, 4],
+        "time_signature": list(time_signature),
         "key": estimate_key(notes),
         "capo": 0,
         "beats": beat_times,
         "pickup_beats": pickup_beats,
         "tempo_map": tempo_map,
+        "meter_diagnostics": meter_diagnostics,
+        **(
+            {"timing_diagnostics": timing_diagnostics}
+            if timing_diagnostics is not None
+            else {}
+        ),
         "onsets": onset_times,
         "vocal_melody": vocal_melody,
         "lyrics": lyrics,
@@ -5221,6 +5593,7 @@ def main() -> None:
                     part["notes"],
                     bpm,
                     beat_times,
+                    beats_per_measure=beats_per_measure,
                     pickup_beats=pickup_beats,
                 ),
             }
@@ -5234,6 +5607,7 @@ def main() -> None:
             notes,
             bpm,
             beat_times,
+            beats_per_measure=beats_per_measure,
             pickup_beats=pickup_beats,
         ),
         "warnings": warnings,

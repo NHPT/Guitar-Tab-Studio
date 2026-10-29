@@ -47,6 +47,7 @@ from worker import (
     run_with_percent_progress,
     select_harmonic_position,
     select_quarter_note_grid,
+    select_time_signature,
     select_timing_grid,
     separate_audio,
     separate_guitar_parts,
@@ -54,6 +55,8 @@ from worker import (
     suppress_guitar_stem_leakage,
     suppress_vocal_leakage_in_guitar_part,
     tempo_map_from_beats,
+    timing_grid_diagnostics,
+    timing_grid_selection_reason,
     transcribe_guitar,
 )
 
@@ -773,6 +776,45 @@ class RuntimeGuardTest(unittest.TestCase):
 
 
 class TechniqueInferenceTest(unittest.TestCase):
+    @staticmethod
+    def _meter_fixture(
+        numerator: int,
+        *,
+        denominator: int = 4,
+        measures: int = 12,
+        harmonic_measures: int = 1,
+    ) -> tuple[list[float], list[NoteEvent]]:
+        interval = 0.25 if denominator == 8 else 0.5
+        beats = [
+            index * interval
+            for index in range(numerator * measures + 1)
+        ]
+        notes: list[NoteEvent] = []
+        for index, start in enumerate(beats[:-1]):
+            beat = index % numerator
+            measure = index // numerator
+            harmonic_group = measure // harmonic_measures
+            root = 0 if harmonic_group % 2 == 0 else 5
+            velocity = 100 if beat == 0 else 45
+            if numerator == 4 and beat == 2:
+                velocity = 65
+            elif numerator == 6 and beat == 3:
+                velocity = 75
+            for string, chord_interval in enumerate((0, 4, 7), start=1):
+                notes.append(
+                    NoteEvent(
+                        start,
+                        start + interval * 0.9,
+                        60 + root + chord_interval,
+                        velocity,
+                        string,
+                        3,
+                        "pick",
+                        0.9,
+                    )
+                )
+        return beats, notes
+
     def test_beat_stabilizer_reduces_frame_quantization_jitter(self) -> None:
         raw = [0.6, 1.1109, 1.6217, 2.1093, 2.5969]
 
@@ -843,6 +885,157 @@ class TechniqueInferenceTest(unittest.TestCase):
             beat_grid_irregularity(mixture),
         )
 
+    def test_beat_grid_quality_penalizes_a_duplicate_marker(self) -> None:
+        clean = [index * 0.5 for index in range(48)]
+        duplicated = [*clean[:20], clean[20], *clean[20:]]
+
+        selected, source = select_timing_grid(
+            120.0,
+            duplicated,
+            120.0,
+            clean,
+        )
+
+        self.assertGreater(
+            beat_grid_irregularity(duplicated),
+            beat_grid_irregularity(clean),
+        )
+        self.assertEqual(source, "drums")
+        self.assertEqual(selected, clean)
+
+    def test_percussion_grid_resolves_an_aligned_half_tempo_candidate(
+        self,
+    ) -> None:
+        fast_mix = [index * 0.25 for index in range(96)]
+        quarter_note_drums = fast_mix[::2]
+
+        selected, source = select_timing_grid(
+            240.0,
+            fast_mix,
+            120.0,
+            quarter_note_drums,
+        )
+
+        self.assertEqual(source, "drums")
+        self.assertEqual(selected, quarter_note_drums)
+
+    def test_percussion_grid_rejects_an_unaligned_half_tempo_candidate(
+        self,
+    ) -> None:
+        fast_mix = [index * 0.25 for index in range(96)]
+        shifted_drums = [0.12 + index * 0.5 for index in range(48)]
+
+        selected, source = select_timing_grid(
+            240.0,
+            fast_mix,
+            120.0,
+            shifted_drums,
+        )
+
+        self.assertEqual(source, "mix")
+        self.assertEqual(selected, fast_mix)
+
+    def test_timing_grid_diagnostics_explain_half_tempo_selection(self) -> None:
+        fast_mix = [index * 0.25 for index in range(96)]
+        quarter_note_drums = fast_mix[::2]
+        diagnostics = timing_grid_diagnostics(
+            240.0,
+            fast_mix,
+            120.0,
+            quarter_note_drums,
+        )
+
+        self.assertEqual(
+            diagnostics["relationship"],
+            "percussion-half-tempo",
+        )
+        self.assertEqual(diagnostics["alignment_coverage"], 1.0)
+        self.assertEqual(diagnostics["median_alignment_error_ms"], 0.0)
+        self.assertEqual(
+            timing_grid_selection_reason(diagnostics, "drums"),
+            "aligned-half-tempo",
+        )
+
+    def test_selects_three_four_from_recurring_waltz_evidence(self) -> None:
+        beats, notes = self._meter_fixture(3)
+
+        signature, diagnostics = select_time_signature(beats, notes)
+
+        self.assertEqual(signature, (3, 4))
+        self.assertEqual(
+            diagnostics["reason"],
+            "recurring-meter-evidence",
+        )
+        self.assertGreater(diagnostics["confidence"], 0.04)
+
+    def test_three_four_survives_a_two_measure_harmonic_rhythm(self) -> None:
+        beats, notes = self._meter_fixture(3, harmonic_measures=2)
+
+        signature, diagnostics = select_time_signature(beats, notes)
+
+        self.assertEqual(signature, (3, 4))
+        six_eight = next(
+            candidate
+            for candidate in diagnostics["candidates"]
+            if candidate["time_signature"] == [6, 8]
+        )
+        self.assertLess(six_eight["compound_hierarchy"], 0.04)
+
+    def test_selects_four_four_from_recurring_common_time_evidence(
+        self,
+    ) -> None:
+        beats, notes = self._meter_fixture(4)
+
+        signature, diagnostics = select_time_signature(beats, notes)
+
+        self.assertEqual(signature, (4, 4))
+        self.assertEqual(
+            diagnostics["reason"],
+            "recurring-meter-evidence",
+        )
+        self.assertGreater(diagnostics["confidence"], 0.04)
+
+    def test_selects_six_eight_from_compound_accent_hierarchy(self) -> None:
+        beats, notes = self._meter_fixture(6, denominator=8)
+
+        signature, diagnostics = select_time_signature(beats, notes)
+
+        self.assertEqual(signature, (6, 8))
+        self.assertEqual(
+            diagnostics["reason"],
+            "recurring-meter-evidence",
+        )
+        six_eight = next(
+            candidate
+            for candidate in diagnostics["candidates"]
+            if candidate["time_signature"] == [6, 8]
+        )
+        self.assertGreater(six_eight["compound_support"], 0.08)
+
+    def test_ambiguous_meter_evidence_falls_back_to_four_four(self) -> None:
+        beats = [index * 0.5 for index in range(72)]
+        notes = [
+            NoteEvent(
+                start,
+                start + 0.45,
+                60,
+                70,
+                2,
+                1,
+                "pick",
+                0.9,
+            )
+            for start in beats[:-1]
+        ]
+
+        signature, diagnostics = select_time_signature(beats, notes)
+
+        self.assertEqual(signature, (4, 4))
+        self.assertEqual(
+            diagnostics["reason"],
+            "default-4-4-insufficient-evidence",
+        )
+
     def test_harmonic_changes_align_the_first_complete_downbeat(self) -> None:
         beats = [index * 0.5 for index in range(42)]
         notes: list[NoteEvent] = []
@@ -872,6 +1065,36 @@ class TechniqueInferenceTest(unittest.TestCase):
         self.assertEqual(aligned[0], 1.0)
         self.assertGreater(confidence, 0.04)
 
+    def test_three_four_alignment_uses_three_beat_measures(self) -> None:
+        beats = [index * 0.5 for index in range(38)]
+        notes: list[NoteEvent] = []
+        for index, start in enumerate(beats[:-1]):
+            measure = (index - 1) // 3
+            root = 0 if measure % 2 == 0 else 5
+            for string, interval in enumerate((0, 4, 7), start=1):
+                notes.append(
+                    NoteEvent(
+                        start,
+                        start + 0.45,
+                        60 + root + interval,
+                        80,
+                        string,
+                        3,
+                        "pick",
+                        0.9,
+                    )
+                )
+
+        aligned, shift, confidence = align_beats_to_downbeats(
+            beats,
+            notes,
+            beats_per_measure=3,
+        )
+
+        self.assertEqual(shift, 1)
+        self.assertEqual(aligned[0], 0.5)
+        self.assertGreater(confidence, 0.04)
+
     def test_reconstructs_one_pickup_beat_before_the_downbeat(self) -> None:
         beats = [1.0 + index * 0.5 for index in range(12)]
         notes = [
@@ -884,6 +1107,25 @@ class TechniqueInferenceTest(unittest.TestCase):
         self.assertEqual(pickup_beats, 1)
         self.assertEqual(reconstructed[0], 0.5)
         self.assertEqual(reconstructed[1:], beats)
+
+    def test_reconstructs_five_eighth_note_pickups_for_six_eight(
+        self,
+    ) -> None:
+        beats = [1.5 + index * 0.25 for index in range(18)]
+        notes = [
+            NoteEvent(0.26, 0.45, 64, 80, 2, 5, "pick", 0.9),
+            NoteEvent(1.51, 1.7, 67, 80, 1, 3, "pick", 0.9),
+        ]
+
+        reconstructed, pickup_beats = prepend_pickup_beats(
+            beats,
+            notes,
+            maximum_pickup_beats=5,
+        )
+
+        self.assertEqual(pickup_beats, 5)
+        self.assertEqual(reconstructed[:5], [0.25, 0.5, 0.75, 1.0, 1.25])
+        self.assertEqual(reconstructed[5:], beats)
 
     def test_tempo_map_preserves_a_real_slowdown(self) -> None:
         result = tempo_map_from_beats(
@@ -1199,6 +1441,25 @@ class TechniqueInferenceTest(unittest.TestCase):
         self.assertEqual(
             [(chord["start"], chord["duration"]) for chord in chords],
             [(0.5, 0.5), (1.0, 2.0), (3.0, 2.0)],
+        )
+
+    def test_chord_windows_follow_six_eight_measures(self) -> None:
+        notes = [
+            NoteEvent(0.0, 3.2, 55, 80, 3, 0, "pick", 0.9),
+            NoteEvent(0.0, 3.2, 59, 80, 2, 0, "pick", 0.9),
+        ]
+        beats = [index * 0.25 for index in range(14)]
+
+        chords = infer_chords(
+            notes,
+            240,
+            beats,
+            beats_per_measure=6,
+        )
+
+        self.assertEqual(
+            [(chord["start"], chord["duration"]) for chord in chords],
+            [(0.0, 1.5), (1.5, 1.5), (3.0, 1.5)],
         )
 
     def test_acoustic_features_distinguish_common_techniques(self) -> None:

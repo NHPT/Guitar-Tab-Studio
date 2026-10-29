@@ -213,6 +213,25 @@
   padding: 0 9px;
 }
 
+.beat-review-structure-source small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.beat-review-structure-source button {
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface-strong);
+  cursor: pointer;
+}
+
+.beat-review-structure-source button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .beat-review-list {
   min-height: 0;
   overflow-y: auto;
@@ -572,7 +591,11 @@
 .beat-review-timeline
   > button:not(.is-downbeat):not(.is-selected)
   span {
-  opacity: 0;
+  min-width: 10px;
+  border-color: transparent;
+  color: var(--text-muted);
+  background: transparent;
+  opacity: 1;
 }
 
 .beat-review-editor {

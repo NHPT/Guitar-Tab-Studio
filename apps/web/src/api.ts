@@ -15,6 +15,9 @@ import type {
   BeatReviewDraft,
   BeatReviewPackage,
   BeatReviewSummary,
+  BeatStructureDocument,
+  BeatStructureDraft,
+  BeatStructureSummary,
   BeatTrainingDataset,
   BeatTrainingJob,
   BeatTrainingStatus,
@@ -333,6 +336,62 @@ export function submitBeatReview(
   return jsonRequest(
     beatReviewApiPath(
       `/api/admin/beat-gold/reviews/${encodeURIComponent(clipId)}/submit`,
+      reviewer,
+    ),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(draft),
+    },
+  )
+}
+
+export function fetchBeatStructureReviews(
+  reviewer: string,
+): Promise<BeatStructureSummary[]> {
+  return jsonRequest<{ reviews: BeatStructureSummary[] }>(
+    beatReviewApiPath('/api/admin/beat-gold/structure-reviews', reviewer),
+  ).then((response) => response.reviews)
+}
+
+export function fetchBeatStructureReview(
+  recordingId: string,
+  reviewer: string,
+): Promise<BeatStructureDocument> {
+  return jsonRequest(
+    beatReviewApiPath(
+      `/api/admin/beat-gold/structure-reviews/${encodeURIComponent(recordingId)}`,
+      reviewer,
+    ),
+  )
+}
+
+export function saveBeatStructureReview(
+  recordingId: string,
+  reviewer: string,
+  draft: BeatStructureDraft,
+): Promise<BeatStructureDocument> {
+  return jsonRequest(
+    beatReviewApiPath(
+      `/api/admin/beat-gold/structure-reviews/${encodeURIComponent(recordingId)}`,
+      reviewer,
+    ),
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(draft),
+    },
+  )
+}
+
+export function submitBeatStructureReview(
+  recordingId: string,
+  reviewer: string,
+  draft: BeatStructureDraft,
+): Promise<BeatStructureDocument> {
+  return jsonRequest(
+    beatReviewApiPath(
+      `/api/admin/beat-gold/structure-reviews/${encodeURIComponent(recordingId)}/submit`,
       reviewer,
     ),
     {

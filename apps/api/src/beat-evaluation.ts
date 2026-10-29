@@ -28,6 +28,16 @@ const THRESHOLDS = {
   downbeatF1: 0.95,
 } as const
 
+export type BeatErrorCategory =
+  | 'missed-beats'
+  | 'extra-beats'
+  | 'tempo-half'
+  | 'tempo-double'
+  | 'timing-offset'
+  | 'downbeat-phase'
+  | 'meter'
+  | 'pickup'
+
 export interface BeatEvaluationItem {
   clipId: string
   split: 'train' | 'validation' | 'test'
@@ -37,6 +47,7 @@ export interface BeatEvaluationItem {
   downbeatMetrics: BeatMetrics
   meterCorrect: boolean
   pickupCorrect: boolean
+  errorCategories: BeatErrorCategory[]
 }
 
 export interface BeatEvaluationReport {
@@ -56,6 +67,7 @@ export interface BeatEvaluationReport {
     downbeatMetrics: BeatMetrics
     meterAccuracy: number
     pickupAccuracy: number
+    errorCategoryCounts: Record<BeatErrorCategory, number>
   }
   gate: {
     passed: boolean
@@ -153,6 +165,41 @@ function canonicalDigest(value: unknown): string {
     .digest('hex')
 }
 
+export function classifyBeatErrors(
+  referenceBeats: number,
+  predictedBeats: number,
+  beatMetrics: BeatMetrics,
+  downbeatMetrics: BeatMetrics,
+  meterCorrect: boolean,
+  pickupCorrect: boolean,
+): BeatErrorCategory[] {
+  const categories: BeatErrorCategory[] = []
+  const countRatio = predictedBeats / Math.max(1, referenceBeats)
+  if (countRatio >= 1.8 && countRatio <= 2.2) {
+    categories.push('tempo-double')
+  } else if (countRatio >= 0.45 && countRatio <= 0.55) {
+    categories.push('tempo-half')
+  } else {
+    if (beatMetrics.false_negative > 0) categories.push('missed-beats')
+    if (beatMetrics.false_positive > 0) categories.push('extra-beats')
+  }
+  if (
+    (beatMetrics.median_error_ms ?? 0) > THRESHOLDS.medianErrorMs ||
+    (beatMetrics.p95_error_ms ?? 0) > THRESHOLDS.p95ErrorMs
+  ) {
+    categories.push('timing-offset')
+  }
+  if (
+    downbeatMetrics.f1 < 1 &&
+    beatMetrics.f1 > downbeatMetrics.f1
+  ) {
+    categories.push('downbeat-phase')
+  }
+  if (!meterCorrect) categories.push('meter')
+  if (!pickupCorrect) categories.push('pickup')
+  return categories
+}
+
 export function evaluateBeatGold(
   modelVersion = 'current-candidate',
   root = defaultBeatGoldRoot(),
@@ -204,21 +251,33 @@ export function evaluateBeatGold(
     const signature = Array.isArray(analysis.time_signature)
       ? analysis.time_signature.map(Number)
       : [4, 4]
+    const beatItemMetrics = evaluateBeatTimes(reference, predicted)
+    const downbeatItemMetrics = evaluateBeatTimes(
+      referenceDownbeats,
+      predictedDownbeats,
+    )
+    const meterCorrect =
+      signature[0] === review.time_signature[0] &&
+      signature[1] === review.time_signature[1]
+    const pickupCorrect =
+      Number(analysis.pickup_beats ?? 0) === review.pickup_beats
     items.push({
       clipId: review.clip_id,
       split: splitFor(review),
       referenceBeats: reference.length,
       predictedBeats: predicted.length,
-      beatMetrics: evaluateBeatTimes(reference, predicted),
-      downbeatMetrics: evaluateBeatTimes(
-        referenceDownbeats,
-        predictedDownbeats,
+      beatMetrics: beatItemMetrics,
+      downbeatMetrics: downbeatItemMetrics,
+      meterCorrect,
+      pickupCorrect,
+      errorCategories: classifyBeatErrors(
+        reference.length,
+        predicted.length,
+        beatItemMetrics,
+        downbeatItemMetrics,
+        meterCorrect,
+        pickupCorrect,
       ),
-      meterCorrect:
-        signature[0] === review.time_signature[0] &&
-        signature[1] === review.time_signature[1],
-      pickupCorrect:
-        Number(analysis.pickup_beats ?? 0) === review.pickup_beats,
     })
   })
 
@@ -234,6 +293,23 @@ export function evaluateBeatGold(
     items.filter((item) => item.meterCorrect).length / Math.max(1, items.length)
   const pickupAccuracy =
     items.filter((item) => item.pickupCorrect).length / Math.max(1, items.length)
+  const errorCategoryCounts = Object.fromEntries(
+    (
+      [
+        'missed-beats',
+        'extra-beats',
+        'tempo-half',
+        'tempo-double',
+        'timing-offset',
+        'downbeat-phase',
+        'meter',
+        'pickup',
+      ] satisfies BeatErrorCategory[]
+    ).map((category) => [
+      category,
+      items.filter((item) => item.errorCategories.includes(category)).length,
+    ]),
+  ) as Record<BeatErrorCategory, number>
   const coverage = gold.length === status.manifest.clips
   const checks = {
     coverage,
@@ -270,6 +346,7 @@ export function evaluateBeatGold(
       downbeatMetrics,
       meterAccuracy,
       pickupAccuracy,
+      errorCategoryCounts,
     },
     gate: {
       passed: Object.values(checks).every(Boolean),

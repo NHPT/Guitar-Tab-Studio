@@ -12,7 +12,7 @@ extraResources:
     to: THIRD_PARTY_NOTICES.md
   - from: build-resources/icon.ico
     to: icon.ico
-  - from: ../web/dist
+  - from: ../web/dist-desktop
     to: web
     filter:
       - "**/*"

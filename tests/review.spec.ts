@@ -286,7 +286,7 @@ test('loads the cross-performer residual-onset v2 queue', async ({
   test.skip(testInfo.project.name !== 'desktop', 'desktop data routing check')
 
   const response = await page.request.get(
-    'http://localhost:8787/api/reviews?queue=residual-onset-v2',
+    'http://127.0.0.1:8787/api/reviews?queue=residual-onset-v2',
   )
   expect(response.ok()).toBeTruthy()
   const payload = await response.json()

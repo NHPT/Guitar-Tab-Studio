@@ -820,7 +820,7 @@ test('normalizes supported legacy analysis documents to schema version 10', () =
     version: 8,
     bpm: 120,
     time_signature: [6, 8],
-    pickup_beats: 2,
+    pickup_beats: 5,
     tempo_map: {
       mode: 'variable',
       median_bpm: 118.5,
@@ -828,6 +828,38 @@ test('normalizes supported legacy analysis documents to schema version 10', () =
       points: [
         { at: 0.2, beat: 0, bpm: 120, confidence: 0.9 },
         { at: 0.71, beat: 1, bpm: 117.6, confidence: 0.85 },
+      ],
+    },
+    timing_diagnostics: {
+      mix_bpm: 240,
+      percussion_bpm: 120,
+      bpm_ratio: 0.5,
+      relationship: 'percussion-half-tempo',
+      mix_beat_count: 96,
+      percussion_beat_count: 48,
+      mix_irregularity: 0,
+      percussion_irregularity: 0,
+      alignment_coverage: 1,
+      median_alignment_error_ms: 0,
+      selected_source: 'drums',
+      selection_reason: 'aligned-half-tempo',
+    },
+    meter_diagnostics: {
+      selected_time_signature: [6, 8],
+      confidence: 0.31,
+      reason: 'recurring-meter-evidence',
+      candidates: [
+        {
+          time_signature: [6, 8],
+          score: 0.72,
+          phase: 0,
+          measure_count: 10,
+          harmonic_contrast: 0.8,
+          accent_contrast: 0.45,
+          alternating_imbalance: 0.02,
+          compound_support: 0.25,
+          compound_hierarchy: 0.19,
+        },
       ],
     },
     vocal_melody: [
@@ -891,9 +923,24 @@ test('normalizes supported legacy analysis documents to schema version 10', () =
   assert.equal(analysis.transcription_model?.kind, 'trained')
   assert.equal(analysis.transcription_model?.version, '5')
   assert.deepEqual(analysis.time_signature, [6, 8])
-  assert.equal(analysis.pickup_beats, 2)
+  assert.equal(analysis.pickup_beats, 5)
   assert.equal(analysis.tempo_map?.mode, 'variable')
   assert.equal(analysis.tempo_map?.medianBpm, 118.5)
+  assert.equal(
+    analysis.timing_diagnostics?.relationship,
+    'percussion-half-tempo',
+  )
+  assert.equal(analysis.timing_diagnostics?.selectedSource, 'drums')
+  assert.equal(analysis.timing_diagnostics?.alignmentCoverage, 1)
+  assert.deepEqual(
+    analysis.meter_diagnostics?.selectedTimeSignature,
+    [6, 8],
+  )
+  assert.equal(analysis.meter_diagnostics?.confidence, 0.31)
+  assert.equal(
+    analysis.meter_diagnostics?.candidates[0].compoundSupport,
+    0.25,
+  )
   assert.equal(analysis.vocal_melody?.[0].pitch, 69)
   assert.equal(analysis.lyrics?.[0].text, 'sample')
   assert.equal(analysis.notes[0].string, 3)

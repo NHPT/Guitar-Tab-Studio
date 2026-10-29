@@ -47,6 +47,10 @@ import {
 import { desktopDataRoot } from './data-root.js'
 import { detectDefaultMediaBrowser } from './default-browser.js'
 import {
+  developmentRendererUrl,
+  isDesktopNavigationAllowed,
+} from './desktop-navigation.js'
+import {
   desktopMediaSourceLabels,
   desktopMediaSources,
   localFileDefaultPath,
@@ -65,7 +69,10 @@ import { DesktopUpdater } from './updater.js'
 const moduleDirectory = __dirname
 const repositoryRoot = resolve(moduleDirectory, '../../..')
 const developmentApiEntry = resolve(repositoryRoot, 'apps/api/dist/index.js')
-const developmentWebEntry = resolve(repositoryRoot, 'apps/web/dist/index.html')
+const developmentWebEntry = resolve(
+  repositoryRoot,
+  'apps/web/dist-desktop/desktop.html',
+)
 const developmentWorker = resolve(repositoryRoot, '.venv/bin/guitar-tab-worker')
 const developmentGuitarResearchModel = resolve(
   repositoryRoot,
@@ -189,7 +196,7 @@ function runtimePaths() {
   return {
     apiEntry: resolve(process.resourcesPath, 'api/index.mjs'),
     apiWorkingDirectory: app.getPath('userData'),
-    webEntry: resolve(process.resourcesPath, 'web/index.html'),
+    webEntry: resolve(process.resourcesPath, 'web/desktop.html'),
     workerCommand: existsSync(packagedWorker) ? packagedWorker : undefined,
     ffmpegBinary: existsSync(packagedFfmpeg) ? packagedFfmpeg : undefined,
   }
@@ -1551,34 +1558,25 @@ async function createWindow(): Promise<void> {
     if (url.startsWith('https://')) void shell.openExternal(url)
     return { action: 'deny' }
   })
-  window.webContents.on('will-navigate', (event, url) => {
-    const allowedOrigin = process.env.GTS_DESKTOP_RENDERER_URL
-    if (allowedOrigin) {
-      try {
-        if (new URL(url).origin === new URL(allowedOrigin).origin) return
-      } catch {
-        // Invalid navigation targets are denied below.
-      }
-    } else {
-      const entryUrl = pathToFileURL(runtimePaths().webEntry)
-      try {
-        const target = new URL(url)
-        if (
-          target.protocol === 'file:' &&
-          target.pathname === entryUrl.pathname
-        ) {
-          return
-        }
-      } catch {
-        // Invalid navigation targets are denied below.
-      }
+  const rendererOverride = isPackagedRuntime()
+    ? undefined
+    : developmentRendererUrl(process.env.GTS_DESKTOP_RENDERER_URL)
+  const entryUrl =
+    rendererOverride?.toString() ??
+    pathToFileURL(runtimePaths().webEntry).toString()
+  const guardNavigation = (
+    event: Electron.Event,
+    url: string,
+  ) => {
+    if (!isDesktopNavigationAllowed(url, entryUrl)) {
+      event.preventDefault()
     }
-    event.preventDefault()
-  })
+  }
+  window.webContents.on('will-navigate', guardNavigation)
+  window.webContents.on('will-redirect', guardNavigation)
 
-  const rendererUrl = process.env.GTS_DESKTOP_RENDERER_URL
-  if (rendererUrl) {
-    await window.loadURL(rendererUrl)
+  if (rendererOverride) {
+    await window.loadURL(rendererOverride.toString())
   } else {
     await window.loadFile(runtimePaths().webEntry)
   }

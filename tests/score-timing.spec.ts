@@ -18,7 +18,7 @@ async function seekExactly(page: Page, seconds: number, duration: number) {
 }
 
 test('places notes on the playhead at their notation time across unequal measures and resizing', async ({ page }) => {
-  const response = await page.request.get('http://localhost:8787/api/projects/demo')
+  const response = await page.request.get('http://127.0.0.1:8787/api/projects/demo')
   const project = await response.json() as StudioProject
   const allNotes = project.tab.measures.flatMap(measure =>
     measure.beats.flatMap(beat => beat.notes),
@@ -55,7 +55,7 @@ test('places notes on the playhead at their notation time across unequal measure
 })
 
 test('marks three evenly spaced subdivisions as a triplet and rejects uneven attacks', async ({ page }) => {
-  const response = await page.request.get('http://localhost:8787/api/projects/demo')
+  const response = await page.request.get('http://127.0.0.1:8787/api/projects/demo')
   const project = await response.json() as StudioProject
   const measure = project.tab.measures.find((candidate) =>
     candidate.beats.length >= 3
@@ -87,7 +87,7 @@ test('marks three evenly spaced subdivisions as a triplet and rejects uneven att
 test('quantizes expressive attacks as an ordered beat pattern with leading rests', async ({
   page,
 }) => {
-  const response = await page.request.get('http://localhost:8787/api/projects/demo')
+  const response = await page.request.get('http://127.0.0.1:8787/api/projects/demo')
   const project = await response.json() as StudioProject
   const measure = project.tab.measures.find((candidate) =>
     candidate.beats.length >= 2
@@ -140,7 +140,7 @@ test('quantizes expressive attacks as an ordered beat pattern with leading rests
 })
 
 test('shows an inferred strum with every fret and preserves its distinct performance times', async ({ page }) => {
-  const response = await page.request.get('http://localhost:8787/api/projects/demo')
+  const response = await page.request.get('http://127.0.0.1:8787/api/projects/demo')
   const project = await response.json() as StudioProject
   const allNotes = project.tab.measures.flatMap(m => m.beats.flatMap(b => b.notes))
   const firstBeat = project.tab.measures[0].beats[0]
@@ -193,7 +193,7 @@ test('shows an inferred strum with every fret and preserves its distinct perform
 })
 
 test('notates attack spacing as quarters and dotted eighths independently of short decay', async ({ page }) => {
-  const response = await page.request.get('http://localhost:8787/api/projects/demo')
+  const response = await page.request.get('http://127.0.0.1:8787/api/projects/demo')
   const project = await response.json() as StudioProject
   const measure = project.tab.measures.find((candidate) =>
     candidate.beats.length >= 4
@@ -250,7 +250,7 @@ test('notates attack spacing as quarters and dotted eighths independently of sho
 })
 
 test('keeps sustained beats distinct from a following silent beat', async ({ page }) => {
-  const response = await page.request.get('http://localhost:8787/api/projects/demo')
+  const response = await page.request.get('http://127.0.0.1:8787/api/projects/demo')
   const project = await response.json() as StudioProject
   const measure = project.tab.measures.find((candidate) =>
     candidate.beats.length >= 4
@@ -274,7 +274,7 @@ test('keeps sustained beats distinct from a following silent beat', async ({ pag
 })
 
 test('keeps each opening 4/4 measure at four beats including continuations and rests', async ({ page }) => {
-  const response = await page.request.get('http://localhost:8787/api/projects/demo')
+  const response = await page.request.get('http://127.0.0.1:8787/api/projects/demo')
   const project = await response.json() as StudioProject
   const fullMeasures = project.tab.measures
     .filter((measure) => measure.beats.length === 4)
@@ -305,7 +305,7 @@ test('keeps each opening 4/4 measure at four beats including continuations and r
 test('closes every repaired project measure at four beats without horizontal rewind', async ({ page }) => {
   const projectId = '6f579959-aebf-4d01-96c0-80de5a1eb8b7'
   const response = await page.request.get(
-    `http://localhost:8787/api/projects/${projectId}`,
+    `http://127.0.0.1:8787/api/projects/${projectId}`,
   )
   const project = await response.json() as StudioProject
   expect(project.tab.measures).toHaveLength(12)
@@ -353,7 +353,7 @@ test('closes every repaired project measure at four beats without horizontal rew
 test('uses the corrected quarter-note grid for the repaired country project', async ({ page }) => {
   const projectId = '228e3288-429f-49c6-924e-fda060e366be'
   const response = await page.request.get(
-    `http://localhost:8787/api/projects/${projectId}`,
+    `http://127.0.0.1:8787/api/projects/${projectId}`,
   )
   const project = await response.json() as StudioProject
   expect(project.bpm).toBe(81.35)
@@ -605,7 +605,7 @@ test('renders standard TAB stems, strum arrows, numbered melody and timed lyrics
 
 test('closes measures correctly across simple and compound meters', async ({ page }) => {
   const response = await page.request.get(
-    'http://localhost:8787/api/projects/demo',
+    'http://127.0.0.1:8787/api/projects/demo',
   )
   const project = await response.json() as StudioProject
   const baseNote = project.tab.measures[0].beats[0].notes[0]

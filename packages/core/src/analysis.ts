@@ -117,6 +117,46 @@ export interface AnalysisTimedLyric {
   text: string
 }
 
+export interface AnalysisTimingDiagnostics {
+  mixBpm: number
+  percussionBpm: number
+  bpmRatio: number
+  relationship:
+    | 'same-tempo'
+    | 'percussion-half-tempo'
+    | 'percussion-double-tempo'
+    | 'tempo-mismatch'
+  mixBeatCount: number
+  percussionBeatCount: number
+  mixIrregularity: number | null
+  percussionIrregularity: number | null
+  alignmentCoverage: number
+  medianAlignmentErrorMs: number | null
+  selectedSource: 'mix' | 'drums'
+  selectionReason: string
+}
+
+export interface AnalysisMeterCandidate {
+  timeSignature: TimeSignature
+  score: number
+  phase: number
+  measureCount: number
+  harmonicContrast: number
+  accentContrast: number
+  alternatingImbalance: number
+  compoundSupport: number
+  compoundHierarchy: number
+}
+
+export interface AnalysisMeterDiagnostics {
+  selectedTimeSignature: TimeSignature
+  confidence: number
+  reason:
+    | 'recurring-meter-evidence'
+    | 'default-4-4-insufficient-evidence'
+  candidates: AnalysisMeterCandidate[]
+}
+
 export interface AnalysisDocument {
   version: typeof ANALYSIS_SCHEMA_VERSION
   transcription_model?: TranscriptionModelInfo
@@ -134,6 +174,8 @@ export interface AnalysisDocument {
   beats?: number[]
   pickup_beats?: number
   tempo_map?: TempoMap
+  timing_diagnostics?: AnalysisTimingDiagnostics
+  meter_diagnostics?: AnalysisMeterDiagnostics
   onsets?: number[]
   vocal_melody?: AnalysisVocalMelodyNote[]
   lyrics?: AnalysisTimedLyric[]
@@ -336,15 +378,154 @@ function nullableNumberAt(
   return value === null ? null : optionalNumberAt(value, path)
 }
 
-function pickupBeatsAt(value: unknown, path: string): number | undefined {
+function pickupBeatsAt(
+  value: unknown,
+  path: string,
+  numerator: number,
+): number | undefined {
   const pickupBeats = optionalNumberAt(value, path)
   if (
     pickupBeats !== undefined &&
-    (!Number.isInteger(pickupBeats) || pickupBeats < 0 || pickupBeats > 3)
+    (
+      !Number.isInteger(pickupBeats) ||
+      pickupBeats < 0 ||
+      pickupBeats >= numerator
+    )
   ) {
-    throw new CoreValidationError(path, 'expected integer between 0 and 3')
+    throw new CoreValidationError(
+      path,
+      `expected integer between 0 and ${numerator - 1}`,
+    )
   }
   return pickupBeats
+}
+
+function timingDiagnosticsAt(
+  value: unknown,
+  path: string,
+): AnalysisTimingDiagnostics {
+  const diagnostics = recordAt(value, path)
+  return {
+    mixBpm: numberAt(diagnostics.mix_bpm, `${path}.mix_bpm`),
+    percussionBpm: numberAt(
+      diagnostics.percussion_bpm,
+      `${path}.percussion_bpm`,
+    ),
+    bpmRatio: numberAt(diagnostics.bpm_ratio, `${path}.bpm_ratio`),
+    relationship: enumAt(
+      diagnostics.relationship,
+      [
+        'same-tempo',
+        'percussion-half-tempo',
+        'percussion-double-tempo',
+        'tempo-mismatch',
+      ] as const,
+      `${path}.relationship`,
+    ),
+    mixBeatCount: numberAt(
+      diagnostics.mix_beat_count,
+      `${path}.mix_beat_count`,
+    ),
+    percussionBeatCount: numberAt(
+      diagnostics.percussion_beat_count,
+      `${path}.percussion_beat_count`,
+    ),
+    mixIrregularity:
+      nullableNumberAt(
+        diagnostics.mix_irregularity,
+        `${path}.mix_irregularity`,
+      ) ?? null,
+    percussionIrregularity:
+      nullableNumberAt(
+        diagnostics.percussion_irregularity,
+        `${path}.percussion_irregularity`,
+      ) ?? null,
+    alignmentCoverage: numberAt(
+      diagnostics.alignment_coverage,
+      `${path}.alignment_coverage`,
+    ),
+    medianAlignmentErrorMs:
+      nullableNumberAt(
+        diagnostics.median_alignment_error_ms,
+        `${path}.median_alignment_error_ms`,
+      ) ?? null,
+    selectedSource: enumAt(
+      diagnostics.selected_source,
+      ['mix', 'drums'] as const,
+      `${path}.selected_source`,
+    ),
+    selectionReason: stringAt(
+      diagnostics.selection_reason,
+      `${path}.selection_reason`,
+    ),
+  }
+}
+
+function meterCandidateAt(
+  value: unknown,
+  path: string,
+): AnalysisMeterCandidate {
+  const candidate = recordAt(value, path)
+  return {
+    timeSignature: timeSignatureAt(
+      candidate.time_signature,
+      `${path}.time_signature`,
+    ),
+    score: numberAt(candidate.score, `${path}.score`),
+    phase: numberAt(candidate.phase, `${path}.phase`),
+    measureCount: numberAt(
+      candidate.measure_count,
+      `${path}.measure_count`,
+    ),
+    harmonicContrast: numberAt(
+      candidate.harmonic_contrast,
+      `${path}.harmonic_contrast`,
+    ),
+    accentContrast: numberAt(
+      candidate.accent_contrast,
+      `${path}.accent_contrast`,
+    ),
+    alternatingImbalance: numberAt(
+      candidate.alternating_imbalance,
+      `${path}.alternating_imbalance`,
+    ),
+    compoundSupport: numberAt(
+      candidate.compound_support,
+      `${path}.compound_support`,
+    ),
+    compoundHierarchy: numberAt(
+      candidate.compound_hierarchy,
+      `${path}.compound_hierarchy`,
+    ),
+  }
+}
+
+function meterDiagnosticsAt(
+  value: unknown,
+  path: string,
+): AnalysisMeterDiagnostics {
+  const diagnostics = recordAt(value, path)
+  return {
+    selectedTimeSignature: timeSignatureAt(
+      diagnostics.selected_time_signature,
+      `${path}.selected_time_signature`,
+    ),
+    confidence: numberAt(diagnostics.confidence, `${path}.confidence`),
+    reason: enumAt(
+      diagnostics.reason,
+      [
+        'recurring-meter-evidence',
+        'default-4-4-insufficient-evidence',
+      ] as const,
+      `${path}.reason`,
+    ),
+    candidates: arrayAt(
+      diagnostics.candidates,
+      `${path}.candidates`,
+    ).map((candidate, index) =>
+      meterCandidateAt(candidate, `${path}.candidates[${index}]`),
+    ),
+  }
 }
 
 function noteAt(value: unknown, path: string): AnalysisNote {
@@ -486,6 +667,13 @@ export function parseAnalysisDocument(value: unknown): AnalysisDocument {
       `unsupported version ${sourceVersion}`,
     )
   }
+  const timeSignature =
+    analysis.time_signature === undefined
+      ? undefined
+      : timeSignatureAt(
+          analysis.time_signature,
+          'analysis.time_signature',
+        )
   return {
     version: ANALYSIS_SCHEMA_VERSION,
     transcription_model:
@@ -507,13 +695,7 @@ export function parseAnalysisDocument(value: unknown): AnalysisDocument {
         ? undefined
         : metadataAt(analysis.metadata, 'analysis.metadata'),
     bpm: numberAt(analysis.bpm, 'analysis.bpm'),
-    time_signature:
-      analysis.time_signature === undefined
-        ? undefined
-        : timeSignatureAt(
-            analysis.time_signature,
-            'analysis.time_signature',
-          ),
+    time_signature: timeSignature,
     key: optionalStringAt(analysis.key, 'analysis.key'),
     capo: optionalNumberAt(analysis.capo, 'analysis.capo'),
     beats:
@@ -523,11 +705,26 @@ export function parseAnalysisDocument(value: unknown): AnalysisDocument {
     pickup_beats: pickupBeatsAt(
       analysis.pickup_beats,
       'analysis.pickup_beats',
+      timeSignature?.[0] ?? 4,
     ),
     tempo_map:
       analysis.tempo_map === undefined
         ? undefined
         : tempoMapAt(analysis.tempo_map, 'analysis.tempo_map'),
+    timing_diagnostics:
+      analysis.timing_diagnostics === undefined
+        ? undefined
+        : timingDiagnosticsAt(
+            analysis.timing_diagnostics,
+            'analysis.timing_diagnostics',
+          ),
+    meter_diagnostics:
+      analysis.meter_diagnostics === undefined
+        ? undefined
+        : meterDiagnosticsAt(
+            analysis.meter_diagnostics,
+            'analysis.meter_diagnostics',
+          ),
     onsets:
       analysis.onsets === undefined
         ? undefined

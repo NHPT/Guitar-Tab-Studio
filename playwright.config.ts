@@ -12,6 +12,9 @@ export default defineConfig({
     {
       command: 'npm run build -w @gts/core && npm run dev -w @gts/api',
       url: 'http://127.0.0.1:8787/health',
+      env: {
+        GTS_DATA_ROOT: '.cache/playwright-api-runtime',
+      },
       reuseExistingServer: true,
       timeout: 30_000,
     },

@@ -506,6 +506,68 @@ export interface BeatReviewDraft {
   checks: BeatReviewChecks
 }
 
+export interface BeatStructureChecks {
+  meter: boolean
+  downbeat_phase: boolean
+  pickup: boolean
+  meter_changes: boolean
+}
+
+export interface BeatMeterChange {
+  at: number
+  time_signature: [number, number]
+}
+
+export interface BeatStructureReviewPackage {
+  schema_version: 1
+  review_kind: 'beat-structure'
+  status: 'draft' | 'submitted'
+  corpus_version: string
+  recording_id: string
+  annotator_alias: string
+  audio_duration: number
+  time_signature: [number, number]
+  pickup_beats: number
+  phase_status: 'confirmed' | 'uncertain'
+  first_downbeat_at: number | null
+  meter_changes: BeatMeterChange[]
+  checks: BeatStructureChecks
+  submission?: {
+    submitted_at: string
+    content_sha256: string
+    admin_user_id?: string
+    admin_username?: string
+  } | null
+}
+
+export interface BeatStructureSummary {
+  recordingId: string
+  split: 'train' | 'validation' | 'test'
+  status: BeatStructureReviewPackage['status']
+  duration: number
+  timeSignature: [number, number]
+  pickupBeats: number
+  phaseStatus: BeatStructureReviewPackage['phase_status']
+  meterChangeCount: number
+  checks: BeatStructureChecks
+}
+
+export interface BeatStructureDocument {
+  review: BeatStructureReviewPackage
+  audioUrl: string
+  candidateBeats: number[]
+  candidateBpm: number
+}
+
+export interface BeatStructureDraft {
+  time_signature: [number, number]
+  pickup_beats: number
+  phase_status: 'confirmed' | 'uncertain'
+  first_downbeat_at: number | null
+  meter_changes: BeatMeterChange[]
+  checks: BeatStructureChecks
+}
+
 export interface BeatGoldStatus {
   enabled: boolean
   reviewers: string[]

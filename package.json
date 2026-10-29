@@ -1,7 +1,7 @@
 {
   "name": "guitar-tab-studio",
   "private": true,
-  "version": "0.1.0-preview.15",
+  "version": "0.1.0-preview.16",
   "license": "Apache-2.0",
   "workspaces": [
     "apps/*",
@@ -16,7 +16,7 @@
     "desktop:icons": ".venv/bin/python scripts/generate-app-icons.py",
     "demo:audio": "node scripts/validate-builtin-recording.mjs",
     "demo:audio:check": "node scripts/validate-builtin-recording.mjs",
-    "build": "npm run build -w @gts/core && npm run build -w @gts/api && npm run build -w web && npm run build -w @gts/desktop",
+    "build": "npm run build -w @gts/core && npm run build -w @gts/api && npm run build -w web && npm run build:desktop -w web && npm run build -w @gts/desktop",
     "test": "npm run test -w @gts/core && npm run test -w @gts/api && npm run test -w @gts/desktop && npm run lint -w web",
     "test:gate": ".venv/bin/python -m unittest discover -s services/promotion_gate -p 'test_*.py'",
     "test:runner": ".venv/bin/python -m unittest discover -s services/training_runner -p 'test_*.py'",
