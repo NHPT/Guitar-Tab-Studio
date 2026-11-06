@@ -15,6 +15,33 @@ import { DesktopStateStore } from '../src/state.js'
 
 process.env.GTS_ENABLE_RESEARCH_MODELS = '1'
 
+test('builds the Basic Pitch worker config without probing hardware', () => {
+  const root = resolve(process.cwd(), 'data', `.test-providers-${randomUUID()}`)
+  mkdirSync(root, { recursive: true })
+  const state = new DesktopStateStore(resolve(root, 'desktop.sqlite'))
+  let workerCommandReads = 0
+  try {
+    const manager = new DesktopTranscriptionManager(
+      resolve(root, 'providers'),
+      resolve(root, 'cache'),
+      state,
+      () => {
+        workerCommandReads += 1
+        return undefined
+      },
+    )
+
+    assert.deepEqual(manager.workerConfiguration(), {
+      provider: 'basic-pitch',
+      cacheRoot: resolve(root, 'cache'),
+    })
+    assert.equal(workerCommandReads, 0)
+  } finally {
+    state.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('keeps research providers out of the default production surface', () => {
   const root = resolve(process.cwd(), 'data', `.test-providers-${randomUUID()}`)
   mkdirSync(root, { recursive: true })

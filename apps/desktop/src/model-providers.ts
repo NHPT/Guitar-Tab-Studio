@@ -633,15 +633,14 @@ export class DesktopTranscriptionManager {
     verificationModel?: string
     cacheRoot: string
   } {
-    const status = this.status()
-    if (
-      status.preference.providerId === 'basic-pitch'
-    ) {
+    const preference = this.effectivePreference()
+    if (preference.providerId === 'basic-pitch') {
       return {
         provider: 'basic-pitch',
         cacheRoot: this.cacheRoot,
       }
     }
+    const status = this.status()
     if (status.preference.providerId === 'guitar-specialist') {
       return {
         provider: 'guitar-specialist',
