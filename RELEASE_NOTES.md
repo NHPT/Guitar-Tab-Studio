@@ -1,28 +1,40 @@
-# Guitar Tab Studio v0.1.0-preview.16
+# Guitar Tab Studio v0.1.0-preview.17
 
-This preview establishes a strict boundary between the user-facing desktop
-application and the Web-only administration system. It also improves beat and
-downbeat analysis and streamlines the full-song review workflow used to
-validate those improvements.
+This preview completes the current beat-review correction workflow, tightens
+the governance of model-training data and experiments, and reduces the time
+before the packaged desktop window becomes usable. Basic Pitch remains the
+production transcription model.
 
 ## Highlights
 
-- The desktop package now uses a dedicated renderer entry containing only the
-  user workspace. Admin, review, and community control pages are not included
-  in the packaged renderer.
-- The local desktop API is built without Admin routes, authentication,
-  dashboards, review management, adjudication, training, backup, or gold
-  release endpoints.
-- Electron rejects Admin, review, and community navigation at the main-process
-  boundary. Packaged builds ignore renderer URL overrides.
-- Packaging fails if the desktop renderer or local API contains an Admin route,
-  Admin session, or Admin workspace marker.
-- Beat analysis now preserves stronger full-song phase evidence, changing
-  meters, pickup context, tempo structure, and representative listening
-  positions for human correction.
-- The Web-only beat review flow starts with full-song structure confirmation,
-  then opens a reduced core clip queue while retaining all original candidates.
-  Confirmed structure can be applied without replacing reviewed beat times.
+- Full-song beat review can add missed beats, remove false detections, correct
+  tempo multipliers by phase, preview bulk changes, and undo corrections
+  without rewriting submitted audit records.
+- Pickup length supports quarter-beat steps with sixteenth-note labels and
+  visual subdivision guides anchored to the first downbeat.
+- Effective beats are recalculated from raw candidates plus persisted
+  corrections, so BPM, phase, save, submit, and downstream segment inheritance
+  use the same reviewed structure.
+- Clip review is now a precision sample instead of a blocker for score
+  generation after full-song structure has been confirmed.
+- Training inputs are bound to a license ledger, source hashes, split
+  identities, and checkpoint metadata. Synthetic generation and disagreement
+  queues support targeted data expansion without placing generated material in
+  sealed evaluation sets.
+- The governed v29 activity-head experiment was rejected: it did not improve
+  independent Guitar-TECHS or AG-PT results and slightly reduced GuitarSet TAB
+  F1. It is retained only as an auditable research checkpoint.
+- The default Basic Pitch desktop path no longer waits for a synchronous
+  hardware probe before starting the local runtime. A clean packaged macOS
+  smoke reached its first complete window in 9.012 seconds.
+
+## Model Status
+
+- Production default remains `basic-pitch / auto / built-in`.
+- v24 remains a research bundle; v29 is not promoted and no equivalent v30
+  activity-head training is planned.
+- The production gates remain TAB F1 at least 0.75 and repeated-note recall at
+  least 0.85. Generated notation still requires human review.
 
 ## Cross-Platform Builds
 
@@ -34,23 +46,21 @@ validate those improvements.
 
 ## Preview Limitations
 
-- The transcription model has not passed the production gate of TAB F1 0.75
-  and repeated-note recall 0.85. Generated notation still requires review.
 - Installers are unsigned and not notarized. macOS Gatekeeper and Windows
   SmartScreen may display warnings.
+- The first explicit transcription-status query can still wait for hardware
+  discovery after the desktop window appears.
 - Research providers remain experimental, hidden by default, and subject to
   their individual model licenses.
 
 ## Verification
 
-- Core, API, and desktop unit suites pass with 197 checks; Web lint passes
-  without warnings.
-- The Worker audio-analysis suite passes 78 checks.
-- The Web-only beat review workflow passes 10 desktop and mobile browser tests.
-- Focused score-timing and responsive mobile checks pass in an isolated
-  Playwright runtime.
-- The packaged macOS application loads only the user renderer, has no Admin
-  navigation, and rejects a forced Admin file navigation.
+- Core, API, desktop, and Worker suites pass with 401 automated checks.
+- Promotion, sealed-evaluation, and training-runner gates pass with 11 checks.
+- Web and Python lint pass, and the full application build succeeds.
+- The full browser suite passes 131 checks with 17 environment-dependent checks
+  skipped.
+- A packaged macOS ZIP passed isolated cold-start and runtime smoke checks.
 - CI rebuilds and checks macOS and Windows packages before creating the
   prerelease.
 
