@@ -12,15 +12,14 @@ from typing import Any
 import librosa
 import numpy as np
 import soundfile
-import torch
 
+from .data_sources import load_source_ledger
 from .evaluate_onset_position import (
     assign_detected_events,
     basic_pitch_events,
     load_model,
 )
 from .features import extract_file_cqt
-from .model import OPEN_STRING_PITCHES
 from .onset_position import basic_pitch_cache_path
 from .reference_review import (
     review_content_digest,
@@ -958,6 +957,7 @@ def export_approved_residual_reviews(
     source_manifest = source_manifest.resolve()
     output_manifest = output_manifest.resolve()
     expected_manifest_hash = sha256_file(source_manifest)
+    source_ledger = load_source_ledger()
     annotations: list[TrackAnnotation] = []
     source_datasets: dict[str, int] = {}
     review_paths = sorted(
@@ -996,6 +996,12 @@ def export_approved_residual_reviews(
                 f"Training audio hash mismatch: {training_audio.name}"
             )
         dataset = str(provenance["source_dataset"])
+        source_policy = source_ledger.resolve(
+            {
+                "dataset": dataset,
+                "license": str(provenance["source_license"]),
+            }
+        )
         source_datasets[dataset] = source_datasets.get(dataset, 0) + 1
         relative_audio = os.path.relpath(
             training_audio,
@@ -1027,6 +1033,9 @@ def export_approved_residual_reviews(
                 provenance={
                     "dataset": "Residual-Onset-Manual",
                     "source_dataset": dataset,
+                    "source_id": source_policy.source_id,
+                    "source_version": source_policy.version,
+                    "license": source_policy.license_spdx,
                     "source_license": str(provenance["source_license"]),
                     "source_track_id": str(provenance["source_track_id"]),
                     "source_manifest_sha256": expected_manifest_hash,

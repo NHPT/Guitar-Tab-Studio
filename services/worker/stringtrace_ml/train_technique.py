@@ -10,12 +10,13 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
+from .data_sources import group_identity, manifest_identity
 from .technique_model import (
     TechniqueEventDataset,
     TechniqueFeatureConfig,
     TechniqueNet,
 )
-from .technique_schema import TECHNIQUE_LABELS
+from .technique_schema import TECHNIQUE_LABELS, load_technique_manifest
 from .train import choose_device
 
 
@@ -148,6 +149,13 @@ def main() -> None:
         default="pitch-relative-cqt-domain-balanced-v9",
     )
     arguments = parser.parse_args()
+    manifest_path = arguments.manifest.resolve()
+    all_tracks = load_technique_manifest(manifest_path)
+    training_data_identity = manifest_identity(
+        manifest_path,
+        all_tracks,
+        purpose="training",
+    )
 
     random.seed(arguments.seed)
     np.random.seed(arguments.seed)
@@ -264,6 +272,7 @@ def main() -> None:
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "dataset": arguments.manifest.resolve().parent.name,
                     "manifest_name": arguments.manifest.name,
+                    "training_data": training_data_identity,
                     "labels": list(TECHNIQUE_LABELS),
                     "seed": arguments.seed,
                     "epoch": epoch,
@@ -273,14 +282,12 @@ def main() -> None:
                     "selection_metric_value": selection_score,
                     "balance_exponent": arguments.balance_exponent,
                     "balance_dataset": arguments.balance_dataset,
-                    "training_groups": sorted(
-                        {track.group_id for track in train_dataset.tracks}
+                    "training_groups": group_identity(
+                        track.group_id for track in train_dataset.tracks
                     ),
-                    "validation_groups": sorted(
-                        {
-                            track.group_id
-                            for track in validation_dataset.tracks
-                        }
+                    "validation_groups": group_identity(
+                        track.group_id
+                        for track in validation_dataset.tracks
                     ),
                 },
                 "history": history,

@@ -7,6 +7,11 @@ from collections import Counter, defaultdict
 from dataclasses import replace
 from pathlib import Path
 
+from .data_sources import (
+    enforce_records,
+    load_source_ledger,
+    source_provenance,
+)
 from .prepare_guitarset_stems import sha256_file
 from .schema import TrackAnnotation, load_manifest, write_manifest
 
@@ -23,10 +28,18 @@ def compose_training_manifests(
     seen_track_ids: set[str] = set()
     group_splits: dict[str, set[str]] = defaultdict(set)
     sources: list[dict[str, object]] = []
+    ledger = load_source_ledger()
 
     for manifest_path in manifest_paths:
         manifest_path = manifest_path.resolve()
         source_annotations = load_manifest(manifest_path)
+        source_audit = enforce_records(
+            source_annotations,
+            purpose="training",
+            ledger=ledger,
+            require_source_id=False,
+            require_portable_paths=True,
+        )
         source_splits = Counter(
             annotation.split for annotation in source_annotations
         )
@@ -36,10 +49,11 @@ def compose_training_manifests(
             )
         sources.append(
             {
-                "path": os.path.relpath(manifest_path, output_path.parent),
+                "name": manifest_path.name,
                 "sha256": sha256_file(manifest_path),
                 "tracks": len(source_annotations),
                 "splits": dict(sorted(source_splits.items())),
+                "source_ids": sorted(source_audit["sources"]),
             }
         )
         for annotation in source_annotations:
@@ -53,8 +67,16 @@ def compose_training_manifests(
                 annotation.resolve_audio(manifest_path),
                 output_path.parent,
             )
+            policy = ledger.resolve(annotation.provenance)
             annotations.append(
-                replace(annotation, audio=relative_audio)
+                replace(
+                    annotation,
+                    audio=relative_audio,
+                    provenance=source_provenance(
+                        annotation.provenance,
+                        policy,
+                    ),
+                )
             )
 
     leaking_groups = sorted(
@@ -71,9 +93,17 @@ def compose_training_manifests(
         key=lambda annotation: (annotation.split, annotation.track_id)
     )
     write_manifest(output_path, annotations)
+    output_audit = enforce_records(
+        annotations,
+        purpose="training",
+        ledger=ledger,
+        require_source_id=True,
+        require_portable_paths=True,
+    )
     report: dict[str, object] = {
         "schema_version": 1,
         "kind": "training-manifest-composition",
+        "source_ledger": output_audit["ledger"],
         "sources": sources,
         "output_manifest": {
             "name": output_path.name,
@@ -107,6 +137,7 @@ def compose_training_manifests(
         ),
         "test_tracks": 0,
         "group_split_leaks": 0,
+        "source_policy_violations": 0,
     }
     return annotations, report
 

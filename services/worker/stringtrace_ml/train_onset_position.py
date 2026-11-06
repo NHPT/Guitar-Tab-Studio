@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
+from .data_sources import manifest_identity
 from .features import FeatureConfig
 from .onset_position import (
     OnsetPositionConfig,
@@ -20,6 +21,7 @@ from .onset_position import (
     reference_position_counts,
     tablature_pitch_probabilities,
 )
+from .schema import load_manifest
 from .train import choose_device
 
 
@@ -289,6 +291,20 @@ def main() -> None:
         if arguments.validation_manifest is not None
         else arguments.manifest
     )
+    training_data_identity = manifest_identity(
+        arguments.manifest.resolve(),
+        load_manifest(arguments.manifest.resolve()),
+        purpose="training",
+    )
+    validation_data_identity = (
+        training_data_identity
+        if validation_manifest.resolve() == arguments.manifest.resolve()
+        else manifest_identity(
+            validation_manifest.resolve(),
+            load_manifest(validation_manifest.resolve()),
+            purpose="training",
+        )
+    )
     train_candidate_cache = (
         arguments.train_candidate_cache
         if arguments.train_candidate_cache is not None
@@ -506,6 +522,8 @@ def main() -> None:
                         "validation_manifest_name": (
                             validation_manifest.name
                         ),
+                        "training_data": training_data_identity,
+                        "validation_data": validation_data_identity,
                         "seed": arguments.seed,
                         "epoch": epoch,
                         "selection_metric": arguments.selection_metric,

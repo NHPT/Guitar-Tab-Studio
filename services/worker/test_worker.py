@@ -10,9 +10,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from worker import (
+    STANDARD_TUNING,
     AudioFeature,
     NoteEvent,
-    STANDARD_TUNING,
     acquire_url,
     align_beats_to_downbeats,
     align_lyrics_to_melody,
@@ -21,11 +21,11 @@ from worker import (
     assign_fingering_sequence,
     beat_grid_irregularity,
     classify_guitar_part_roles,
-    confirm_independent_guitar_parts,
     collapse_harmonic_stacks,
     collapse_inaudible_rearticulations,
     collapse_note_fragments,
     complete_vocal_melody_for_lyrics,
+    confirm_independent_guitar_parts,
     emit_muscriptor_progress,
     fuse_transcription_candidates,
     infer_chords,
@@ -35,14 +35,15 @@ from worker import (
     natural_harmonic_positions,
     normalize_audio,
     parse_timed_lyric_text,
-    python_module_command,
     prepare_mr_mt3_model,
     prepare_noise2fret_model,
     prepare_transcription_provider,
-    prepare_yourmt3_model,
     prepend_pickup_beats,
+    python_module_command,
+    quarter_note_grid_diagnostics,
     refine_positions_with_noise2fret,
     regularize_beat_times,
+    retarget_beat_times,
     run,
     run_with_percent_progress,
     select_harmonic_position,
@@ -651,12 +652,12 @@ class RuntimeGuardTest(unittest.TestCase):
                     return_value=SimpleNamespace(free=512 * 1024 * 1024),
                 ),
                 patch("worker.run") as command,
-            ):
-                with self.assertRaisesRegex(
+                self.assertRaisesRegex(
                     RuntimeError,
                     "可用磁盘空间不足",
-                ):
-                    normalize_audio(source, root)
+                ),
+            ):
+                normalize_audio(source, root)
 
             command.assert_not_called()
             self.assertFalse(normalized.exists())
@@ -665,9 +666,8 @@ class RuntimeGuardTest(unittest.TestCase):
         with patch(
             "worker.subprocess.run",
             return_value=SimpleNamespace(returncode=228),
-        ) as command:
-            with self.assertRaisesRegex(RuntimeError, "可用磁盘空间不足"):
-                run(["ffmpeg", "normalized.wav"])
+        ) as command, self.assertRaisesRegex(RuntimeError, "可用磁盘空间不足"):
+            run(["ffmpeg", "normalized.wav"])
         self.assertEqual(command.call_args.kwargs["encoding"], "utf-8")
         self.assertEqual(command.call_args.kwargs["errors"], "replace")
 
@@ -681,18 +681,18 @@ class RuntimeGuardTest(unittest.TestCase):
         with (
             patch("worker.subprocess.Popen", return_value=process),
             patch("sys.stderr"),
-        ):
-            with self.assertRaisesRegex(
+            self.assertRaisesRegex(
                 RuntimeError,
                 "可用磁盘空间不足",
-            ):
-                run_with_percent_progress(
-                    ["python", "-m", "demucs.separate"],
-                    start=22,
-                    end=50,
-                    status="separating",
-                    stage_label="正在分离人声与乐器",
-                )
+            ),
+        ):
+            run_with_percent_progress(
+                ["python", "-m", "demucs.separate"],
+                start=22,
+                end=50,
+                status="separating",
+                stage_label="正在分离人声与乐器",
+            )
 
     def test_packaged_demucs_reports_a_missing_runtime_component(self) -> None:
         process = SimpleNamespace(
@@ -704,18 +704,18 @@ class RuntimeGuardTest(unittest.TestCase):
         with (
             patch("worker.subprocess.Popen", return_value=process),
             patch("sys.stderr"),
-        ):
-            with self.assertRaisesRegex(
+            self.assertRaisesRegex(
                 RuntimeError,
                 "音轨分离组件缺失或损坏",
-            ):
-                run_with_percent_progress(
-                    ["guitar-tab-worker.exe", "--internal-demucs"],
-                    start=22,
-                    end=50,
-                    status="separating",
-                    stage_label="正在分离人声与乐器",
-                )
+            ),
+        ):
+            run_with_percent_progress(
+                ["guitar-tab-worker.exe", "--internal-demucs"],
+                start=22,
+                end=50,
+                status="separating",
+                stage_label="正在分离人声与乐器",
+            )
 
     def test_progress_subprocess_decodes_utf8_independent_of_system_locale(
         self,
@@ -750,12 +750,12 @@ class RuntimeGuardTest(unittest.TestCase):
                     return_value=SimpleNamespace(free=1024 * 1024 * 1024),
                 ),
                 patch("worker.run_with_percent_progress") as command,
-            ):
-                with self.assertRaisesRegex(
+                self.assertRaisesRegex(
                     RuntimeError,
                     "无法安全完成六轨音频分离",
-                ):
-                    separate_audio(source, root)
+                ),
+            ):
+                separate_audio(source, root)
 
             command.assert_not_called()
 
@@ -767,12 +767,11 @@ class RuntimeGuardTest(unittest.TestCase):
                 stdout="",
                 stderr="WARNING: retrying\nERROR: Sign in to confirm you are not a bot\n",
             ),
+        ), self.assertRaisesRegex(
+            RuntimeError,
+            "Sign in to confirm you are not a bot",
         ):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "Sign in to confirm you are not a bot",
-            ):
-                run(["yt-dlp", "https://example.invalid/video"])
+            run(["yt-dlp", "https://example.invalid/video"])
 
 
 class TechniqueInferenceTest(unittest.TestCase):
@@ -1187,6 +1186,118 @@ class TechniqueInferenceTest(unittest.TestCase):
         )
         self.assertEqual(tempo, 161.5)
         self.assertEqual(frames, fast_frames)
+
+    def test_tempo_octave_resolves_reviewed_lower_fast_ranges(self) -> None:
+        import numpy as np
+
+        fast_frames = list(range(10, 650, 10))
+        slow_frames = fast_frames[1::2]
+        accented = np.zeros(660)
+        accented[fast_frames[::2]] = 4
+        accented[fast_frames[1::2]] = 10
+
+        for fast_tempo, slow_tempo in (
+            (122.0, 61.0),
+            (141.0, 70.5),
+            (154.0, 77.0),
+        ):
+            with self.subTest(fast_tempo=fast_tempo):
+                tempo, frames = select_quarter_note_grid(
+                    accented,
+                    fast_tempo,
+                    fast_frames,
+                    slow_tempo,
+                    slow_frames,
+                )
+                diagnostics = quarter_note_grid_diagnostics(
+                    accented,
+                    fast_tempo,
+                    fast_frames,
+                    slow_tempo,
+                    slow_frames,
+                )
+
+                self.assertEqual(tempo, slow_tempo)
+                self.assertEqual(frames, slow_frames)
+                self.assertEqual(diagnostics["selected_grid"], "half")
+                self.assertFalse(diagnostics["requires_review"])
+
+    def test_tempo_octave_keeps_an_ambiguous_fast_grid_for_review(self) -> None:
+        import numpy as np
+
+        fast_frames = list(range(10, 650, 10))
+        slow_frames = fast_frames[::2]
+        flat = np.zeros(660)
+        flat[fast_frames] = 7
+
+        tempo, frames = select_quarter_note_grid(
+            flat,
+            144.0,
+            fast_frames,
+            72.0,
+            slow_frames,
+        )
+        diagnostics = quarter_note_grid_diagnostics(
+            flat,
+            144.0,
+            fast_frames,
+            72.0,
+            slow_frames,
+        )
+
+        self.assertEqual(tempo, 144.0)
+        self.assertEqual(frames, fast_frames)
+        self.assertTrue(diagnostics["requires_review"])
+        self.assertEqual(
+            diagnostics["selection_reason"],
+            "octave-ambiguity-insufficient-evidence",
+        )
+
+    def test_tempo_octave_preserves_a_compound_meter_pulse(self) -> None:
+        import numpy as np
+
+        fast_frames = list(range(10, 730, 10))
+        slow_frames = fast_frames[::2]
+        compound = np.zeros(740)
+        for index, frame in enumerate(fast_frames):
+            compound[frame] = (10, 4, 3)[index % 3]
+
+        tempo, frames = select_quarter_note_grid(
+            compound,
+            144.0,
+            fast_frames,
+            72.0,
+            slow_frames,
+        )
+        diagnostics = quarter_note_grid_diagnostics(
+            compound,
+            144.0,
+            fast_frames,
+            72.0,
+            slow_frames,
+        )
+
+        self.assertEqual(tempo, 144.0)
+        self.assertEqual(frames, fast_frames)
+        self.assertEqual(
+            diagnostics["selection_reason"],
+            "compound-meter-evidence",
+        )
+        self.assertFalse(diagnostics["requires_review"])
+
+    def test_retargets_a_grid_without_flattening_its_tempo_motion(self) -> None:
+        source = [0.0, 0.61, 1.2, 1.78, 2.35, 2.91, 3.46]
+
+        retargeted = retarget_beat_times(source, 150.0)
+
+        self.assertGreater(len(retargeted), len(source))
+        self.assertEqual(retargeted[0], source[0])
+        self.assertLessEqual(retargeted[-1], source[-1])
+        self.assertGreater(
+            (retargeted[1] - retargeted[0])
+            - (retargeted[-1] - retargeted[-2]),
+            0.02,
+        )
 
     def test_lyrics_follow_nearby_vocal_note_attacks(self) -> None:
         aligned = align_lyrics_to_melody(

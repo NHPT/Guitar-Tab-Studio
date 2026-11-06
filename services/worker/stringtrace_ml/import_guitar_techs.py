@@ -11,11 +11,14 @@ import numpy as np
 import pretty_midi
 import soundfile
 
+from .data_sources import load_source_ledger, source_provenance
 from .technique_schema import (
     TechniqueEvent,
     TechniqueTrack,
     write_technique_manifest,
 )
+
+GUITAR_TECHS_SOURCE_ID = "guitar-techs-zenodo-14963133"
 
 
 TECHNIQUE_BY_STEM = {
@@ -216,6 +219,7 @@ def discover_recordings(
 
 def import_guitar_techs(root: Path, output: Path) -> list[TechniqueTrack]:
     output = output.resolve()
+    policy = load_source_ledger().policies[GUITAR_TECHS_SOURCE_ID]
     tracks: list[TechniqueTrack] = []
     for player, technique, midi_path, audio_path in discover_recordings(root):
         source_events = merge_gesture_fragments(
@@ -240,26 +244,28 @@ def import_guitar_techs(root: Path, output: Path) -> list[TechniqueTrack]:
                 split="train" if player == "P1" else "validation",
                 duration=round(duration, 6),
                 events=events,
-                provenance={
-                    "dataset": "Guitar-TECHS",
-                    "source_type": "public-research-dataset",
-                    "license": "CC-BY-4.0",
-                    "player": player,
-                    "audio_modality": modality,
-                    "source_audio_sha256": sha256_file(audio_path),
-                    "source_midi_sha256": sha256_file(midi_path),
-                    "event_normalization": {
-                        "method": "connected-midi-gesture-v1",
-                        "maximum_gap_seconds": 0.03,
+                provenance=source_provenance(
+                    {
+                        "dataset": "Guitar-TECHS",
+                        "source_type": "public-research-dataset",
+                        "player": player,
+                        "audio_modality": modality,
+                        "source_audio_sha256": sha256_file(audio_path),
+                        "source_midi_sha256": sha256_file(midi_path),
+                        "event_normalization": {
+                            "method": "connected-midi-gesture-v1",
+                            "maximum_gap_seconds": 0.03,
+                        },
+                        "alignment": {
+                            "method": "onset-strength-grid-search-v1",
+                            "offset_seconds": alignment_offset,
+                            "score": alignment_score,
+                            "search_range_seconds": 0.15,
+                            "step_seconds": 0.005,
+                        },
                     },
-                    "alignment": {
-                        "method": "onset-strength-grid-search-v1",
-                        "offset_seconds": alignment_offset,
-                        "score": alignment_score,
-                        "search_range_seconds": 0.15,
-                        "step_seconds": 0.005,
-                    },
-                },
+                    policy,
+                ),
             )
         )
     write_technique_manifest(output, tracks)

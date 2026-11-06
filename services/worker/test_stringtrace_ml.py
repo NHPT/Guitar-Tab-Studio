@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import pickle
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,6 +29,10 @@ from stringtrace_ml.candidate_activity import (
     candidate_sampling_weights,
     candidate_temporal_context,
 )
+from stringtrace_ml.checkpoint_governance import (
+    evaluate_checkpoint_governance,
+    load_checkpoint_file,
+)
 from stringtrace_ml.compose_training_manifest import (
     compose_training_manifests,
 )
@@ -35,6 +41,11 @@ from stringtrace_ml.convert_technique_position_evaluation import (
 )
 from stringtrace_ml.convert_technique_positions import (
     convert_technique_positions,
+)
+from stringtrace_ml.data_sources import (
+    audit_records,
+    load_source_ledger,
+    manifest_identity,
 )
 from stringtrace_ml.dataset import GuitarTabDataset, augment_cqt_features
 from stringtrace_ml.download_guitarset import (
@@ -78,6 +89,11 @@ from stringtrace_ml.hybrid import (
     assign_pitch_events,
 )
 from stringtrace_ml.gate import evaluate_gate
+from stringtrace_ml.generate_synthetic import (
+    build_training_track,
+    generate_symbolic_dataset,
+    load_midi_symbolic,
+)
 from stringtrace_ml.import_agpt_techniques import normalized_pitch
 from stringtrace_ml.metrics import (
     evaluate_beats,
@@ -123,6 +139,7 @@ from stringtrace_ml.prepare_mixture_stems import (
 )
 from stringtrace_ml.reference_coverage import build_coverage_report
 from stringtrace_ml.reference_queue import (
+    analyze_model_disagreements,
     build_review_queue,
     priority_strings_from_coverage,
 )
@@ -140,6 +157,7 @@ from stringtrace_ml.residual_onset_review import (
     select_review_windows,
 )
 from stringtrace_ml.schema import (
+    STANDARD_TUNING_LIST,
     ChordRegion,
     ExcludedRange,
     LabeledEvent,
@@ -605,6 +623,23 @@ class StringTraceMlTest(unittest.TestCase):
                 annotations[0].provenance["review_audio_sha256"],
                 sha256_file(review_audio),
             )
+            self.assertEqual(
+                annotations[0].provenance["source_id"],
+                "guitar-techs-zenodo-14963133",
+            )
+            self.assertEqual(
+                annotations[0].provenance["license"],
+                "CC-BY-4.0",
+            )
+            composed, composition_report = compose_training_manifests(
+                [output_manifest],
+                root / "composed" / "manifest.jsonl",
+            )
+            self.assertEqual(len(composed), 1)
+            self.assertEqual(
+                composition_report["source_policy_violations"],
+                0,
+            )
             self.assertTrue(
                 annotations[0]
                 .provenance["human_verified_onset_complete"]
@@ -639,7 +674,12 @@ class StringTraceMlTest(unittest.TestCase):
                         split="train",
                         duration=1.0,
                         events=[],
-                        provenance={"dataset": "first"},
+                        provenance={
+                            "dataset": "first",
+                            "source_id": "stringtrace-synthetic-v1",
+                            "source_version": "1",
+                            "rights_basis": "original",
+                        },
                     )
                 ],
             )
@@ -653,7 +693,12 @@ class StringTraceMlTest(unittest.TestCase):
                         split="validation",
                         duration=1.0,
                         events=[],
-                        provenance={"dataset": "second"},
+                        provenance={
+                            "dataset": "second",
+                            "source_id": "stringtrace-synthetic-v1",
+                            "source_version": "1",
+                            "rights_basis": "original",
+                        },
                     )
                 ],
             )
@@ -675,6 +720,363 @@ class StringTraceMlTest(unittest.TestCase):
         self.assertEqual(report["test_tracks"], 0)
         self.assertEqual(report["group_split_leaks"], 0)
         self.assertEqual(resolved_audio, [b"train", b"validation"])
+
+    def test_source_ledger_audit_is_fail_closed_and_path_safe(self) -> None:
+        with self.temporary_directory() as temporary:
+            root = Path(temporary)
+            audio_path = root / "audio.wav"
+            audio_path.write_bytes(b"audio")
+            manifest_path = root / "manifest.jsonl"
+            synthetic = TrackAnnotation(
+                track_id="synthetic-track",
+                group_id="synthetic-group",
+                audio=audio_path.name,
+                split="train",
+                duration=1.0,
+                events=[],
+                provenance={
+                    "dataset": "stringtrace-symbolic-synthetic",
+                    "source_id": "stringtrace-synthetic-v1",
+                    "source_version": "1",
+                    "rights_basis": "original",
+                },
+            )
+            write_manifest(manifest_path, [synthetic])
+            ledger = load_source_ledger()
+
+            report = audit_records(
+                [synthetic],
+                purpose="training",
+                ledger=ledger,
+            )
+            identity = manifest_identity(
+                manifest_path,
+                [synthetic],
+                purpose="training",
+                ledger=ledger,
+            )
+            restricted = TrackAnnotation(
+                track_id="idmt-track",
+                group_id="idmt-group",
+                audio=audio_path.name,
+                split="train",
+                duration=1.0,
+                events=[],
+                provenance={
+                    "dataset": "IDMT-SMT-GUITAR_V2",
+                    "source_id": "idmt-smt-guitar-v2-zenodo-7544110",
+                    "source_version": "2",
+                    "license": "CC-BY-NC-ND-4.0",
+                },
+            )
+            rejected = audit_records(
+                [restricted],
+                purpose="training",
+                ledger=ledger,
+            )
+
+        self.assertTrue(report["passed"])
+        self.assertEqual(
+            identity["sources"],
+            {"stringtrace-synthetic-v1": 1},
+        )
+        self.assertFalse(rejected["passed"])
+        self.assertIn(
+            "purpose_not_allowed:"
+            "idmt-smt-guitar-v2-zenodo-7544110:training",
+            rejected["violations"],
+        )
+        self.assertNotIn(str(root), json.dumps(identity))
+
+    def test_checkpoint_governance_requires_current_release_sources(
+        self,
+    ) -> None:
+        ledger = load_source_ledger()
+        compliant = {
+            "metadata": {
+                "training_data": {
+                    "name": "manifest.jsonl",
+                    "sha256": "a" * 64,
+                    "records": 8,
+                    "sources": {
+                        "stringtrace-synthetic-v1": 8,
+                    },
+                    "source_ledger": {
+                        "version": ledger.ledger_version,
+                        "sha256": ledger.sha256,
+                    },
+                }
+            }
+        }
+        passed = evaluate_checkpoint_governance(
+            compliant,
+            release_channel="production",
+        )
+        legacy = evaluate_checkpoint_governance(
+            {"metadata": {"manifest_name": "manifest.jsonl"}},
+            release_channel="production",
+        )
+        path_leak = evaluate_checkpoint_governance(
+            {
+                **compliant,
+                "debug_path": "/private/training/audio.wav",
+            },
+            release_channel="production",
+        )
+        validation_only = evaluate_checkpoint_governance(
+            {
+                "metadata": {
+                    "validation_data": compliant["metadata"][
+                        "training_data"
+                    ]
+                }
+            },
+            release_channel="production",
+        )
+        empty_counts = evaluate_checkpoint_governance(
+            {
+                "metadata": {
+                    "training_data": {
+                        **compliant["metadata"]["training_data"],
+                        "records": 0,
+                        "sources": {
+                            "stringtrace-synthetic-v1": 0,
+                        },
+                    }
+                }
+            },
+            release_channel="production",
+        )
+        mismatched_counts = evaluate_checkpoint_governance(
+            {
+                "metadata": {
+                    "training_data": {
+                        **compliant["metadata"]["training_data"],
+                        "records": 8,
+                        "sources": {
+                            "stringtrace-synthetic-v1": 7,
+                        },
+                    }
+                }
+            },
+            release_channel="production",
+        )
+
+        self.assertTrue(passed["passed"])
+        self.assertFalse(legacy["passed"])
+        self.assertIn(
+            "missing_training_data_identity",
+            legacy["violations"],
+        )
+        self.assertFalse(path_leak["passed"])
+        self.assertIn(
+            "absolute_local_path_embedded",
+            path_leak["violations"],
+        )
+        self.assertFalse(validation_only["passed"])
+        self.assertIn(
+            "missing_training_data_identity",
+            validation_only["violations"],
+        )
+        self.assertFalse(empty_counts["passed"])
+        self.assertIn("invalid_record_count", empty_counts["violations"])
+        self.assertIn("invalid_source_count", empty_counts["violations"])
+        self.assertFalse(mismatched_counts["passed"])
+        self.assertIn(
+            "source_count_total_mismatch",
+            mismatched_counts["violations"],
+        )
+
+    def test_checkpoint_governance_loads_plain_pickle_checkpoints(
+        self,
+    ) -> None:
+        with self.temporary_directory() as directory:
+            checkpoint_path = Path(directory) / "technique-svm.pkl"
+            checkpoint = {
+                "format_version": 1,
+                "metadata": {"name": "stringtrace-technique-svm"},
+            }
+            with checkpoint_path.open("wb") as stream:
+                pickle.dump(checkpoint, stream)
+
+            self.assertEqual(
+                load_checkpoint_file(checkpoint_path),
+                checkpoint,
+            )
+
+    def test_symbolic_synthesis_is_deterministic_and_uses_absolute_frets(
+        self,
+    ) -> None:
+        with self.temporary_directory() as temporary:
+            root = Path(temporary)
+            source = root / "source.json"
+            source.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "rights_basis": "original",
+                        "split": "train",
+                        "bpm": 120,
+                        "time_signature": [4, 4],
+                        "capo": 2,
+                        "events": [
+                            {
+                                "onset_beats": 0,
+                                "duration_beats": 0.5,
+                                "string": 6,
+                                "fret": 2,
+                                "velocity": 90,
+                            },
+                            {
+                                "onset_beats": 1,
+                                "duration_beats": 0.5,
+                                "string": 5,
+                                "fret": 4,
+                                "velocity": 100,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            first, first_report = generate_symbolic_dataset(
+                [source],
+                root / "first",
+                seed=42,
+                sample_rate=8000,
+            )
+            second, second_report = generate_symbolic_dataset(
+                [source],
+                root / "second",
+                seed=42,
+                sample_rate=8000,
+            )
+            first_audio = first[0].resolve_audio(
+                root / "first" / "manifest.jsonl"
+            )
+            second_audio = second[0].resolve_audio(
+                root / "second" / "manifest.jsonl"
+            )
+            first_audio_sha256 = sha256_file(first_audio)
+            second_audio_sha256 = sha256_file(second_audio)
+            duplicate = root / "duplicate.json"
+            duplicate_value = json.loads(source.read_text(encoding="utf-8"))
+            duplicate_value["split"] = "validation"
+            duplicate.write_text(
+                json.dumps(duplicate_value),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "cross dataset records or splits",
+            ):
+                generate_symbolic_dataset(
+                    [source, duplicate],
+                    root / "rejected",
+                    seed=42,
+                    sample_rate=8000,
+                )
+
+        self.assertEqual(first[0].capo, 2)
+        self.assertEqual(
+            [(event.string, event.fret) for event in first[0].events],
+            [(6, 2), (5, 4)],
+        )
+        self.assertEqual(first[0].track_id, second[0].track_id)
+        self.assertEqual(first_audio_sha256, second_audio_sha256)
+        self.assertEqual(
+            first_report["manifest"]["sha256"],
+            second_report["manifest"]["sha256"],
+        )
+        self.assertNotIn(str(root), json.dumps(first_report))
+
+    def test_training_synthesis_covers_strings_frets_and_repeats(self) -> None:
+        with self.temporary_directory() as temporary:
+            root = Path(temporary)
+            first = build_training_track(
+                0,
+                root / "first",
+                8000,
+                np.random.default_rng(42),
+            )
+            second = build_training_track(
+                0,
+                root / "second",
+                8000,
+                np.random.default_rng(42),
+            )
+            first_audio = first.resolve_audio(root / "first" / "manifest.jsonl")
+            second_audio = second.resolve_audio(
+                root / "second" / "manifest.jsonl"
+            )
+            repeated = Counter(
+                (event.string, event.fret)
+                for event in first.events
+            )
+            first_audio_sha256 = sha256_file(first_audio)
+            second_audio_sha256 = sha256_file(second_audio)
+
+        self.assertEqual(first.split, "train")
+        self.assertEqual(
+            {event.string for event in first.events},
+            {1, 2, 3, 4, 5, 6},
+        )
+        self.assertGreaterEqual(max(event.fret for event in first.events), 20)
+        self.assertTrue(any(count > 1 for count in repeated.values()))
+        self.assertEqual(first_audio_sha256, second_audio_sha256)
+        self.assertEqual(
+            first.provenance["generator"],
+            "physical-fret-training-v1",
+        )
+
+    def test_midi_symbolic_assignment_is_playable_and_deterministic(
+        self,
+    ) -> None:
+        with self.temporary_directory() as temporary:
+            path = Path(temporary) / "source.mid"
+            midi = pretty_midi.PrettyMIDI(initial_tempo=100)
+            instrument = pretty_midi.Instrument(program=25)
+            instrument.notes.extend(
+                [
+                    pretty_midi.Note(
+                        velocity=90,
+                        pitch=52,
+                        start=0,
+                        end=0.5,
+                    ),
+                    pretty_midi.Note(
+                        velocity=90,
+                        pitch=55,
+                        start=0,
+                        end=0.5,
+                    ),
+                ]
+            )
+            midi.instruments.append(instrument)
+            midi.write(str(path))
+
+            first = load_midi_symbolic(
+                path,
+                default_split="train",
+                rights_basis="original",
+            )
+            second = load_midi_symbolic(
+                path,
+                default_split="train",
+                rights_basis="original",
+            )
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first.events), 2)
+        self.assertEqual(len({event.string for event in first.events}), 2)
+        self.assertEqual(
+            sorted(
+                STANDARD_TUNING_LIST[event.string - 1] + event.fret
+                for event in first.events
+            ),
+            [52, 55],
+        )
 
     def test_compose_training_manifests_rejects_test_and_group_leakage(
         self,
@@ -703,6 +1105,12 @@ class StringTraceMlTest(unittest.TestCase):
                             split=split,
                             duration=1.0,
                             events=[],
+                            provenance={
+                                "dataset": "fixture",
+                                "source_id": "stringtrace-synthetic-v1",
+                                "source_version": "1",
+                                "rights_basis": "original",
+                            },
                         )
                     ],
                 )
@@ -771,6 +1179,14 @@ class StringTraceMlTest(unittest.TestCase):
                     provenance={
                         "dataset": dataset,
                         "license": license_name,
+                        "source_id": {
+                            "Guitar-TECHS": (
+                                "guitar-techs-zenodo-14963133"
+                            ),
+                            "IDMT-SMT-GUITAR_V2": (
+                                "idmt-smt-guitar-v2-zenodo-7544110"
+                            ),
+                        }[dataset],
                     },
                 )
 
@@ -779,7 +1195,7 @@ class StringTraceMlTest(unittest.TestCase):
                 [
                     track(
                         "approved",
-                        dataset="AG-PT-set",
+                        dataset="Guitar-TECHS",
                         license_name="CC-BY-4.0",
                         split="train",
                         events=[
@@ -801,7 +1217,7 @@ class StringTraceMlTest(unittest.TestCase):
                     ),
                     track(
                         "held-out",
-                        dataset="AG-PT-set",
+                        dataset="Guitar-TECHS",
                         license_name="CC-BY-4.0",
                         split="validation",
                         events=[
@@ -857,13 +1273,13 @@ class StringTraceMlTest(unittest.TestCase):
             counts = audit["counts"]
             self.assertEqual(
                 counts["filtered_invalid_fret_events_by_dataset"],
-                {"AG-PT-set": 1},
+                {"Guitar-TECHS": 1},
             )
             self.assertEqual(
                 counts["rejected_tracks_by_dataset_and_reason"],
                 {
-                    "AG-PT-set:non_training_split": 1,
-                    "IDMT-SMT-GUITAR_V2:dataset_not_approved": 1,
+                    "Guitar-TECHS:non_selected_split": 1,
+                    "IDMT-SMT-GUITAR_V2:license_mismatch": 1,
                 },
             )
             self.assertEqual(
@@ -908,6 +1324,17 @@ class StringTraceMlTest(unittest.TestCase):
                             if dataset != "IDMT-SMT-GUITAR_V2"
                             else "CC-BY-NC-ND-4.0"
                         ),
+                        "source_id": {
+                            "Guitar-TECHS": (
+                                "guitar-techs-zenodo-14963133"
+                            ),
+                            "IDMT-SMT-GUITAR_V2": (
+                                "idmt-smt-guitar-v2-zenodo-7544110"
+                            ),
+                            "AG-PT-set": (
+                                "agpt-set-zenodo-10159492"
+                            ),
+                        }[dataset],
                     },
                 )
 
@@ -916,17 +1343,22 @@ class StringTraceMlTest(unittest.TestCase):
                 [
                     track(
                         "approved-validation",
-                        dataset="AG-PT-set",
+                        dataset="Guitar-TECHS",
                         split="validation",
                     ),
                     track(
                         "approved-train",
-                        dataset="AG-PT-set",
+                        dataset="Guitar-TECHS",
                         split="train",
                     ),
                     track(
                         "restricted-validation",
                         dataset="IDMT-SMT-GUITAR_V2",
+                        split="validation",
+                    ),
+                    track(
+                        "approved-agpt-validation",
+                        dataset="AG-PT-set",
                         split="validation",
                     ),
                 ],
@@ -940,16 +1372,20 @@ class StringTraceMlTest(unittest.TestCase):
             )
             loaded = load_manifest(output_path)
 
-            self.assertEqual(len(converted), 1)
-            self.assertEqual(len(loaded), 1)
-            self.assertEqual(loaded[0].split, "validation")
-            self.assertTrue(loaded[0].provenance["evaluation_only"])
+            self.assertEqual(len(converted), 3)
+            self.assertEqual(len(loaded), 3)
+            self.assertTrue(
+                all(track.split == "validation" for track in loaded)
+            )
+            self.assertTrue(
+                all(track.provenance["evaluation_only"] for track in loaded)
+            )
             self.assertTrue(audit["training_prohibited"])
             self.assertEqual(
                 audit["counts"][
                     "rejected_tracks_by_dataset_and_reason"
                 ],
-                {"IDMT-SMT-GUITAR_V2:dataset_not_approved": 1},
+                {},
             )
             with self.assertRaisesRegex(
                 ValueError,
@@ -2080,7 +2516,7 @@ class StringTraceMlTest(unittest.TestCase):
             )
             analysis = {
                 "time_signature": [4, 4],
-                "pickup_beats": 1,
+                "pickup_beats": 0.25,
                 "beats": [
                     round(0.25 + index * 0.5, 2)
                     for index in range(24)
@@ -2141,6 +2577,13 @@ class StringTraceMlTest(unittest.TestCase):
             self.assertEqual(report["reference_beats"], 8)
             self.assertEqual(report["beat_metrics"]["f1"], 1)
             self.assertEqual(report["downbeat_metrics"]["f1"], 1)
+            self.assertTrue(report["pickup_correct"])
+            self.assertFalse(
+                evaluate_beat_review(
+                    gold,
+                    {**analysis, "pickup_beats": 0},
+                )["pickup_correct"]
+            )
             self.assertTrue(evaluate_beat_gate(report)["passed"])
             report["beat_metrics"]["p95_error_ms"] = 80
             self.assertFalse(evaluate_beat_gate(report)["passed"])
@@ -2512,6 +2955,289 @@ class StringTraceMlTest(unittest.TestCase):
             serialized = json.dumps(report)
             self.assertNotIn(str(root), serialized)
             self.assertNotIn("private=value", serialized)
+
+    def test_model_agreement_requires_positions_from_every_model(
+        self,
+    ) -> None:
+        measures = [
+            {
+                "number": 1,
+                "start": 0.0,
+                "duration": 1.0,
+                "beats": [
+                    {
+                        "at": 0.0,
+                        "notes": [
+                            {
+                                "id": "note-1",
+                                "at": 0.1,
+                                "string": 6,
+                                "fret": 0,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+        by_measure, aggregate = analyze_model_disagreements(
+            measures,
+            {
+                "model-a": [
+                    {
+                        "note_id": "note-1",
+                        "onset": 0.1,
+                        "pitch": 40,
+                        "string": 6,
+                        "fret": 0,
+                        "confidence": 0.95,
+                    }
+                ],
+                "model-b": [
+                    {
+                        "note_id": "note-1",
+                        "onset": 0.1,
+                        "pitch": 40,
+                        "confidence": 0.95,
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(aggregate["auto_candidates"], 0)
+        self.assertEqual(aggregate["missing_position_labels"], 1)
+        self.assertEqual(
+            by_measure[1]["event_decisions"][0]["reasons"],
+            ["missing-position-label"],
+        )
+
+    def test_consensus_leftovers_are_one_project_disagreement(
+        self,
+    ) -> None:
+        measures = [
+            {
+                "number": 1,
+                "start": 0.0,
+                "duration": 1.0,
+                "beats": [],
+            }
+        ]
+        event = {
+            "onset": 0.2,
+            "pitch": 40,
+            "string": 6,
+            "fret": 0,
+            "confidence": 0.95,
+        }
+        by_measure, aggregate = analyze_model_disagreements(
+            measures,
+            {
+                "model-a": [event],
+                "model-b": [{**event, "onset": 0.21}],
+            },
+        )
+
+        self.assertEqual(aggregate["unmatched_predictions"], 1)
+        self.assertEqual(aggregate["presence_disagreements"], 0)
+        self.assertEqual(aggregate["review_only_events"], 1)
+        self.assertEqual(
+            by_measure[1]["event_decisions"][0]["reasons"],
+            ["unmatched-project-note"],
+        )
+
+    def test_leftover_note_identity_precedes_onset_clustering(
+        self,
+    ) -> None:
+        measures = [
+            {
+                "number": 1,
+                "start": 0.0,
+                "duration": 1.0,
+                "beats": [],
+            }
+        ]
+        by_measure, aggregate = analyze_model_disagreements(
+            measures,
+            {
+                "model-a": [
+                    {
+                        "note_id": "shared-extra",
+                        "onset": 0.2,
+                        "pitch": 40,
+                        "string": 6,
+                        "fret": 0,
+                        "confidence": 0.95,
+                    }
+                ],
+                "model-b": [
+                    {
+                        "note_id": "shared-extra",
+                        "onset": 0.3,
+                        "pitch": 40,
+                        "string": 6,
+                        "fret": 0,
+                        "confidence": 0.95,
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(aggregate["unmatched_predictions"], 1)
+        self.assertEqual(aggregate["presence_disagreements"], 0)
+        self.assertEqual(aggregate["timing_disagreements"], 1)
+        self.assertEqual(
+            by_measure[1]["event_decisions"][0]["note_id"],
+            "shared-extra",
+        )
+
+    def test_review_queue_ranks_model_disagreement_without_auto_gold(
+        self,
+    ) -> None:
+        with self.temporary_directory() as directory:
+            root = Path(directory)
+            project_path = root / "project.json"
+            notes = [
+                {
+                    "id": "agreement",
+                    "at": 0.1,
+                    "duration": 0.2,
+                    "string": 6,
+                    "fret": 0,
+                    "positionConfidence": 0.9,
+                    "positionSource": "playable-optimizer-v2",
+                },
+                {
+                    "id": "position-disagreement",
+                    "at": 1.1,
+                    "duration": 0.2,
+                    "string": 5,
+                    "fret": 2,
+                    "positionConfidence": 0.9,
+                    "positionSource": "playable-optimizer-v2",
+                },
+                {
+                    "id": "presence-disagreement",
+                    "at": 2.1,
+                    "duration": 0.2,
+                    "string": 4,
+                    "fret": 2,
+                    "positionConfidence": 0.9,
+                    "positionSource": "playable-optimizer-v2",
+                },
+            ]
+            project_path.write_text(
+                json.dumps(
+                    {
+                        "id": "project-model-disagreement",
+                        "source": {"kind": "upload"},
+                        "tab": {
+                            "measures": [
+                                {
+                                    "number": index + 1,
+                                    "start": float(index),
+                                    "duration": 1.0,
+                                    "beats": [
+                                        {
+                                            "at": float(index),
+                                            "notes": [note],
+                                        }
+                                    ],
+                                }
+                                for index, note in enumerate(notes)
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            model_predictions = {
+                "model-a": [
+                    {
+                        "note_id": "agreement",
+                        "onset": 0.1,
+                        "pitch": 40,
+                        "string": 6,
+                        "fret": 0,
+                        "confidence": 0.95,
+                    },
+                    {
+                        "note_id": "position-disagreement",
+                        "onset": 1.1,
+                        "pitch": 47,
+                        "string": 5,
+                        "fret": 2,
+                        "confidence": 0.95,
+                    },
+                    {
+                        "note_id": "presence-disagreement",
+                        "onset": 2.1,
+                        "pitch": 52,
+                        "string": 4,
+                        "fret": 2,
+                        "confidence": 0.95,
+                    },
+                ],
+                "model-b": [
+                    {
+                        "note_id": "agreement",
+                        "onset": 0.11,
+                        "pitch": 40,
+                        "string": 6,
+                        "fret": 0,
+                        "confidence": 0.9,
+                    },
+                    {
+                        "note_id": "position-disagreement",
+                        "onset": 1.11,
+                        "pitch": 47,
+                        "string": 6,
+                        "fret": 7,
+                        "confidence": 0.9,
+                    },
+                ],
+            }
+            report = build_review_queue(
+                project_path,
+                excerpt_measures=1,
+                limit=3,
+                model_predictions=model_predictions,
+            )
+
+        candidates = {
+            candidate["measure_numbers"][0]: candidate
+            for candidate in report["candidates"]
+        }
+        self.assertEqual(
+            candidates[1]["candidate_disposition"],
+            "auto-candidate",
+        )
+        self.assertEqual(
+            candidates[2]["candidate_disposition"],
+            "review-only",
+        )
+        self.assertEqual(
+            candidates[2]["model_disagreement"][
+                "position_disagreements"
+            ],
+            1,
+        )
+        self.assertEqual(
+            candidates[3]["model_disagreement"][
+                "presence_disagreements"
+            ],
+            1,
+        )
+        self.assertEqual(
+            report["model_disagreement_summary"]["auto_candidates"],
+            1,
+        )
+        self.assertFalse(
+            report["promotion_policy"]["auto_candidate_is_gold"]
+        )
+        self.assertTrue(
+            report["promotion_policy"][
+                "gold_requires_approved_human_review"
+            ]
+        )
 
     def test_range_download_layout_and_assembly_are_verified(self) -> None:
         with self.temporary_directory() as directory:

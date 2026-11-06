@@ -9,6 +9,7 @@ from pathlib import Path
 
 import soundfile
 
+from .data_sources import load_source_ledger, source_provenance
 from .technique_schema import (
     TechniqueEvent,
     TechniqueTrack,
@@ -18,6 +19,7 @@ from .technique_schema import (
 
 IDMT_DATASET_DOI = "10.5281/zenodo.7544110"
 IDMT_ARCHIVE_MD5 = "06796e08731bccffaed6ae59361486e4"
+IDMT_SOURCE_ID = "idmt-smt-guitar-v2-zenodo-7544110"
 IDMT_INSTRUMENT_SPLITS = {
     "AR": "train",
     "FS": "validation",
@@ -95,6 +97,7 @@ def parse_idmt_annotation(
     *,
     split: str = "test",
 ) -> TechniqueTrack | None:
+    policy = load_source_ledger().policies[IDMT_SOURCE_ID]
     root = ET.parse(annotation_path).getroot()
     global_parameters = root.find("./globalParameter")
     if global_parameters is None:
@@ -145,25 +148,27 @@ def parse_idmt_annotation(
         split=split,
         duration=round(duration, 6),
         events=sorted(events, key=lambda event: (event.onset, event.string)),
-        provenance={
-            "dataset": "IDMT-SMT-GUITAR_V2",
-            "dataset_doi": IDMT_DATASET_DOI,
-            "source_type": "public-research-dataset",
-            "license": "CC-BY-NC-ND-4.0",
-            "archive_md5": IDMT_ARCHIVE_MD5,
-            "instrument_code": instrument_code,
-            "instrument_model": global_parameters.findtext(
-                "instrumentModel",
-                "unknown",
-            ),
-            "recording_artist": global_parameters.findtext(
-                "recordingArtist",
-                "unknown",
-            ),
-            "source_audio_sha256": sha256_file(audio_path),
-            "source_annotation_sha256": sha256_file(annotation_path),
-            "label_mapping": "idmt-expression-style-v1",
-        },
+        provenance=source_provenance(
+            {
+                "dataset": "IDMT-SMT-GUITAR_V2",
+                "dataset_doi": IDMT_DATASET_DOI,
+                "source_type": "public-research-dataset",
+                "archive_md5": IDMT_ARCHIVE_MD5,
+                "instrument_code": instrument_code,
+                "instrument_model": global_parameters.findtext(
+                    "instrumentModel",
+                    "unknown",
+                ),
+                "recording_artist": global_parameters.findtext(
+                    "recordingArtist",
+                    "unknown",
+                ),
+                "source_audio_sha256": sha256_file(audio_path),
+                "source_annotation_sha256": sha256_file(annotation_path),
+                "label_mapping": "idmt-expression-style-v1",
+            },
+            policy,
+        ),
     )
 
 

@@ -44,6 +44,7 @@ import {
   defaultBeatSourceRoot,
   getBeatStructureReview,
   listBeatStructureReviews,
+  reopenBeatStructureReview,
   saveBeatStructureDraft,
   submitBeatStructureReview,
 } from './beat-structure-reviews.js'
@@ -583,6 +584,22 @@ export function registerAdminApi(
     (request, response) => {
       const user = requireAdmin(request, response, 'reviews:write')
       if (!user) return
+      if (
+        !request.body ||
+        !Object.prototype.hasOwnProperty.call(
+          request.body,
+          'excluded_candidate_beats',
+        ) ||
+        !Object.prototype.hasOwnProperty.call(
+          request.body,
+          'added_candidate_beats',
+        )
+      ) {
+        response.status(409).json({
+          error: '复核页面版本已过期，请刷新页面后重新保存',
+        })
+        return
+      }
       const reviewer = requestedReviewer(user, request.query.reviewer)
       response.json(
         saveBeatStructureDraft(
@@ -601,12 +618,50 @@ export function registerAdminApi(
     (request, response) => {
       const user = requireAdmin(request, response, 'reviews:write')
       if (!user) return
+      if (
+        !request.body ||
+        !Object.prototype.hasOwnProperty.call(
+          request.body,
+          'excluded_candidate_beats',
+        ) ||
+        !Object.prototype.hasOwnProperty.call(
+          request.body,
+          'added_candidate_beats',
+        )
+      ) {
+        response.status(409).json({
+          error: '复核页面版本已过期，请刷新页面后重新提交',
+        })
+        return
+      }
       const reviewer = requestedReviewer(user, request.query.reviewer)
       response.json(
         submitBeatStructureReview(
           request.params.recordingId,
           reviewer,
           request.body,
+          beatGoldRoot,
+          beatSourceRoot,
+          {
+            adminUserId: user.id,
+            adminUsername: user.username,
+          },
+        ),
+      )
+    },
+  )
+
+  app.post(
+    '/api/admin/beat-gold/structure-reviews/:recordingId/reopen',
+    (request, response) => {
+      const user = requireAdmin(request, response, 'reviews:write')
+      if (!user) return
+      const reviewer = requestedReviewer(user, request.query.reviewer)
+      response.json(
+        reopenBeatStructureReview(
+          request.params.recordingId,
+          reviewer,
+          request.body?.reason,
           beatGoldRoot,
           beatSourceRoot,
           {

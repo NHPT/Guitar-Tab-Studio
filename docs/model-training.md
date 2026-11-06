@@ -27,16 +27,35 @@ Training manifests use JSON Lines schema version 1. Every record contains:
 - `group_id`: schema v1 compatibility identifier. It must conservatively group
   every record connected by performer, original work, recording session or
   derived-audio lineage; it cannot represent only one of those dimensions.
-- `audio`: absolute path or path relative to the manifest.
+- `audio`: path relative to the manifest. Absolute paths are rejected by the
+  training and release governance gates.
 - `split`: `train`, `validation`, or `test`.
 - `tuning`: open-string MIDI pitches ordered string 1 through 6.
 - `capo`: physical capo fret.
 - `events`: onset, offset, physical string, absolute physical fret, technique
   and confidence. The UI subtracts the display capo when rendering TAB.
 - `beats`, `bpm`, and `time_signature`.
-- `provenance`: dataset and annotation source.
+- `provenance`: stable `source_id`, source version, license, rights basis,
+  source/content hashes and transformation recipe.
 
 No `group_id` may appear in more than one split.
+
+The tracked source ledger is
+`services/worker/stringtrace_ml/source_ledger.json`. It records each source
+version, license URL, verification status, allowed purposes, rights flags and
+hash policy. Audit a manifest before composition or training:
+
+```bash
+PYTHONPATH=services/worker .venv/bin/python \
+  -m stringtrace_ml.data_sources \
+  --manifest apps/api/data/training/guitarset/manifest.jsonl \
+  --purpose training
+```
+
+The audit fails closed for unknown IDs, license mismatches, quarantined
+sources, prohibited purposes and absolute local paths. Training entry points
+run the same audit and store only manifest hashes, source counts and the ledger
+identity in new checkpoints.
 
 Community schema v2 stores `performer_id`, `work_id`, `recording_id`,
 `session_id` and `lineage_id` separately. Its splitter builds connected
@@ -125,13 +144,56 @@ string/fret supervision without exposing its validation or test partitions:
   --audit-output apps/api/data/training/reports/technique-position-train-v1-audit.json
 ```
 
-The converter applies a dataset-level license allowlist, exports only the
-original `train` split, preserves `group_id`, writes relative audio paths and
-drops positions outside frets 0-24. The current output contains 365 tracks,
-10 groups and 18,050 events from Guitar-TECHS and AG-PT-set. Both releases are
-CC BY 4.0. IDMT-SMT-GUITAR is CC BY-NC-ND 4.0, so it is excluded from
-adaptation training even if an older generated manifest declared a less
-restrictive license.
+The converter resolves every record through the source ledger, exports only
+the original `train` split, preserves `group_id`, writes relative audio paths
+and drops positions outside frets 0-24. Guitar-TECHS is currently approved for
+training. AG-PT-set is also approved after its CC BY 4.0 status was
+independently verified against the official Zenodo record; only its
+performer-grouped training split may enter training composition.
+IDMT-SMT-GUITAR is CC BY-NC-ND 4.0 and is evaluation-only. Older generated
+manifests do not override these policies.
+
+The current acquisition snapshot is
+`governed-v1/formal-training-manifest-v2.jsonl`. It preserves the original
+600 GuitarSet, 12 Guitar-TECHS and 128 physical synthetic records, then adds
+353 AG-PT-set training records with 16,908 valid 0-24 fret events. The result
+contains 1,093 records (973 train, 120 validation), 143 groups, no test
+records, no group split leakage and no source-policy violations. Its SHA-256
+is `630d08ede28ba7c220793715738444dab22ca53e3cde3c2311bbc6b028879916`.
+The v28 snapshot remains `formal-training-manifest.jsonl` with 740 records
+and its original SHA-256
+`cb8b456d4ca8736249d3494543a8019d459463d420fb939983865db194707a26`;
+the new snapshot does not authorize a v29 run by itself.
+AG-PT-set validation is kept separate in
+`governed-v1/agpt-position-validation.jsonl`: 72 records, 3,690 valid events,
+one held-out performer group, SHA-256
+`83abea78a2786131bdf3776def93d80c4141cb825afadf44a7908c925d67d708`.
+It is marked evaluation-only and is not part of either formal training
+snapshot.
+
+### Deterministic symbolic synthesis
+
+The synthetic generator accepts structured JSON and MIDI. JSON records use
+beat-relative timing plus explicit physical string/fret positions. MIDI notes
+receive a deterministic playable fingering. In both formats, `fret` is the
+absolute physical fret and `capo` is independent metadata; the generator does
+not add or subtract capo during conversion.
+
+```bash
+PYTHONPATH=services/worker .venv/bin/python \
+  -m stringtrace_ml.generate_synthetic \
+  --symbolic-input data/original-exercise.json \
+  --rights-basis original \
+  --output apps/api/data/training/symbolic-original-v1 \
+  --seed 20261106
+```
+
+Each output record includes the symbolic source hash, normalized content hash,
+recipe hash, seed, generated-audio hash and explicit rights basis. Identical
+symbolic content receives the same group identity, so copies or render
+variants cannot cross train/validation/test splits. Generated records remain
+non-benchmark candidates. MusicXML and GuitarPro import and multi-renderer
+augmentation remain future work.
 
 For transfer experiments, training and validation manifests and candidate
 caches can be selected independently:
@@ -175,6 +237,22 @@ review packages:
   --excerpt-measures 2 \
   --limit 12
 ```
+
+Pass a model-prediction document with at least two model event lists to add
+event-level presence, timing, string/fret and confidence disagreement:
+
+```bash
+PYTHONPATH=services/worker .venv/bin/python \
+  -m stringtrace_ml.reference_queue \
+  --project apps/api/data/state/projects/<project-id>.json \
+  --model-predictions apps/api/data/training/reports/model-predictions.json \
+  --output apps/api/data/training/reports/model-disagreement-queue.json
+```
+
+Unanimous high-confidence events are marked `auto-candidate`; conflicts,
+missing events, timing disagreement and low confidence are `review-only`.
+Neither disposition is gold. Gold export still requires an approved human
+review.
 
 The queue prioritizes same-string intervals within 120 ms, frets 12 and above,
 strings missing from every supplied real-reference condition, and continuous
@@ -638,9 +716,12 @@ Basic Pitch remains the default Worker backend, and no threshold was tuned
 after the additional legacy benchmark evaluation. The complete audit is
 `guitarset-mixture-demucs-domain-v2.json`.
 
-A licensed cross-source residual domain now adds 48 AG-PT-set and 12
+A legacy cross-source residual experiment added 48 AG-PT-set and 12
 Guitar-TECHS training recordings, covering 10 source groups and 2.04 hours of
-audio. All selected sources are CC BY 4.0. Their deterministic mixture stems
+audio. Those runs predate the independently verified source ledger and do not
+contain a machine-verifiable governed manifest identity, so their checkpoints
+remain research-only even though AG-PT-set is now verified as CC BY 4.0. Their
+deterministic mixture stems
 use the same five `-6` through `+6` dB SNR tiers and `htdemucs_6s` production
 separator. The derivative contains 60 stems (1,292,623,308 bytes) and 120
 source/stem training views. `stringtrace-compose-training-manifest` combines
@@ -674,7 +755,7 @@ progressively more TAB F1 for repeated recall.
 
 All four cross-source checkpoints are rejected without re-reading the legacy
 player-05 benchmark.
-The licensed data domain, safe manifest composer, sparse-label sampling and
+The historical data domain, safe manifest composer, sparse-label sampling and
 scaled adapter capability are retained for a future dedicated onset or
 repeated-attack objective. v12 remains the strongest research checkpoint. Full
 evidence is in
@@ -919,10 +1000,12 @@ training infrastructure, desktop work and community tooling may continue in
 parallel.
 
 The production candidate remains trained on the official GuitarSet microphone
-archive under CC BY 4.0. Guitar-TECHS and AG-PT-set are imported as licensed
-research-only auxiliary data, but their transfer experiments did not improve
-the gate candidate. IDMT-SMT-GUITAR is excluded from adaptation training due to
-its CC BY-NC-ND 4.0 license. The optional GuitarSet hex-debleeded archive was
+archive under CC BY 4.0. Guitar-TECHS remains an approved auxiliary source.
+AG-PT-set is an approved auxiliary source after independent CC BY 4.0
+verification, but legacy experiments that used it still lack current governed
+manifest identity and cannot be promoted. IDMT-SMT-GUITAR is evaluation-only
+due to its CC BY-NC-ND 4.0 license. The optional GuitarSet hex-debleeded
+archive was
 not downloaded because local capacity is insufficient for safe download and
 extraction. Noise2Fret now publishes its training code under MIT, but its
 repository tree and release list still contain no usable pretrained weights,
@@ -930,3 +1013,17 @@ so it cannot enter the local gate without a new full training run. MuScriptor
 code is MIT, but its published weights are gated and licensed CC BY-NC 4.0;
 they are not eligible for the product backend. External paper metrics are not
 treated as local benchmark results.
+
+Before any production promotion, audit the serialized checkpoint:
+
+```bash
+PYTHONPATH=services/worker .venv/bin/python \
+  -m stringtrace_ml.checkpoint_governance \
+  --checkpoint apps/api/data/training/checkpoints/candidate.pt \
+  --release-channel production
+```
+
+This gate rejects embedded local paths, missing manifest identities, stale
+ledger hashes, unknown/quarantined sources and sources that do not permit model
+release. The existing v24 research bundle contains no absolute local paths,
+but predates training-source identities and therefore remains research-only.

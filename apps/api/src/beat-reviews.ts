@@ -73,11 +73,49 @@ export interface BeatReviewPackage {
     | 'independent_annotation'
     | 'adjudicated_gold'
   benchmark_eligible: boolean
+  structure_invalidation_history?: BeatStructureInvalidationHistoryEntry[]
 }
 
 export interface BeatSubmissionIdentity {
   adminUserId: string
   adminUsername: string
+}
+
+export interface BeatStructureInvalidationHistoryEntry {
+  invalidated_at: string
+  reason: string
+  recording_id: string
+  structure_content_sha256: string
+  previous_status: BeatReviewPackage['status']
+  previous_submission: BeatReviewPackage['submission']
+  previous_adjudication: BeatReviewPackage['adjudication']
+  admin_user_id?: string
+  admin_username?: string
+}
+
+export interface BeatStructureInvalidationResult {
+  clipsInvalidated: number
+  goldInvalidated: number
+}
+
+export interface SubmittedBeatStructureForClips {
+  recordingId: string
+  reviewer: string
+  corpusVersion: string
+  timeSignature: [number, number]
+  pickupBeats: number
+  firstDownbeatAt: number
+  meterChanges: Array<{
+    at: number
+    time_signature: [number, number]
+  }>
+  candidateBeats: number[]
+  contentSha256: string
+}
+
+export interface BeatStructureDraftRegenerationResult {
+  regenerated: number
+  skipped: number
 }
 
 export interface BeatMetrics {
@@ -217,6 +255,23 @@ function integer(value: unknown, label: string): number {
   return number
 }
 
+function normalizePickupBeats(
+  value: unknown,
+  timeSignature: [number, number],
+  label: string,
+): number {
+  const beats = finiteNumber(value, label)
+  const quarterUnits = Math.round(beats * 4)
+  if (Math.abs(beats * 4 - quarterUnits) > 0.000001) {
+    throw new BeatReviewRequestError(`${label}必须以 0.25 拍为步进`)
+  }
+  const normalized = quarterUnits / 4
+  if (normalized < 0 || normalized >= timeSignature[0]) {
+    throw new BeatReviewRequestError(`${label}无效`)
+  }
+  return normalized
+}
+
 function sha256File(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
@@ -253,7 +308,13 @@ export function beatReviewContentDigest(
 ): string {
   const payload = Object.fromEntries(
     Object.entries(review).filter(
-      ([key]) => !['status', 'submission', 'adjudication'].includes(key),
+      ([key]) =>
+        ![
+          'status',
+          'submission',
+          'adjudication',
+          'structure_invalidation_history',
+        ].includes(key),
     ),
   )
   return createHash('sha256')
@@ -564,10 +625,11 @@ function validateReview(
     throw new BeatReviewRequestError('片段边界无效', 500)
   }
   const timeSignature = normalizeTimeSignature(value.time_signature)
-  const pickupBeats = integer(value.pickup_beats, '弱起拍数')
-  if (pickupBeats < 0 || pickupBeats >= timeSignature[0]) {
-    throw new BeatReviewRequestError('弱起拍数无效', 500)
-  }
+  const pickupBeats = normalizePickupBeats(
+    value.pickup_beats,
+    timeSignature,
+    '弱起拍数',
+  )
   if (!Array.isArray(value.beats)) {
     throw new BeatReviewRequestError('拍点列表无效', 500)
   }
@@ -707,13 +769,11 @@ function applyDraft(
   const timeSignature = normalizeTimeSignature(
     input.time_signature ?? review.time_signature,
   )
-  const pickupBeats = integer(
+  const pickupBeats = normalizePickupBeats(
     input.pickup_beats ?? review.pickup_beats,
+    timeSignature,
     '弱起拍数',
   )
-  if (pickupBeats < 0 || pickupBeats >= timeSignature[0]) {
-    throw new BeatReviewRequestError('弱起拍数必须小于每小节拍数')
-  }
   const beats = normalizeBeatMarkers(
     input.beats ?? review.beats,
     review.audio_duration,
@@ -911,7 +971,277 @@ export function submitBeatReview(
   review.submission.content_sha256 = beatReviewContentDigest(review)
   validateReview(review, reviewer)
   writeReview(root, reviewer, clipId, review)
-  return getBeatReview(clipId, reviewer, root)
+return getBeatReview(clipId, reviewer, root)
+}
+
+export function regenerateBeatReviewDraftsFromStructure(
+  structure: SubmittedBeatStructureForClips,
+  root = defaultBeatGoldRoot(),
+  options: { overwriteTouched?: boolean } = {},
+): BeatStructureDraftRegenerationResult {
+  if (!SAFE_ID_PATTERN.test(structure.recordingId)) {
+    throw new BeatReviewRequestError('录音标识无效')
+  }
+  if (!SHA256_PATTERN.test(structure.contentSha256)) {
+    throw new BeatReviewRequestError('全曲结构摘要无效')
+  }
+  const reviewer = normalizeReviewer(structure.reviewer)
+  const manifest = readManifest(root)
+  if (manifest.corpus_version !== structure.corpusVersion) {
+    throw new BeatReviewRequestError('全曲结构与片段语料版本不一致')
+  }
+  const items = manifest.items.filter(
+    (item) => item.recording_id === structure.recordingId,
+  )
+  if (items.length === 0) {
+    throw new BeatReviewRequestError('全曲录音不存在', 404)
+  }
+  const candidateBeats = [...structure.candidateBeats]
+  if (
+    candidateBeats.length < 2 ||
+    candidateBeats.some(
+      (beat, index) =>
+        !Number.isFinite(beat) ||
+        beat < 0 ||
+        (index > 0 && beat - candidateBeats[index - 1] < 0.03),
+    )
+  ) {
+    throw new BeatReviewRequestError('全曲复核拍点无效')
+  }
+  const nearestIndex = (at: number): number => {
+    let nearest = 0
+    for (let index = 1; index < candidateBeats.length; index += 1) {
+      if (
+        Math.abs(candidateBeats[index] - at) <
+        Math.abs(candidateBeats[nearest] - at)
+      ) {
+        nearest = index
+      }
+    }
+    return nearest
+  }
+  const initialIndex = nearestIndex(structure.firstDownbeatAt)
+  let regenerated = 0
+  let skipped = 0
+  for (const item of items) {
+    const review = readReview(root, reviewer, item.clip_id)
+    const touched =
+      review.status !== 'draft' ||
+      review.submission !== null ||
+      review.adjudication !== null ||
+      Object.values(review.checks).some(Boolean)
+    const hasInternalMeterChange = structure.meterChanges.some(
+      (change) =>
+        change.at > review.audio_source_start &&
+        change.at < review.audio_source_end,
+    )
+    if (
+      (touched && !options.overwriteTouched) ||
+      hasInternalMeterChange
+    ) {
+      skipped += 1
+      continue
+    }
+    const sections = [
+      {
+        index: initialIndex,
+        signature: structure.timeSignature,
+        measure: 1,
+      },
+    ]
+    for (const change of structure.meterChanges) {
+      if (change.at > review.audio_source_start) break
+      const previous = sections[sections.length - 1]
+      const index = nearestIndex(change.at)
+      sections.push({
+        index,
+        signature: change.time_signature,
+        measure:
+          previous.measure +
+          Math.ceil(
+            (index - previous.index) / previous.signature[0],
+          ),
+      })
+    }
+    const section = sections[sections.length - 1]
+    const markers = candidateBeats
+      .map((sourceAt, sourceIndex) => ({ sourceAt, sourceIndex }))
+      .filter(
+        ({ sourceAt }) =>
+          sourceAt >= review.audio_source_start &&
+          sourceAt < review.audio_source_end,
+      )
+      .map(({ sourceAt, sourceIndex }) => {
+        const offset = sourceIndex - section.index
+        const numerator = section.signature[0]
+        const beat = ((offset % numerator) + numerator) % numerator + 1
+        return {
+          at:
+            Math.round(
+              (sourceAt - review.audio_source_start) * 1_000_000,
+            ) / 1_000_000,
+          beat,
+          measure: Math.max(
+            0,
+            section.measure + Math.floor(offset / numerator),
+          ),
+          downbeat: beat === 1,
+        }
+      })
+    if (markers.length < 2) {
+      skipped += 1
+      continue
+    }
+    const next: BeatReviewPackage = {
+      ...review,
+      status: 'draft',
+      time_signature: [...section.signature],
+      pickup_beats: Math.min(
+        structure.pickupBeats,
+        section.signature[0] - 0.25,
+      ),
+      beats: markers,
+      checks: {
+        beat_times: false,
+        downbeats: false,
+        meter: false,
+        completeness: false,
+      },
+      candidate_source: {
+        ...review.candidate_source,
+        kind: 'reviewed-full-song-structure',
+        structure_content_sha256: structure.contentSha256,
+      },
+      submission: null,
+      adjudication: null,
+      verification_status: 'draft',
+      benchmark_eligible: false,
+    }
+    validateReview(next, reviewer)
+    writeReview(root, reviewer, item.clip_id, next)
+    regenerated += 1
+  }
+  return { regenerated, skipped }
+}
+
+
+export function invalidateBeatReviewsForStructure(
+  recordingId: string,
+  reviewerValue: unknown,
+  reason: string,
+  structureContentSha256: string,
+  root = defaultBeatGoldRoot(),
+  identity?: BeatSubmissionIdentity,
+): BeatStructureInvalidationResult {
+  if (!SAFE_ID_PATTERN.test(recordingId)) {
+    throw new BeatReviewRequestError('录音标识无效')
+  }
+  if (!SHA256_PATTERN.test(structureContentSha256)) {
+    throw new BeatReviewRequestError('全曲结构摘要无效', 500)
+  }
+  const reviewer = normalizeReviewer(reviewerValue)
+  const items = readManifest(root).items.filter(
+    (item) => item.recording_id === recordingId,
+  )
+  if (items.length === 0) {
+    throw new BeatReviewRequestError('全曲录音不存在', 404)
+  }
+
+  const invalidatedAt = new Date().toISOString()
+  const reviews = items.map((item) => ({
+    item,
+    review: readReview(root, reviewer, item.clip_id),
+  }))
+  const goldEntries = items.flatMap((item) => {
+    const goldPath = goldReviewPath(root, item.clip_id)
+    if (!existsSync(goldPath)) return []
+    if (lstatSync(goldPath).isSymbolicLink()) {
+      throw new BeatReviewRequestError('金标准路径无效', 500)
+    }
+    const audioPath = resolve(root, 'gold', `${item.clip_id}.wav`)
+    if (
+      existsSync(audioPath) &&
+      lstatSync(audioPath).isSymbolicLink()
+    ) {
+      throw new BeatReviewRequestError('金标准音频路径无效', 500)
+    }
+    return [{ item, goldPath, audioPath }]
+  })
+
+  for (const { item, review } of reviews) {
+    review.structure_invalidation_history = [
+      ...(review.structure_invalidation_history ?? []),
+      {
+        invalidated_at: invalidatedAt,
+        reason,
+        recording_id: recordingId,
+        structure_content_sha256: structureContentSha256,
+        previous_status: review.status,
+        previous_submission: review.submission,
+        previous_adjudication: review.adjudication,
+        ...(identity
+          ? {
+              admin_user_id: identity.adminUserId,
+              admin_username: identity.adminUsername,
+            }
+          : {}),
+      },
+    ]
+    review.status = 'draft'
+    review.checks = {
+      ...review.checks,
+      downbeats: false,
+      meter: false,
+    }
+    review.submission = null
+    review.adjudication = null
+    review.verification_status = 'draft'
+    review.benchmark_eligible = false
+    validateReview(review, reviewer)
+    writeReview(root, reviewer, item.clip_id, review)
+  }
+
+  const invalidationId = `${Date.now()}-${recordingId}-${reviewer}`
+  const archiveRoot = resolve(
+    root,
+    '.invalidated',
+    'structure-reopens',
+    invalidationId,
+  )
+  const invalidatedGold: string[] = []
+  for (const { item, goldPath, audioPath } of goldEntries) {
+    mkdirSync(archiveRoot, { recursive: true, mode: 0o700 })
+    renameSync(goldPath, resolve(archiveRoot, `${item.clip_id}.json`))
+    if (existsSync(audioPath)) {
+      renameSync(audioPath, resolve(archiveRoot, `${item.clip_id}.wav`))
+    }
+    invalidatedGold.push(item.clip_id)
+  }
+  if (invalidatedGold.length > 0) {
+    writeFileSync(
+      resolve(archiveRoot, 'invalidation.json'),
+      `${JSON.stringify({
+        invalidated_at: invalidatedAt,
+        reason,
+        recording_id: recordingId,
+        reviewer,
+        structure_content_sha256: structureContentSha256,
+        clips: items.map((item) => item.clip_id),
+        gold: invalidatedGold,
+        ...(identity
+          ? {
+              admin_user_id: identity.adminUserId,
+              admin_username: identity.adminUsername,
+            }
+          : {}),
+      }, null, 2)}\n`,
+      { encoding: 'utf8', mode: 0o600 },
+    )
+  }
+  return {
+    clipsInvalidated: items.length,
+    goldInvalidated: invalidatedGold.length,
+  }
 }
 
 function evaluationMarkers(review: BeatReviewPackage): BeatReviewMarker[] {

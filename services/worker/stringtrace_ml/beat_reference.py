@@ -88,6 +88,21 @@ def review_content_digest(review: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def normalize_pickup_beats(value: object, numerator: int) -> float:
+    pickup_beats = float(value)
+    quarter_units = round(pickup_beats * 4)
+    if (
+        not math.isfinite(pickup_beats)
+        or abs(pickup_beats * 4 - quarter_units) > 1e-6
+        or not 0 <= pickup_beats < numerator
+    ):
+        raise ValueError(
+            "pickup_beats must use 0.25-beat steps and be smaller "
+            "than the meter numerator"
+        )
+    return quarter_units / 4
+
+
 def beat_markers_from_analysis(
     analysis: dict[str, Any],
     *,
@@ -98,16 +113,20 @@ def beat_markers_from_analysis(
         int(value)
         for value in analysis.get("time_signature", [4, 4])
     ]
-    pickup_beats = int(analysis.get("pickup_beats", 0))
+    pickup_beats = normalize_pickup_beats(
+        analysis.get("pickup_beats", 0),
+        numerator,
+    )
+    whole_pickup_beats = int(pickup_beats)
     markers: list[dict[str, int | float | bool]] = []
     for index, raw_at in enumerate(analysis.get("beats", [])):
         at = float(raw_at)
-        if index < pickup_beats:
-            beat_number = numerator - pickup_beats + index + 1
+        if index < whole_pickup_beats:
+            beat_number = numerator - whole_pickup_beats + index + 1
             measure = 0
         else:
-            beat_number = (index - pickup_beats) % numerator + 1
-            measure = (index - pickup_beats) // numerator + 1
+            beat_number = (index - whole_pickup_beats) % numerator + 1
+            measure = (index - whole_pickup_beats) // numerator + 1
         if source_start <= at < source_end:
             markers.append(
                 {
@@ -195,9 +214,10 @@ def validate_review(
     ):
         raise ValueError("time_signature must contain two positive integers")
     numerator = int(signature[0])
-    pickup_beats = int(review.get("pickup_beats", 0))
-    if not 0 <= pickup_beats < numerator:
-        raise ValueError("pickup_beats must be smaller than the meter numerator")
+    normalize_pickup_beats(
+        review.get("pickup_beats", 0),
+        numerator,
+    )
     beats = review.get("beats")
     if not isinstance(beats, list):
         raise ValueError("beats must be a list")
@@ -286,7 +306,7 @@ def create_review(
     post_roll: float = 4.0,
     analysis_path: Path | None = None,
     time_signature: tuple[int, int] = (4, 4),
-    pickup_beats: int = 0,
+    pickup_beats: float = 0,
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
     if review_path.exists():
@@ -343,7 +363,15 @@ def create_review(
         else []
     )
     if analysis is not None:
-        pickup_beats = int(analysis.get("pickup_beats", pickup_beats))
+        pickup_beats = normalize_pickup_beats(
+            analysis.get("pickup_beats", pickup_beats),
+            time_signature[0],
+        )
+    else:
+        pickup_beats = normalize_pickup_beats(
+            pickup_beats,
+            time_signature[0],
+        )
     review: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "review_kind": REVIEW_KIND,
@@ -559,8 +587,17 @@ def evaluate_review(
             == review["time_signature"]
         ),
         "pickup_correct": (
-            int(analysis.get("pickup_beats", 0))
-            == int(review["pickup_beats"])
+            abs(
+                normalize_pickup_beats(
+                    analysis.get("pickup_beats", 0),
+                    int(review["time_signature"][0]),
+                )
+                - normalize_pickup_beats(
+                    review["pickup_beats"],
+                    int(review["time_signature"][0]),
+                )
+            )
+            <= 1e-6
         ),
     }
 
@@ -625,7 +662,7 @@ def main() -> None:
     initialize.add_argument("--pre-roll", type=float, default=4.0)
     initialize.add_argument("--post-roll", type=float, default=4.0)
     initialize.add_argument("--time-signature", default="4/4")
-    initialize.add_argument("--pickup-beats", type=int, default=0)
+    initialize.add_argument("--pickup-beats", type=float, default=0)
     initialize.add_argument("--tag", action="append")
 
     submit = commands.add_parser("submit")

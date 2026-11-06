@@ -13,6 +13,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
+from .data_sources import group_identity, manifest_identity
 from .evaluate_technique import _confusion
 from .technique_descriptors import (
     TechniqueDescriptorConfig,
@@ -22,7 +23,7 @@ from .technique_model import (
     TechniqueEventDataset,
     TechniqueFeatureConfig,
 )
-from .technique_schema import TECHNIQUE_LABELS
+from .technique_schema import TECHNIQUE_LABELS, load_technique_manifest
 from .train_technique import classification_metrics
 
 
@@ -121,6 +122,13 @@ def main() -> None:
     parser.add_argument("--balance-exponent", type=float, default=1.0)
     parser.add_argument("--balance-dataset", action="store_true")
     arguments = parser.parse_args()
+    manifest_path = arguments.manifest.resolve()
+    all_tracks = load_technique_manifest(manifest_path)
+    training_data_identity = manifest_identity(
+        manifest_path,
+        all_tracks,
+        purpose="training",
+    )
 
     random.seed(arguments.seed)
     np.random.seed(arguments.seed)
@@ -274,6 +282,7 @@ def main() -> None:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "dataset": arguments.manifest.resolve().parent.name,
             "manifest_name": arguments.manifest.name,
+            "training_data": training_data_identity,
             "labels": list(TECHNIQUE_LABELS),
             "seed": arguments.seed,
             "selection_metric_value": best_selection_score,
@@ -282,11 +291,11 @@ def main() -> None:
             "balance_exponent": arguments.balance_exponent,
             "balance_dataset": arguments.balance_dataset,
             "sklearn_version": sklearn.__version__,
-            "training_groups": sorted(
-                {track.group_id for track in train_dataset.tracks}
+            "training_groups": group_identity(
+                track.group_id for track in train_dataset.tracks
             ),
-            "validation_groups": sorted(
-                {track.group_id for track in validation_dataset.tracks}
+            "validation_groups": group_identity(
+                track.group_id for track in validation_dataset.tracks
             ),
         },
     }

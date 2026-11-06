@@ -511,7 +511,6 @@
   z-index: 6;
   background: var(--danger);
   pointer-events: none;
-  transition: left 40ms linear;
 }
 
 .beat-review-timeline > button {

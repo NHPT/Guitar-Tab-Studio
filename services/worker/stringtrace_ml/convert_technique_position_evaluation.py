@@ -8,9 +8,10 @@ from pathlib import Path
 
 from .convert_technique_positions import (
     KNOWN_DATASET_LICENSES,
-    TRAINING_DATASET_POLICIES,
+    _track_rejection_reason,
     sha256_file,
 )
+from .data_sources import load_source_ledger, source_provenance
 from .schema import (
     STANDARD_TUNING_LIST,
     LabeledEvent,
@@ -42,6 +43,7 @@ def convert_technique_position_evaluation(
     source_path = source_path.resolve()
     output_path = output_path.resolve()
     tracks = load_technique_manifest(source_path)
+    ledger = load_source_ledger()
     included_tracks: Counter[str] = Counter()
     included_events: Counter[str] = Counter()
     rejected_tracks: Counter[str] = Counter()
@@ -52,12 +54,14 @@ def convert_technique_position_evaluation(
         if track.split != source_split:
             continue
         dataset = str(track.provenance.get("dataset", "unknown"))
-        policy = TRAINING_DATASET_POLICIES.get(dataset)
-        if policy is None:
-            rejected_tracks[f"{dataset}:dataset_not_approved"] += 1
-            continue
-        if track.provenance.get("license") != policy["license"]:
-            rejected_tracks[f"{dataset}:license_mismatch"] += 1
+        rejection_reason = _track_rejection_reason(
+            track,
+            source_split=source_split,
+            purpose="evaluation",
+            ledger=ledger,
+        )
+        if rejection_reason is not None:
+            rejected_tracks[f"{dataset}:{rejection_reason}"] += 1
             continue
         audio_path = track.resolve_audio(source_path)
         if not audio_path.is_file():
@@ -83,7 +87,8 @@ def convert_technique_position_evaluation(
         if not events:
             rejected_tracks[f"{dataset}:no_valid_position_events"] += 1
             continue
-        provenance = dict(track.provenance)
+        policy = ledger.resolve(track.provenance)
+        provenance = source_provenance(track.provenance, policy)
         provenance["position_conversion"] = {
             "method": "standard-tuning-pitch-minus-open-v1",
             "source_manifest": source_path.name,
@@ -116,6 +121,10 @@ def convert_technique_position_evaluation(
         "conversion": "evaluation-technique-to-position-v1",
         "evaluation_only": True,
         "training_prohibited": True,
+        "source_ledger": {
+            "version": ledger.ledger_version,
+            "sha256": ledger.sha256,
+        },
         "source_manifest": {
             "name": source_path.name,
             "sha256": sha256_file(source_path),
@@ -125,7 +134,12 @@ def convert_technique_position_evaluation(
             "name": output_path.name,
             "sha256": sha256_file(output_path),
         },
-        "approved_dataset_policies": TRAINING_DATASET_POLICIES,
+        "approved_source_ids": sorted(
+            policy.source_id
+            for policy in ledger.policies.values()
+            if "evaluation" in policy.allowed_purposes
+            and policy.verification_status in {"verified", "internal"}
+        ),
         "known_dataset_licenses": KNOWN_DATASET_LICENSES,
         "counts": {
             "included_tracks_by_dataset": _counter_dict(included_tracks),

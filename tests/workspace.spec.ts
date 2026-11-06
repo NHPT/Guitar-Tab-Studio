@@ -177,7 +177,10 @@ test('loads a playable project without layout overflow', async ({ page }, testIn
   await expect(page.locator('.score-measure')).toHaveCount(110)
 })
 
-test('switches the workspace between Chinese and English', async ({ page }) => {
+test('switches the workspace between Chinese and English', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'desktop header control')
   await page.goto('/')
   await page.getByRole('button', { name: '界面语言' }).click()
   const languageMenu = page.getByRole('dialog', { name: '语言切换' })
@@ -320,7 +323,8 @@ test('schedules exactly one click per count-in beat', async ({ page }) => {
 
 test('runs the metronome and drum machine without starting song playback', async ({
   page,
-}) => {
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'desktop tool rail')
   await page.goto('/')
   await expect(page.getByRole('heading', { name: '节拍器 / 鼓机' })).toBeHidden()
   await page.getByRole('button', { name: '节拍器 / 鼓机' }).click()
@@ -403,7 +407,8 @@ test('runs the metronome and drum machine without starting song playback', async
 
 test('opens the tuner and live transcription as separate tools', async ({
   page,
-}) => {
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'desktop tool rail')
   await page.goto('/')
   await page.getByRole('button', { name: '调音器' }).click()
   await expect(page.getByRole('heading', { name: '调音器' })).toBeVisible()
@@ -466,7 +471,8 @@ test('opens the tuner and live transcription as separate tools', async ({
 
 test('stabilizes a harmonic-rich low E as the correct guitar string', async ({
   page,
-}) => {
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'desktop tool rail')
   await page.addInitScript(() => {
     const mediaDevices = navigator.mediaDevices ?? {}
     Object.defineProperty(navigator, 'mediaDevices', {
@@ -828,7 +834,10 @@ test('recognizes a YouTube link in the import workflow', async ({ page }) => {
   await expect(page.getByRole('button', { name: '开始分析' })).toBeEnabled()
 })
 
-test('always opens the local source in the local upload tab', async ({ page }) => {
+test('always opens the local source in the local upload tab', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'desktop source rail')
   await page.goto('/')
   const sources = page.locator('.library-rail .rail-section').filter({
     hasText: '来源',
@@ -2028,7 +2037,8 @@ test('renders a real detected natural harmonic at the correct touch fret', async
 
 test('separates appearance mode from light and dark color themes', async ({
   page,
-}) => {
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'desktop header control')
   await page.goto('/')
   await page.evaluate(() => {
     for (const key of [

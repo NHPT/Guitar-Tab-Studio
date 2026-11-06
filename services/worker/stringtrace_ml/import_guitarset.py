@@ -1,15 +1,28 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 from pathlib import Path
 
+from .data_sources import load_source_ledger, source_provenance
 from .schema import (
     STANDARD_TUNING_LIST,
     LabeledEvent,
     TrackAnnotation,
     write_manifest,
 )
+
+GUITARSET_SOURCE_ID = "guitarset-v1.1"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def split_for_player(player_id: str) -> str:
@@ -42,7 +55,12 @@ def find_audio(root: Path, track_id: str, audio_kind: str) -> Path:
     return matches[0].resolve()
 
 
-def parse_jams(path: Path, root: Path, audio_kind: str) -> TrackAnnotation:
+def parse_jams(
+    path: Path,
+    root: Path,
+    audio_kind: str,
+    output_path: Path | None = None,
+) -> TrackAnnotation:
     document = json.loads(path.read_text(encoding="utf-8"))
     track_id = path.stem
     note_annotations = [
@@ -130,22 +148,32 @@ def parse_jams(path: Path, root: Path, audio_kind: str) -> TrackAnnotation:
         bpm = float(tempo_annotations[0]["data"][0]["value"])
 
     player_id = track_id.split("_", 1)[0]
+    audio_path = find_audio(root, track_id, audio_kind)
+    policy = load_source_ledger().policies[GUITARSET_SOURCE_ID]
     return TrackAnnotation(
         track_id=track_id,
         group_id=f"guitarset-player-{player_id}",
-        audio=str(find_audio(root, track_id, audio_kind)),
+        audio=(
+            os.path.relpath(audio_path, output_path.parent)
+            if output_path is not None
+            else str(audio_path)
+        ),
         split=split_for_player(player_id),
         duration=duration,
         events=events,
         bpm=bpm,
         beats=beats,
-        provenance={
-            "dataset": "GuitarSet",
-            "annotation": str(path.resolve()),
-            "audio_kind": audio_kind,
-            "player_id": player_id,
-            "dropped_out_of_range_events": dropped,
-        },
+        provenance=source_provenance(
+            {
+                "dataset": "GuitarSet",
+                "annotation_sha256": sha256_file(path),
+                "audio_sha256": sha256_file(audio_path),
+                "audio_kind": audio_kind,
+                "player_id": player_id,
+                "dropped_out_of_range_events": dropped,
+            },
+            policy,
+        ),
     )
 
 
@@ -162,11 +190,12 @@ def main() -> None:
     jams_files = sorted(root.rglob("*.jams"))
     if not jams_files:
         raise FileNotFoundError(f"No .jams files found below {root}")
+    output = arguments.output.resolve()
     annotations = [
-        parse_jams(path, root, arguments.audio_kind)
+        parse_jams(path, root, arguments.audio_kind, output)
         for path in jams_files
     ]
-    write_manifest(arguments.output.resolve(), annotations)
+    write_manifest(output, annotations)
     split_counts = {
         split: sum(annotation.split == split for annotation in annotations)
         for split in ("train", "validation", "test")
@@ -174,7 +203,7 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "manifest": str(arguments.output.resolve()),
+                "manifest": output.name,
                 "tracks": len(annotations),
                 "events": sum(len(annotation.events) for annotation in annotations),
                 "splits": split_counts,

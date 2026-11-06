@@ -531,6 +531,8 @@ export interface BeatStructureReviewPackage {
   phase_status: 'confirmed' | 'uncertain'
   first_downbeat_at: number | null
   meter_changes: BeatMeterChange[]
+  excluded_candidate_beats?: number[]
+  added_candidate_beats?: number[]
   checks: BeatStructureChecks
   submission?: {
     submitted_at: string
@@ -538,6 +540,18 @@ export interface BeatStructureReviewPackage {
     admin_user_id?: string
     admin_username?: string
   } | null
+  submission_history?: Array<{
+    submitted_at: string
+    content_sha256: string
+    admin_user_id?: string
+    admin_username?: string
+    invalidated_at: string
+    invalidation_reason: string
+    invalidated_by_user_id?: string
+    invalidated_by_username?: string
+    clips_invalidated: number
+    gold_invalidated: number
+  }>
 }
 
 export interface BeatStructureSummary {
@@ -555,8 +569,15 @@ export interface BeatStructureSummary {
 export interface BeatStructureDocument {
   review: BeatStructureReviewPackage
   audioUrl: string
+  rawCandidateBeats: number[]
   candidateBeats: number[]
   candidateBpm: number
+}
+
+export interface BeatStructureReopenResult {
+  document: BeatStructureDocument
+  clipsInvalidated: number
+  goldInvalidated: number
 }
 
 export interface BeatStructureDraft {
@@ -565,6 +586,8 @@ export interface BeatStructureDraft {
   phase_status: 'confirmed' | 'uncertain'
   first_downbeat_at: number | null
   meter_changes: BeatMeterChange[]
+  excluded_candidate_beats: number[]
+  added_candidate_beats: number[]
   checks: BeatStructureChecks
 }
 

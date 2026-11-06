@@ -1,6 +1,59 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 
+function silentWav(durationSeconds = 4): Buffer {
+  const sampleRate = 8_000
+  const sampleCount = Math.round(sampleRate * durationSeconds)
+  const dataBytes = sampleCount * 2
+  const buffer = Buffer.alloc(44 + dataBytes)
+  buffer.write('RIFF', 0)
+  buffer.writeUInt32LE(36 + dataBytes, 4)
+  buffer.write('WAVE', 8)
+  buffer.write('fmt ', 12)
+  buffer.writeUInt32LE(16, 16)
+  buffer.writeUInt16LE(1, 20)
+  buffer.writeUInt16LE(1, 22)
+  buffer.writeUInt32LE(sampleRate, 24)
+  buffer.writeUInt32LE(sampleRate * 2, 28)
+  buffer.writeUInt16LE(2, 32)
+  buffer.writeUInt16LE(16, 34)
+  buffer.write('data', 36)
+  buffer.writeUInt32LE(dataBytes, 40)
+  return buffer
+}
+
+async function mockReviewAudio(page: Page, url: string): Promise<void> {
+  const audio = silentWav()
+  await page.route(url, (route) => {
+    const range = route.request().headers().range
+    const match = range?.match(/^bytes=(\d+)-(\d*)$/u)
+    if (!match) {
+      return route.fulfill({
+        contentType: 'audio/wav',
+        headers: {
+          'Accept-Ranges': 'bytes',
+          'Content-Length': String(audio.length),
+        },
+        body: audio,
+      })
+    }
+    const start = Number(match[1])
+    const requestedEnd = match[2] ? Number(match[2]) : audio.length - 1
+    const end = Math.min(requestedEnd, audio.length - 1)
+    const body = audio.subarray(start, end + 1)
+    return route.fulfill({
+      status: 206,
+      contentType: 'audio/wav',
+      headers: {
+        'Accept-Ranges': 'bytes',
+        'Content-Length': String(body.length),
+        'Content-Range': `bytes ${start}-${end}/${audio.length}`,
+      },
+      body,
+    })
+  })
+}
+
 async function mockReviewApi(page: Page): Promise<void> {
   const checks = {
     timing: false,
@@ -83,6 +136,10 @@ async function mockReviewApi(page: Page): Promise<void> {
         review,
       },
     }),
+  )
+  await mockReviewAudio(
+    page,
+    '**/media/training/reviews/real-reference-01.wav',
   )
 }
 
@@ -285,11 +342,91 @@ test('loads the cross-performer residual-onset v2 queue', async ({
 }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'desktop data routing check')
 
-  const response = await page.request.get(
-    'http://127.0.0.1:8787/api/reviews?queue=residual-onset-v2',
+  const checks = {
+    timing: false,
+    string_fret: false,
+    completeness: false,
+    technique: false,
+  }
+  const reviews = Array.from({ length: 24 }, (_value, index) => {
+    const performer = `P${index % 4}`
+    return {
+      name: `residual-onset-${String(index + 1).padStart(2, '0')}`,
+      status: 'draft',
+      projectTitle: `AG-PT-set · ${performer} · 掌根制音`,
+      projectArtist: '跨演奏者复核片段',
+      reviewKind: 'residual-onset-training',
+      eventCount: 1,
+      duration: 12,
+      measureNumbers: [1],
+      capo: 0,
+      checks,
+    }
+  })
+  const selected = reviews[0]
+  const review = {
+    schema_version: 1,
+    status: 'draft',
+    review_kind: 'residual-onset-training',
+    display_title: selected.projectTitle,
+    display_subtitle: selected.projectArtist,
+    review_id: selected.name,
+    project_id: 'agpt-p0-palm-mute',
+    project_sha256: 'a'.repeat(64),
+    source_audio_sha256: 'b'.repeat(64),
+    review_audio: `${selected.name}.wav`,
+    review_audio_sha256: 'c'.repeat(64),
+    training_audio: `${selected.name}.training.wav`,
+    training_audio_sha256: 'd'.repeat(64),
+    source_kind: 'residual-onset-training',
+    measure_numbers: [1],
+    source_start: 0,
+    source_end: 12,
+    duration: 12,
+    capo: 0,
+    bpm: 60,
+    beats: Array.from({ length: 12 }, (_value, index) => index),
+    time_signature: [4, 4],
+    events: [
+      {
+        onset: 0.25,
+        offset: 0.5,
+        string: 2,
+        fret: 3,
+        technique: 'palm-mute',
+        confidence: 1,
+      },
+    ],
+    excluded_ranges: [],
+    checks,
+    approval: null,
+  }
+  await page.route('**/api/reviews?queue=residual-onset-v2', (route) =>
+    route.fulfill({ json: { reviews } }),
   )
-  expect(response.ok()).toBeTruthy()
-  const payload = await response.json()
+  await page.route(
+    '**/api/reviews/residual-onset-01?queue=residual-onset-v2',
+    (route) =>
+      route.fulfill({
+        json: {
+          name: selected.name,
+          audioUrl:
+            '/media/training/reviews/residual-onset-v2/residual-onset-01.wav',
+          review,
+        },
+      }),
+  )
+  await mockReviewAudio(
+    page,
+    '**/media/training/reviews/residual-onset-v2/residual-onset-01.wav',
+  )
+
+  await page.goto('/review?queue=residual-onset-v2')
+  const payload = await page.evaluate(async () => {
+    const response = await fetch('/api/reviews?queue=residual-onset-v2')
+    if (!response.ok) throw new Error(`Review request failed: ${response.status}`)
+    return response.json()
+  })
   expect(payload.reviews).toHaveLength(24)
   expect(
     payload.reviews.every(
@@ -304,9 +441,6 @@ test('loads the cross-performer residual-onset v2 queue', async ({
       ),
     ).size,
   ).toBe(4)
-
-  await page.goto('/review?queue=residual-onset-v2')
-
   await expect(page.getByText('Guitar Tab Review')).toBeVisible()
   await expect(page.locator('.review-package')).toHaveCount(24)
   await expect(

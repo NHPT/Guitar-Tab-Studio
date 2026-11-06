@@ -9,6 +9,7 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
+from .data_sources import load_source_ledger, source_provenance
 from .technique_schema import (
     TechniqueEvent,
     TechniqueTrack,
@@ -18,6 +19,7 @@ from .technique_schema import (
 
 AGPT_DATASET_DOI = "10.5281/zenodo.10159492"
 AGPT_ARCHIVE_MD5 = "1dff8103f9ad6e1a86cee2e5e39cbe87"
+AGPT_SOURCE_ID = "agpt-set-zenodo-10159492"
 TECHNIQUE_BY_ID = {
     "4": "harmonic",
     "5": "palm-mute",
@@ -57,6 +59,7 @@ def import_agpt_techniques(
     root: Path,
     output: Path,
 ) -> list[TechniqueTrack]:
+    policy = load_source_ledger().policies[AGPT_SOURCE_ID]
     metadata_directory = root / "metadata"
     audio_directory = root / "data" / "audio"
     with (metadata_directory / "files.csv").open(
@@ -121,21 +124,23 @@ def import_agpt_techniques(
                     events,
                     key=lambda event: (event.onset, event.string),
                 ),
-                provenance={
-                    "dataset": "AG-PT-set",
-                    "dataset_doi": AGPT_DATASET_DOI,
-                    "source_type": "public-research-dataset",
-                    "license": "CC-BY-4.0",
-                    "archive_md5": AGPT_ARCHIVE_MD5,
-                    "player_id": player_id,
-                    "guitar_id": metadata["guitar_id"],
-                    "playing_intensity": metadata[
-                        "playing_dynamics_or_intensity"
-                    ],
-                    "source_audio_sha256": actual_sha256,
-                    "label_mapping": "agpt-note-label-v1",
-                    "event_duration_seconds": 0.4,
-                },
+                provenance=source_provenance(
+                    {
+                        "dataset": "AG-PT-set",
+                        "dataset_doi": AGPT_DATASET_DOI,
+                        "source_type": "public-research-dataset",
+                        "archive_md5": AGPT_ARCHIVE_MD5,
+                        "player_id": player_id,
+                        "guitar_id": metadata["guitar_id"],
+                        "playing_intensity": metadata[
+                            "playing_dynamics_or_intensity"
+                        ],
+                        "source_audio_sha256": actual_sha256,
+                        "label_mapping": "agpt-note-label-v1",
+                        "event_duration_seconds": 0.4,
+                    },
+                    policy,
+                ),
             )
         )
     write_technique_manifest(output, tracks)

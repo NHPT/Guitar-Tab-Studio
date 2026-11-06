@@ -363,6 +363,27 @@
     var(--surface);
 }
 
+.beat-structure-subdivision-grid {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.beat-structure-subdivision-grid > i {
+  width: 1px;
+  position: absolute;
+  top: 22%;
+  bottom: 24%;
+  background: color-mix(in srgb, var(--text-muted) 26%, transparent);
+  transform: translateX(-50%);
+}
+
+.beat-structure-subdivision-grid > i.is-quarter {
+  top: 12%;
+  background: color-mix(in srgb, var(--text-muted) 44%, transparent);
+}
+
 .beat-structure-detail > button {
   width: 22px;
   height: 100%;
@@ -412,9 +433,21 @@
   font-weight: 800;
 }
 
+.beat-structure-detail > button.is-added i {
+  width: 2px;
+  background: var(--success);
+  opacity: 1;
+}
+
+.beat-structure-detail > button.is-added span {
+  color: var(--success);
+  outline: 1px solid color-mix(in srgb, var(--success) 45%, transparent);
+}
+
 .beat-structure-detail > button.is-selected span {
   color: #fff;
   background: var(--accent-strong);
+  outline: 0;
 }
 
 .beat-structure-detail > b {
@@ -602,6 +635,11 @@
   height: 14px;
 }
 
+.beat-structure-review-actions button.is-reopen {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  color: var(--danger);
+}
+
 .beat-structure-inspector section > label {
   display: flex;
   align-items: center;
@@ -613,6 +651,239 @@
 
 .beat-structure-inspector section > label input {
   width: 72px;
+}
+
+.beat-structure-inspector section > label select {
+  width: 180px;
+  min-width: 0;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.beat-structure-add-beat,
+.beat-structure-delete-beat {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.beat-structure-add-beat > div,
+.beat-structure-delete-beat > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.beat-structure-add-beat small,
+.beat-structure-delete-beat small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.beat-structure-add-beat strong,
+.beat-structure-delete-beat strong {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.beat-structure-add-beat > button,
+.beat-structure-delete-beat > button {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  border-radius: 6px;
+  color: var(--danger);
+  background: var(--surface-strong);
+}
+
+.beat-structure-add-beat > button {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+  color: var(--success);
+}
+
+.beat-structure-batch-correction {
+  display: grid;
+  gap: 9px;
+  padding: 10px 0;
+  border-block: 1px solid var(--border);
+}
+
+.beat-structure-batch-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.beat-structure-batch-controls label {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.beat-structure-batch-controls span {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.beat-structure-batch-controls select {
+  width: 100%;
+  min-width: 0;
+  padding: 0 7px;
+  font-size: 11px;
+}
+
+.beat-structure-batch-phase {
+  display: grid;
+  gap: 5px;
+}
+
+.beat-structure-batch-phase > span {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.beat-structure-batch-phase > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.beat-structure-batch-phase button {
+  min-height: 30px;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: var(--surface-strong);
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.beat-structure-batch-phase button[aria-pressed="true"] {
+  border-color: var(--accent-strong);
+  color: var(--accent-strong);
+  background: var(--active-surface);
+}
+
+.beat-structure-batch-phase > button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.beat-structure-batch-phase > button svg {
+  width: 12px;
+  height: 12px;
+}
+
+.beat-structure-batch-preview {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 3px 10px;
+}
+
+.beat-structure-batch-preview strong,
+.beat-structure-batch-preview > span {
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.beat-structure-batch-preview strong {
+  font-size: 13px;
+}
+
+.beat-structure-batch-preview strong span,
+.beat-structure-batch-preview > span i {
+  padding: 0 5px;
+  color: var(--text-muted);
+  font-style: normal;
+}
+
+.beat-structure-batch-preview > span {
+  font-size: 11px;
+}
+
+.beat-structure-batch-preview small {
+  grid-column: 1 / -1;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.beat-structure-batch-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.beat-structure-batch-actions button {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface-strong);
+}
+
+.beat-structure-batch-actions button:first-child {
+  border-color: var(--accent-strong);
+  color: var(--accent-strong);
+}
+
+.beat-structure-batch-actions svg {
+  width: 13px;
+  height: 13px;
+}
+
+.beat-structure-batch-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.beat-structure-inspector .beat-structure-beat-correction > small {
+  text-align: left;
+}
+
+.beat-structure-excluded-beats,
+.beat-structure-added-beats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.beat-structure-excluded-beats button,
+.beat-structure-added-beats button {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: var(--surface-strong);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+}
+
+.beat-structure-added-beats button {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--border));
+  color: var(--success);
+}
+
+.beat-structure-excluded-beats > small,
+.beat-structure-added-beats > small {
+  align-self: center;
+  color: var(--text-muted);
+  font-size: 10px;
 }
 
 .beat-structure-meter,

@@ -75,12 +75,12 @@ export default function BeatReviewWorkspace() {
           className={stage === 'clips' ? 'is-active' : ''}
           type="button"
           disabled={submitted === 0}
-          title={submitted > 0 ? '复核已确认歌曲的片段' : '先确认一首歌曲的全曲结构'}
+          title={submitted > 0 ? '抽检已确认歌曲的节拍精度' : '先确认一首歌曲的全曲结构'}
           onClick={() => selectStage('clips')}
         >
           <Clock3 aria-hidden="true" />
-          <span>片段时间</span>
-          <i>{submitted > 0 ? `${submitted} 首已开放` : '待结构确认'}</i>
+          <span>精度抽检</span>
+          <i>{submitted > 0 ? `${submitted} 首可抽检` : '待结构确认'}</i>
         </button>
       </nav>
       {stage === 'structure' ? (

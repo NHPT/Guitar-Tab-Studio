@@ -10,8 +10,7 @@ from pathlib import Path
 
 import librosa
 import numpy as np
-import soundfile as sf
-from scipy.ndimage import median_filter, maximum_filter1d
+from scipy.ndimage import median_filter
 from scipy.signal import find_peaks
 
 

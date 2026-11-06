@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "ledger_version": "2026-11-06.2",
+  "sources": [
+    {
+      "source_id": "guitarset-v1.1",
+      "name": "GuitarSet",
+      "version": "1.1",
+      "aliases": [
+        "GuitarSet"
+      ],
+      "source_url": "https://zenodo.org/records/3371780",
+      "license": {
+        "spdx": "CC-BY-4.0",
+        "url": "https://creativecommons.org/licenses/by/4.0/",
+        "required_in_manifest": true
+      },
+      "verification": {
+        "status": "verified",
+        "verified_at": "2026-11-06",
+        "evidence_url": "https://zenodo.org/records/3371780"
+      },
+      "allowed_purposes": [
+        "training",
+        "evaluation",
+        "model-release"
+      ],
+      "rights": {
+        "train_models": true,
+        "evaluate_models": true,
+        "distribute_models": true,
+        "commercial_use": true,
+        "modify_assets": true,
+        "redistribute_assets": true
+      },
+      "hash_policy": {
+        "manifest": "sha256-required",
+        "assets": "sha256-required"
+      }
+    },
+    {
+      "source_id": "guitar-techs-zenodo-14963133",
+      "name": "Guitar-TECHS",
+      "version": "zenodo-14963133",
+      "aliases": [
+        "Guitar-TECHS"
+      ],
+      "source_url": "https://doi.org/10.5281/zenodo.14963133",
+      "license": {
+        "spdx": "CC-BY-4.0",
+        "url": "https://creativecommons.org/licenses/by/4.0/",
+        "required_in_manifest": true
+      },
+      "verification": {
+        "status": "verified",
+        "verified_at": "2026-11-06",
+        "evidence_url": "https://doi.org/10.5281/zenodo.14963133"
+      },
+      "allowed_purposes": [
+        "training",
+        "evaluation",
+        "model-release"
+      ],
+      "rights": {
+        "train_models": true,
+        "evaluate_models": true,
+        "distribute_models": true,
+        "commercial_use": true,
+        "modify_assets": true,
+        "redistribute_assets": true
+      },
+      "hash_policy": {
+        "manifest": "sha256-required",
+        "assets": "sha256-required"
+      }
+    },
+    {
+      "source_id": "agpt-set-zenodo-10159492",
+      "name": "AG-PT-set",
+      "version": "zenodo-10159492",
+      "aliases": [
+        "AG-PT-set"
+      ],
+      "source_url": "https://doi.org/10.5281/zenodo.10159492",
+      "license": {
+        "spdx": "CC-BY-4.0",
+        "url": "https://creativecommons.org/licenses/by/4.0/",
+        "required_in_manifest": true
+      },
+      "verification": {
+        "status": "verified",
+        "verified_at": "2026-11-06",
+        "evidence_url": "https://zenodo.org/records/10159492"
+      },
+      "allowed_purposes": [
+        "training",
+        "evaluation",
+        "model-release"
+      ],
+      "rights": {
+        "train_models": true,
+        "evaluate_models": true,
+        "distribute_models": true,
+        "commercial_use": true,
+        "modify_assets": true,
+        "redistribute_assets": true
+      },
+      "hash_policy": {
+        "manifest": "sha256-required",
+        "assets": "sha256-required"
+      }
+    },
+    {
+      "source_id": "idmt-smt-guitar-v2-zenodo-7544110",
+      "name": "IDMT-SMT-GUITAR_V2",
+      "version": "2",
+      "aliases": [
+        "IDMT-SMT-GUITAR_V2"
+      ],
+      "source_url": "https://doi.org/10.5281/zenodo.7544110",
+      "license": {
+        "spdx": "CC-BY-NC-ND-4.0",
+        "url": "https://creativecommons.org/licenses/by-nc-nd/4.0/",
+        "required_in_manifest": true
+      },
+      "verification": {
+        "status": "verified",
+        "verified_at": "2026-11-06",
+        "evidence_url": "https://doi.org/10.5281/zenodo.7544110"
+      },
+      "allowed_purposes": [
+        "evaluation"
+      ],
+      "rights": {
+        "train_models": false,
+        "evaluate_models": true,
+        "distribute_models": false,
+        "commercial_use": false,
+        "modify_assets": false,
+        "redistribute_assets": false
+      },
+      "hash_policy": {
+        "manifest": "sha256-required",
+        "assets": "sha256-required"
+      }
+    },
+    {
+      "source_id": "stringtrace-synthetic-v1",
+      "name": "StringTrace deterministic synthetic data",
+      "version": "1",
+      "aliases": [
+        "stringtrace-synthetic-smoke",
+        "stringtrace-symbolic-synthetic"
+      ],
+      "source_url": "internal://stringtrace/synthetic-v1",
+      "license": {
+        "spdx": "LicenseRef-Project-Generated",
+        "url": null,
+        "required_in_manifest": false
+      },
+      "verification": {
+        "status": "internal",
+        "verified_at": "2026-11-06",
+        "evidence_url": null
+      },
+      "allowed_purposes": [
+        "training",
+        "evaluation",
+        "model-release"
+      ],
+      "rights": {
+        "train_models": true,
+        "evaluate_models": true,
+        "distribute_models": true,
+        "commercial_use": true,
+        "modify_assets": true,
+        "redistribute_assets": true
+      },
+      "hash_policy": {
+        "manifest": "sha256-required",
+        "assets": "sha256-required"
+      },
+      "required_provenance": {
+        "rights_basis": [
+          "original",
+          "public-domain",
+          "licensed-derivative"
+        ]
+      }
+    }
+  ]
+}

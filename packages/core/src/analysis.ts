@@ -11,6 +11,7 @@ import type {
 import {
   CoreValidationError,
   arrayAt,
+  booleanAt,
   enumAt,
   numberAt,
   optionalNumberAt,
@@ -136,6 +137,28 @@ export interface AnalysisTimingDiagnostics {
   selectionReason: string
 }
 
+export interface AnalysisTempoGridDiagnostics {
+  selectedGrid: 'fast' | 'half' | 'three-over-two'
+  selectionReason: string
+  confidence: number
+  requiresReview: boolean
+  selectedPhase: number | null
+  selectedBpm: number
+  fastBpm: number
+  slowBpm: number
+  highBpm: number
+  candidateRatio: number
+  beatCountRatio: number
+  highBeatCount: number
+  binaryAccentContrast: number
+  binaryPeriodicity: number
+  slowAccentContrast: number
+  compoundSupport: number
+  fastIrregularity: number | null
+  slowIrregularity: number | null
+  highIrregularity: number | null
+}
+
 export interface AnalysisMeterCandidate {
   timeSignature: TimeSignature
   score: number
@@ -174,6 +197,7 @@ export interface AnalysisDocument {
   beats?: number[]
   pickup_beats?: number
   tempo_map?: TempoMap
+  tempo_grid_diagnostics?: AnalysisTempoGridDiagnostics
   timing_diagnostics?: AnalysisTimingDiagnostics
   meter_diagnostics?: AnalysisMeterDiagnostics
   onsets?: number[]
@@ -398,6 +422,84 @@ function pickupBeatsAt(
     )
   }
   return pickupBeats
+}
+
+function tempoGridDiagnosticsAt(
+  value: unknown,
+  path: string,
+): AnalysisTempoGridDiagnostics {
+  const diagnostics = recordAt(value, path)
+  return {
+    selectedGrid: enumAt(
+      diagnostics.selected_grid,
+      ['fast', 'half', 'three-over-two'] as const,
+      `${path}.selected_grid`,
+    ),
+    selectionReason: stringAt(
+      diagnostics.selection_reason,
+      `${path}.selection_reason`,
+    ),
+    confidence: numberAt(diagnostics.confidence, `${path}.confidence`),
+    requiresReview: booleanAt(
+      diagnostics.requires_review,
+      `${path}.requires_review`,
+    ),
+    selectedPhase:
+      nullableNumberAt(
+        diagnostics.selected_phase,
+        `${path}.selected_phase`,
+      ) ?? null,
+    selectedBpm: numberAt(
+      diagnostics.selected_bpm,
+      `${path}.selected_bpm`,
+    ),
+    fastBpm: numberAt(diagnostics.fast_bpm, `${path}.fast_bpm`),
+    slowBpm: numberAt(diagnostics.slow_bpm, `${path}.slow_bpm`),
+    highBpm: numberAt(diagnostics.high_bpm, `${path}.high_bpm`),
+    candidateRatio: numberAt(
+      diagnostics.candidate_ratio,
+      `${path}.candidate_ratio`,
+    ),
+    beatCountRatio: numberAt(
+      diagnostics.beat_count_ratio,
+      `${path}.beat_count_ratio`,
+    ),
+    highBeatCount: numberAt(
+      diagnostics.high_beat_count,
+      `${path}.high_beat_count`,
+    ),
+    binaryAccentContrast: numberAt(
+      diagnostics.binary_accent_contrast,
+      `${path}.binary_accent_contrast`,
+    ),
+    binaryPeriodicity: numberAt(
+      diagnostics.binary_periodicity,
+      `${path}.binary_periodicity`,
+    ),
+    slowAccentContrast: numberAt(
+      diagnostics.slow_accent_contrast,
+      `${path}.slow_accent_contrast`,
+    ),
+    compoundSupport: numberAt(
+      diagnostics.compound_support,
+      `${path}.compound_support`,
+    ),
+    fastIrregularity:
+      nullableNumberAt(
+        diagnostics.fast_irregularity,
+        `${path}.fast_irregularity`,
+      ) ?? null,
+    slowIrregularity:
+      nullableNumberAt(
+        diagnostics.slow_irregularity,
+        `${path}.slow_irregularity`,
+      ) ?? null,
+    highIrregularity:
+      nullableNumberAt(
+        diagnostics.high_irregularity,
+        `${path}.high_irregularity`,
+      ) ?? null,
+  }
 }
 
 function timingDiagnosticsAt(
@@ -711,6 +813,13 @@ export function parseAnalysisDocument(value: unknown): AnalysisDocument {
       analysis.tempo_map === undefined
         ? undefined
         : tempoMapAt(analysis.tempo_map, 'analysis.tempo_map'),
+    tempo_grid_diagnostics:
+      analysis.tempo_grid_diagnostics === undefined
+        ? undefined
+        : tempoGridDiagnosticsAt(
+            analysis.tempo_grid_diagnostics,
+            'analysis.tempo_grid_diagnostics',
+          ),
     timing_diagnostics:
       analysis.timing_diagnostics === undefined
         ? undefined

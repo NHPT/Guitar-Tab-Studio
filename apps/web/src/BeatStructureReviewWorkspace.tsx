@@ -9,6 +9,8 @@ import {
   Pause,
   PencilLine,
   Play,
+  Plus,
+  RotateCcw,
   Save,
   SkipBack,
   Target,
@@ -25,6 +27,7 @@ import {
   apiAssetUrl,
   fetchBeatStructureReview,
   fetchBeatStructureReviews,
+  reopenBeatStructureReview,
   saveBeatStructureReview,
   submitBeatStructureReview,
 } from './api'
@@ -42,7 +45,7 @@ const structureChecks: Array<{
 }> = [
   { key: 'meter', label: '主拍号' },
   { key: 'downbeat_phase', label: '强拍相位' },
-  { key: 'pickup', label: '弱起拍数' },
+  { key: 'pickup', label: '弱起时值' },
   { key: 'meter_changes', label: '变拍位置' },
 ]
 
@@ -58,6 +61,12 @@ function draftFromDocument(
       at: change.at,
       time_signature: [...change.time_signature],
     })),
+    excluded_candidate_beats: [
+      ...(document.review.excluded_candidate_beats ?? []),
+    ],
+    added_candidate_beats: [
+      ...(document.review.added_candidate_beats ?? []),
+    ],
     checks: { ...document.review.checks },
   }
 }
@@ -66,6 +75,52 @@ function formatTime(value: number): string {
   const minutes = Math.floor(value / 60)
   const seconds = value - minutes * 60
   return `${minutes}:${seconds.toFixed(2).padStart(5, '0')}`
+}
+
+function greatestCommonDivisor(left: number, right: number): number {
+  let currentLeft = Math.abs(left)
+  let currentRight = Math.abs(right)
+  while (currentRight > 0) {
+    const remainder = currentLeft % currentRight
+    currentLeft = currentRight
+    currentRight = remainder
+  }
+  return currentLeft
+}
+
+function noteValueLabel(beats: number, denominator: number): string {
+  const units = Math.round(beats * 4)
+  const rawDenominator = denominator * 4
+  const divisor = greatestCommonDivisor(units, rawDenominator)
+  const numerator = units / divisor
+  const reducedDenominator = rawDenominator / divisor
+  const noteNames: Record<number, string> = {
+    1: '全音符',
+    2: '二分音符',
+    4: '四分音符',
+    8: '八分音符',
+    16: '十六分音符',
+    32: '三十二分音符',
+    64: '六十四分音符',
+  }
+  if (numerator === 1 && noteNames[reducedDenominator]) {
+    return noteNames[reducedDenominator]
+  }
+  if (
+    numerator === 3 &&
+    noteNames[reducedDenominator / 2]
+  ) {
+    return `附点${noteNames[reducedDenominator / 2]}`
+  }
+  return `${numerator}/${reducedDenominator} 音符时值`
+}
+
+function formatPickupBeats(beats: number, denominator: number): string {
+  if (beats === 0) return '无'
+  const beatCount = Number.isInteger(beats)
+    ? beats.toFixed(0)
+    : beats.toFixed(2).replace(/0$/u, '')
+  return `${beatCount} 拍（${noteValueLabel(beats, denominator)}）`
 }
 
 function waveformPath(values: readonly number[]): string {
@@ -100,6 +155,120 @@ function positiveModulo(value: number, modulus: number): number {
   return ((value % modulus) + modulus) % modulus
 }
 
+function estimatedBpm(beats: readonly number[]): number | null {
+  const intervals = beats
+    .slice(1)
+    .map((beat, index) => beat - beats[index])
+    .filter((interval) => interval > 0)
+    .sort((left, right) => left - right)
+  if (intervals.length === 0) return null
+  const middle = Math.floor(intervals.length / 2)
+  const median =
+    intervals.length % 2 === 0
+      ? (intervals[middle - 1] + intervals[middle]) / 2
+      : intervals[middle]
+  return median > 0 ? 60 / median : null
+}
+
+function sameBeatAt(left: number, right: number): boolean {
+  return Math.abs(left - right) <= 0.001
+}
+
+function sameBeatList(
+  left: readonly number[],
+  right: readonly number[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((beat, index) => sameBeatAt(beat, right[index]))
+  )
+}
+
+type BeatBatchMode = 'halve' | 'quarter' | 'double' | 'quadruple'
+type BeatBatchScope = 'all' | 'from-current'
+
+interface BeatCorrectionSnapshot {
+  excludedCandidateBeats: number[]
+  addedCandidateBeats: number[]
+  firstDownbeatAt: number | null
+  meterChanges: BeatMeterChange[]
+  selectedAt: number
+}
+
+function batchFactor(mode: BeatBatchMode): number {
+  return mode === 'halve' || mode === 'double' ? 2 : 4
+}
+
+function isReductionMode(mode: BeatBatchMode): boolean {
+  return mode === 'halve' || mode === 'quarter'
+}
+
+function batchPhaseLabel(mode: BeatBatchMode, phase: number): string {
+  if (mode === 'halve') {
+    return phase === 0
+      ? '删 2、4 · 留 1、3'
+      : '删 1、3 · 留 2、4'
+  }
+  const deleted = [1, 2, 3, 4]
+    .filter((position) => position !== phase + 1)
+    .join('、')
+  return `仅留 ${phase + 1} · 删 ${deleted}`
+}
+
+function uniqueSortedBeats(beats: readonly number[]): number[] {
+  return beats
+    .map((beat) => Math.round(beat * 1_000_000) / 1_000_000)
+    .sort((left, right) => left - right)
+    .filter(
+      (beat, index, values) =>
+        index === 0 || !sameBeatAt(beat, values[index - 1]),
+    )
+}
+
+function transformBeatGrid(
+  beats: readonly number[],
+  mode: BeatBatchMode,
+  phase: number,
+): number[] {
+  const factor = batchFactor(mode)
+  if (isReductionMode(mode)) {
+    return beats.filter((_, index) => index % factor === phase)
+  }
+  if (beats.length < 2) return [...beats]
+  const intervals = beats
+    .slice(1)
+    .map((beat, index) => beat - beats[index])
+    .filter((interval) => interval > 0)
+    .sort((left, right) => left - right)
+  const medianInterval =
+    intervals[Math.floor(intervals.length / 2)] ?? Number.POSITIVE_INFINITY
+  const maximumFillInterval = medianInterval * 2.5
+  const expanded: number[] = []
+  for (let index = 0; index < beats.length - 1; index += 1) {
+    const left = beats[index]
+    const right = beats[index + 1]
+    expanded.push(left)
+    if (
+      right - left <= maximumFillInterval &&
+      (right - left) / factor >= 0.03
+    ) {
+      for (let step = 1; step < factor; step += 1) {
+        expanded.push(left + ((right - left) * step) / factor)
+      }
+    }
+  }
+  expanded.push(beats[beats.length - 1])
+  return uniqueSortedBeats(expanded)
+}
+
+function isKeyboardEditingTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLElement &&
+    (target.isContentEditable ||
+      ['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName))
+  )
+}
+
 interface BeatStructureReviewWorkspaceProps {
   reviewer: string
   onReviewsChange: (reviews: BeatStructureSummary[]) => void
@@ -124,6 +293,11 @@ export default function BeatStructureReviewWorkspace({
   const [changeSignature, setChangeSignature] = useState<[number, number]>([
     4, 4,
   ])
+  const [batchMode, setBatchMode] = useState<BeatBatchMode>('halve')
+  const [batchScope, setBatchScope] = useState<BeatBatchScope>('all')
+  const [batchPhase, setBatchPhase] = useState(0)
+  const [batchUndo, setBatchUndo] =
+    useState<BeatCorrectionSnapshot | null>(null)
   const [correctionOpen, setCorrectionOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -132,6 +306,13 @@ export default function BeatStructureReviewWorkspace({
   const [notice, setNotice] = useState('')
   const audioRef = useRef<HTMLAudioElement>(null)
   const previewEndRef = useRef<number | null>(null)
+  const selectedRecordingIdRef = useRef<string | null>(null)
+  const excludedCandidateBeatsRef = useRef<number[]>([])
+  const addedCandidateBeatsRef = useRef<number[]>([])
+
+  useEffect(() => {
+    selectedRecordingIdRef.current = selectedRecordingId
+  }, [selectedRecordingId])
 
   const refreshReviews = useCallback(async () => {
     const next = await fetchBeatStructureReviews(reviewer)
@@ -177,11 +358,21 @@ export default function BeatStructureReviewWorkspace({
         const nextDraft = draftFromDocument(next)
         const anchor =
           nextDraft.first_downbeat_at ?? next.candidateBeats[0] ?? 0
+        excludedCandidateBeatsRef.current = [
+          ...nextDraft.excluded_candidate_beats,
+        ]
+        addedCandidateBeatsRef.current = [
+          ...nextDraft.added_candidate_beats,
+        ]
         setDocument(next)
         setDraft(nextDraft)
         setWaveform([])
         setSelectedBeatIndex(nearestBeatIndex(next.candidateBeats, anchor))
         setCurrentTime(anchor)
+        setBatchMode('halve')
+        setBatchScope('all')
+        setBatchPhase(0)
+        setBatchUndo(null)
         setCorrectionOpen(false)
         setDirty(false)
         setNotice('')
@@ -245,7 +436,105 @@ export default function BeatStructureReviewWorkspace({
     return () => controller.abort()
   }, [document])
 
-  const selectedBeatAt = document?.candidateBeats[selectedBeatIndex] ?? 0
+  useEffect(() => {
+    if (!playing) return
+    let frame = 0
+    const update = () => {
+      const audio = audioRef.current
+      if (!audio || audio.paused) return
+      const at = audio.currentTime
+      setCurrentTime(at)
+      if (
+        previewEndRef.current !== null &&
+        at >= previewEndRef.current
+      ) {
+        previewEndRef.current = null
+        audio.pause()
+        return
+      }
+      frame = window.requestAnimationFrame(update)
+    }
+    frame = window.requestAnimationFrame(update)
+    return () => window.cancelAnimationFrame(frame)
+  }, [playing])
+
+  const candidateBeats = useMemo(() => {
+    if (!document) return []
+    const rawCandidateBeats =
+      document.rawCandidateBeats ?? document.candidateBeats
+    const excludedCandidateBeats =
+      draft?.excluded_candidate_beats ?? []
+    return [
+      ...rawCandidateBeats.filter(
+        (beat) =>
+          !excludedCandidateBeats.some((excluded) =>
+            sameBeatAt(beat, excluded),
+          ),
+      ),
+      ...(draft?.added_candidate_beats ?? []),
+    ].sort((left, right) => left - right)
+  }, [
+    document,
+    draft?.added_candidate_beats,
+    draft?.excluded_candidate_beats,
+  ])
+  const selectedBeatAt = candidateBeats[selectedBeatIndex] ?? 0
+  const reviewedBpm = useMemo(
+    () => estimatedBpm(candidateBeats),
+    [candidateBeats],
+  )
+  const batchPreview = useMemo(() => {
+    if (!document || candidateBeats.length < 2) return null
+    const startIndex =
+      batchScope === 'all'
+        ? 0
+        : Math.max(0, Math.min(selectedBeatIndex, candidateBeats.length - 1))
+    const prefix = candidateBeats.slice(0, startIndex)
+    const source = candidateBeats.slice(startIndex)
+    const nextScopedBeats = transformBeatGrid(
+      source,
+      batchMode,
+      batchPhase,
+    )
+    const targetBeats = uniqueSortedBeats([
+      ...prefix,
+      ...nextScopedBeats,
+    ])
+    const rawCandidateBeats =
+      document.rawCandidateBeats ?? document.candidateBeats
+    const excludedCandidateBeats = rawCandidateBeats.filter(
+      (beat) => !targetBeats.some((target) => sameBeatAt(beat, target)),
+    )
+    const addedCandidateBeats = targetBeats.filter(
+      (beat) => !rawCandidateBeats.some((raw) => sameBeatAt(beat, raw)),
+    )
+    return {
+      targetBeats,
+      excludedCandidateBeats,
+      addedCandidateBeats,
+      bpm: estimatedBpm(targetBeats),
+      changed: !sameBeatList(candidateBeats, targetBeats),
+    }
+  }, [
+    batchMode,
+    batchPhase,
+    batchScope,
+    candidateBeats,
+    document,
+    selectedBeatIndex,
+  ])
+  const pickupOptions = useMemo(
+    () =>
+      Array.from(
+        { length: (draft?.time_signature[0] ?? 0) * 4 },
+        (_, index) => index / 4,
+      ),
+    [draft?.time_signature],
+  )
+  const hasBeatCorrections =
+    (draft?.excluded_candidate_beats.length ?? 0) > 0 ||
+    (draft?.added_candidate_beats.length ?? 0) > 0
+  const waveformShape = useMemo(() => waveformPath(waveform), [waveform])
   const readOnly = document?.review.status !== 'draft'
   const selectedQueueIndex = reviews.findIndex(
     (review) => review.recordingId === selectedRecordingId,
@@ -264,10 +553,52 @@ export default function BeatStructureReviewWorkspace({
     : windowDuration
   const visibleBeats = useMemo(() => {
     if (!document) return []
-    return document.candidateBeats
+    return candidateBeats
       .map((at, index) => ({ at, index }))
       .filter((beat) => beat.at >= windowStart && beat.at <= windowEnd)
-  }, [document, windowEnd, windowStart])
+  }, [candidateBeats, document, windowEnd, windowStart])
+  const subdivisionTicks = useMemo(() => {
+    const anchor =
+      draft?.phase_status === 'confirmed'
+        ? draft.first_downbeat_at
+        : null
+    const bpm = reviewedBpm ?? document?.candidateBpm ?? null
+    if (
+      anchor === null ||
+      bpm === null ||
+      bpm <= 0 ||
+      windowEnd <= windowStart
+    ) {
+      return []
+    }
+    const subdivisionDuration = 15 / bpm
+    const firstUnit = Math.ceil(
+      (windowStart - anchor) / subdivisionDuration - 0.000001,
+    )
+    const lastUnit = Math.floor(
+      (windowEnd - anchor) / subdivisionDuration + 0.000001,
+    )
+    if (lastUnit < firstUnit || lastUnit - firstUnit > 2_000) {
+      return []
+    }
+    return Array.from(
+      { length: lastUnit - firstUnit + 1 },
+      (_, index) => {
+        const unit = firstUnit + index
+        return {
+          at: anchor + unit * subdivisionDuration,
+          quarter: positiveModulo(unit, 4) === 0,
+          unit,
+        }
+      },
+    )
+  }, [
+    document?.candidateBpm,
+    draft,
+    reviewedBpm,
+    windowEnd,
+    windowStart,
+  ])
 
   const beatLabel = useCallback(
     (index: number): number | null => {
@@ -276,7 +607,7 @@ export default function BeatStructureReviewWorkspace({
       }
       const sections = [
         {
-          at: draft.first_downbeat_at ?? document.candidateBeats[0],
+          at: draft.first_downbeat_at ?? candidateBeats[0],
           timeSignature: draft.time_signature,
         },
         ...draft.meter_changes.map((change) => ({
@@ -284,39 +615,39 @@ export default function BeatStructureReviewWorkspace({
           timeSignature: change.time_signature,
         })),
       ].sort((left, right) => left.at - right.at)
-      const at = document.candidateBeats[index]
+      const at = candidateBeats[index]
       const section =
         [...sections].reverse().find((candidate) => candidate.at <= at) ??
         sections[0]
       const anchorIndex = nearestBeatIndex(
-        document.candidateBeats,
+        candidateBeats,
         section.at,
       )
       return (
         positiveModulo(index - anchorIndex, section.timeSignature[0]) + 1
       )
     },
-    [document, draft],
+    [candidateBeats, document, draft],
   )
 
   const representativePoints = useMemo(() => {
-    if (!document || !draft || document.candidateBeats.length === 0) {
+    if (!document || !draft || candidateBeats.length === 0) {
       return []
     }
     const candidates =
       draft.phase_status === 'confirmed'
-        ? document.candidateBeats
+        ? candidateBeats
             .map((at, index) => ({ at, index }))
             .filter(({ index }) => beatLabel(index) === 1)
-        : document.candidateBeats.map((at, index) => ({ at, index }))
+        : candidateBeats.map((at, index) => ({ at, index }))
     const pool =
       candidates.length > 0
         ? candidates
-        : document.candidateBeats.map((at, index) => ({ at, index }))
+        : candidateBeats.map((at, index) => ({ at, index }))
     const targets = [
       {
         label: '开头',
-        at: draft.first_downbeat_at ?? document.candidateBeats[0],
+        at: draft.first_downbeat_at ?? candidateBeats[0],
       },
       { label: '中段', at: document.review.audio_duration * 0.5 },
       { label: '结尾', at: document.review.audio_duration * 0.88 },
@@ -330,32 +661,34 @@ export default function BeatStructureReviewWorkspace({
       )
       return { ...point, label: target.label }
     })
-  }, [beatLabel, document, draft])
+  }, [beatLabel, candidateBeats, document, draft])
 
   const updateDraft = useCallback(
     (update: (current: BeatStructureDraft) => BeatStructureDraft) => {
+      if (saving) return
       setDraft((current) => (current ? update(current) : current))
+      setBatchUndo(null)
       setDirty(true)
       setNotice('')
     },
-    [],
+    [saving],
   )
 
-  const seek = (at: number) => {
+  const seek = useCallback((at: number) => {
     if (!document) return
     previewEndRef.current = null
     const bounded = Math.max(0, Math.min(document.review.audio_duration, at))
     if (audioRef.current) audioRef.current.currentTime = bounded
     setCurrentTime(bounded)
-  }
+  }, [document])
 
-  const togglePlayback = async () => {
+  const togglePlayback = useCallback(async () => {
     const audio = audioRef.current
     if (!audio) return
     previewEndRef.current = null
     if (audio.paused) await audio.play()
     else audio.pause()
-  }
+  }, [])
 
   const playRepresentativePreview = async (index: number, at: number) => {
     const audio = audioRef.current
@@ -369,10 +702,12 @@ export default function BeatStructureReviewWorkspace({
   }
 
   const selectRecording = (recordingId: string) => {
+    if (saving) return
     if (dirty && !window.confirm('当前全曲结构尚未保存，确认切换吗？')) {
       return
     }
     audioRef.current?.pause()
+    selectedRecordingIdRef.current = recordingId
     setSelectedRecordingId(recordingId)
   }
 
@@ -406,15 +741,380 @@ export default function BeatStructureReviewWorkspace({
     })
   }
 
-  const persist = async (
-    submit: boolean,
-    nextDraft = draft,
-    confirmation = '提交后全曲结构将锁定，确认提交吗？',
-  ) => {
-    if (!nextDraft || !selectedRecordingId || saving) return
+  const applyBatchCorrection = useCallback(() => {
     if (
-      submit &&
-      !window.confirm(confirmation)
+      !document ||
+      !draft ||
+      !batchPreview ||
+      !batchPreview.changed ||
+      batchPreview.targetBeats.length < 2 ||
+      batchPreview.targetBeats.length > 10_000 ||
+      readOnly ||
+      saving
+    ) {
+      return
+    }
+    const targetBeats = batchPreview.targetBeats
+    const nearestTarget = (at: number): number =>
+      targetBeats[nearestBeatIndex(targetBeats, at)]
+    const mappedMeterChanges = draft.meter_changes
+      .map((change) => ({
+        ...change,
+        at: nearestTarget(change.at),
+      }))
+      .sort((left, right) => left.at - right.at)
+    if (
+      mappedMeterChanges.some(
+        (change, index) =>
+          index > 0 &&
+          sameBeatAt(change.at, mappedMeterChanges[index - 1].at),
+      )
+    ) {
+      setError('批量修正会合并多个变拍点，请先调整变拍位置')
+      return
+    }
+    const snapshot: BeatCorrectionSnapshot = {
+      excludedCandidateBeats: [
+        ...excludedCandidateBeatsRef.current,
+      ],
+      addedCandidateBeats: [...addedCandidateBeatsRef.current],
+      firstDownbeatAt: draft.first_downbeat_at,
+      meterChanges: draft.meter_changes.map((change) => ({
+        ...change,
+        time_signature: [...change.time_signature],
+      })),
+      selectedAt: selectedBeatAt,
+    }
+    excludedCandidateBeatsRef.current = [
+      ...batchPreview.excludedCandidateBeats,
+    ]
+    addedCandidateBeatsRef.current = [
+      ...batchPreview.addedCandidateBeats,
+    ]
+    updateDraft((current) => ({
+      ...current,
+      first_downbeat_at:
+        current.first_downbeat_at === null
+          ? null
+          : nearestTarget(current.first_downbeat_at),
+      meter_changes: mappedMeterChanges,
+      excluded_candidate_beats: [
+        ...batchPreview.excludedCandidateBeats,
+      ],
+      added_candidate_beats: [...batchPreview.addedCandidateBeats],
+    }))
+    setBatchUndo(snapshot)
+    const nextSelectedAt = nearestTarget(selectedBeatAt)
+    setSelectedBeatIndex(nearestBeatIndex(targetBeats, nextSelectedAt))
+    seek(nextSelectedAt)
+    setError('')
+    setNotice(
+      `批量修正完成：${candidateBeats.length} → ${targetBeats.length} 拍`,
+    )
+  }, [
+    batchPreview,
+    candidateBeats.length,
+    document,
+    draft,
+    readOnly,
+    saving,
+    seek,
+    selectedBeatAt,
+    updateDraft,
+  ])
+
+  const undoBatchCorrection = useCallback(() => {
+    if (!document || !batchUndo || readOnly || saving) return
+    const rawCandidateBeats =
+      document.rawCandidateBeats ?? document.candidateBeats
+    const restoredBeats = [
+      ...rawCandidateBeats.filter(
+        (beat) =>
+          !batchUndo.excludedCandidateBeats.some((excluded) =>
+            sameBeatAt(beat, excluded),
+          ),
+      ),
+      ...batchUndo.addedCandidateBeats,
+    ].sort((left, right) => left - right)
+    excludedCandidateBeatsRef.current = [
+      ...batchUndo.excludedCandidateBeats,
+    ]
+    addedCandidateBeatsRef.current = [...batchUndo.addedCandidateBeats]
+    updateDraft((current) => ({
+      ...current,
+      first_downbeat_at: batchUndo.firstDownbeatAt,
+      meter_changes: batchUndo.meterChanges.map((change) => ({
+        ...change,
+        time_signature: [...change.time_signature],
+      })),
+      excluded_candidate_beats: [
+        ...batchUndo.excludedCandidateBeats,
+      ],
+      added_candidate_beats: [...batchUndo.addedCandidateBeats],
+    }))
+    setBatchUndo(null)
+    const restoredIndex = nearestBeatIndex(
+      restoredBeats,
+      batchUndo.selectedAt,
+    )
+    setSelectedBeatIndex(restoredIndex)
+    seek(restoredBeats[restoredIndex] ?? 0)
+    setNotice('已撤销上一次批量修正')
+  }, [batchUndo, document, readOnly, saving, seek, updateDraft])
+
+  const alignBatchPhaseToSelected = () => {
+    const scopeStartIndex =
+      batchScope === 'all' ? 0 : selectedBeatIndex
+    const phase = positiveModulo(
+      selectedBeatIndex - scopeStartIndex,
+      batchFactor(batchMode),
+    )
+    setBatchPhase(phase)
+    setNotice(
+      `已将 ${formatTime(selectedBeatAt)} 设为批量保留拍`,
+    )
+  }
+
+  const deleteCandidateBeat = useCallback(() => {
+    if (!draft || readOnly || saving || candidateBeats.length <= 2) return
+    const deletedAt = selectedBeatAt
+    const deletedAddedBeat = addedCandidateBeatsRef.current.some((beat) =>
+      sameBeatAt(beat, deletedAt),
+    )
+    const nextCandidateBeats = candidateBeats.filter(
+      (beat) => !sameBeatAt(beat, deletedAt),
+    )
+    const nextSelectedIndex = Math.min(
+      selectedBeatIndex,
+      nextCandidateBeats.length - 1,
+    )
+    const anchorDeleted =
+      draft.first_downbeat_at !== null &&
+      sameBeatAt(draft.first_downbeat_at, deletedAt)
+    const nextAnchor =
+      nextCandidateBeats.find((beat) => beat > deletedAt + 0.001) ??
+      nextCandidateBeats[nextCandidateBeats.length - 1] ??
+      null
+    const nextExcludedCandidateBeats = deletedAddedBeat
+      ? [...excludedCandidateBeatsRef.current]
+      : [...excludedCandidateBeatsRef.current, deletedAt].sort(
+          (left, right) => left - right,
+        )
+    const nextAddedCandidateBeats = deletedAddedBeat
+      ? addedCandidateBeatsRef.current.filter(
+          (beat) => !sameBeatAt(beat, deletedAt),
+        )
+      : [...addedCandidateBeatsRef.current]
+    excludedCandidateBeatsRef.current = nextExcludedCandidateBeats
+    addedCandidateBeatsRef.current = nextAddedCandidateBeats
+    updateDraft((current) => ({
+      ...current,
+      first_downbeat_at: anchorDeleted
+        ? nextAnchor
+        : current.first_downbeat_at,
+      meter_changes: current.meter_changes.filter(
+        (change) => !sameBeatAt(change.at, deletedAt),
+      ),
+      excluded_candidate_beats: nextExcludedCandidateBeats,
+      added_candidate_beats: nextAddedCandidateBeats,
+    }))
+    setSelectedBeatIndex(nextSelectedIndex)
+    if (nextCandidateBeats[nextSelectedIndex] !== undefined) {
+      seek(nextCandidateBeats[nextSelectedIndex])
+    }
+    setNotice(
+      anchorDeleted
+        ? `已删除 ${formatTime(deletedAt)}，首个强拍已移至 ${formatTime(nextAnchor ?? 0)}`
+        : deletedAddedBeat
+          ? `已删除 ${formatTime(deletedAt)} 新增拍点`
+          : `已删除 ${formatTime(deletedAt)}，后续拍位已重新计算`,
+    )
+  }, [
+    candidateBeats,
+    draft,
+    readOnly,
+    saving,
+    seek,
+    selectedBeatAt,
+    selectedBeatIndex,
+    updateDraft,
+  ])
+
+  const restoreCandidateBeat = useCallback(
+    (restoredAt: number) => {
+      if (!document || !draft || readOnly || saving) return
+      const nextExcluded = excludedCandidateBeatsRef.current.filter(
+        (beat) => !sameBeatAt(beat, restoredAt),
+      )
+      excludedCandidateBeatsRef.current = nextExcluded
+      const rawCandidateBeats =
+        document.rawCandidateBeats ?? document.candidateBeats
+      const nextCandidateBeats = [
+        ...rawCandidateBeats.filter(
+          (beat) =>
+            !nextExcluded.some((excluded) => sameBeatAt(beat, excluded)),
+        ),
+        ...addedCandidateBeatsRef.current,
+      ].sort((left, right) => left - right)
+      const restoredIndex = nearestBeatIndex(nextCandidateBeats, restoredAt)
+      updateDraft((current) => ({
+        ...current,
+        excluded_candidate_beats: current.excluded_candidate_beats.filter(
+          (beat) => !sameBeatAt(beat, restoredAt),
+        ),
+      }))
+      setSelectedBeatIndex(restoredIndex)
+      seek(restoredAt)
+      setNotice(`已恢复 ${formatTime(restoredAt)} 候选拍`)
+    },
+    [document, draft, readOnly, saving, seek, updateDraft],
+  )
+
+  const addCandidateBeat = useCallback(() => {
+    if (!document || !draft || readOnly || saving) return
+    const mediaTime = audioRef.current?.currentTime ?? currentTime
+    const addedAt =
+      Math.round(
+        Math.max(
+          0,
+          Math.min(document.review.audio_duration, mediaTime),
+        ) * 1_000_000,
+      ) / 1_000_000
+    const excludedRawBeat = excludedCandidateBeatsRef.current.find((beat) =>
+      sameBeatAt(beat, addedAt),
+    )
+    if (excludedRawBeat !== undefined) {
+      restoreCandidateBeat(excludedRawBeat)
+      return
+    }
+    const existingBeat = candidateBeats.find((beat) =>
+      sameBeatAt(beat, addedAt),
+    )
+    if (existingBeat !== undefined) {
+      setSelectedBeatIndex(nearestBeatIndex(candidateBeats, existingBeat))
+      seek(existingBeat)
+      setNotice(`播放位置已有 ${formatTime(existingBeat)} 拍点`)
+      return
+    }
+    if (candidateBeats.length >= 10_000) {
+      setError('候选拍点数量已达到上限')
+      return
+    }
+    const nextAddedCandidateBeats = [
+      ...addedCandidateBeatsRef.current,
+      addedAt,
+    ].sort((left, right) => left - right)
+    const nextCandidateBeats = [...candidateBeats, addedAt].sort(
+      (left, right) => left - right,
+    )
+    addedCandidateBeatsRef.current = nextAddedCandidateBeats
+    updateDraft((current) => ({
+      ...current,
+      added_candidate_beats: nextAddedCandidateBeats,
+    }))
+    setSelectedBeatIndex(
+      nextCandidateBeats.findIndex((beat) => sameBeatAt(beat, addedAt)),
+    )
+    seek(addedAt)
+    setError('')
+    setNotice(`已在 ${formatTime(addedAt)} 添加拍点`)
+  }, [
+    candidateBeats,
+    currentTime,
+    document,
+    draft,
+    readOnly,
+    restoreCandidateBeat,
+    saving,
+    seek,
+    updateDraft,
+  ])
+
+  const persist = useCallback(
+    async (
+      submit: boolean,
+      nextDraft = draft,
+      confirmation = '提交后全曲结构将锁定，确认提交吗？',
+    ) => {
+      if (!nextDraft || !selectedRecordingId || saving) return
+      if (
+        submit &&
+        !window.confirm(confirmation)
+      ) {
+        return
+      }
+      setSaving(true)
+      setError('')
+      setNotice('')
+      try {
+        const persistedDraft = {
+          ...nextDraft,
+          excluded_candidate_beats: [
+            ...excludedCandidateBeatsRef.current,
+          ],
+          added_candidate_beats: [
+            ...addedCandidateBeatsRef.current,
+          ],
+        }
+        const next = submit
+          ? await submitBeatStructureReview(
+              selectedRecordingId,
+              reviewer,
+              persistedDraft,
+            )
+          : await saveBeatStructureReview(
+              selectedRecordingId,
+              reviewer,
+              persistedDraft,
+            )
+        const returnedExcludedCandidateBeats =
+          next.review.excluded_candidate_beats ?? []
+        const returnedAddedCandidateBeats =
+          next.review.added_candidate_beats ?? []
+        if (
+          !sameBeatList(
+            persistedDraft.excluded_candidate_beats,
+            returnedExcludedCandidateBeats,
+          ) ||
+          !sameBeatList(
+            persistedDraft.added_candidate_beats,
+            returnedAddedCandidateBeats,
+          )
+        ) {
+          throw new Error('拍点修正未被服务器保存，当前修改已保留，请刷新后重试')
+        }
+        excludedCandidateBeatsRef.current = [
+          ...returnedExcludedCandidateBeats,
+        ]
+        addedCandidateBeatsRef.current = [
+          ...returnedAddedCandidateBeats,
+        ]
+        setDocument(next)
+        setDraft(draftFromDocument(next))
+        setDirty(false)
+        setNotice(submit ? '全曲结构已提交' : '结构草稿已保存')
+        await refreshReviews()
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : '结构审核保存失败')
+      } finally {
+        setSaving(false)
+      }
+    },
+    [draft, refreshReviews, reviewer, saving, selectedRecordingId],
+  )
+
+  const reopen = async () => {
+    if (!selectedRecordingId || !readOnly || saving) return
+    const recordingId = selectedRecordingId
+    const reason = window.prompt(
+      '请输入撤回原因',
+      '发现全曲结构标注错误',
+    )
+    if (!reason?.trim()) return
+    if (
+      !window.confirm(
+        '撤回后，该歌曲的关联片段将退回草稿，已有金标准将失效归档。确认继续吗？',
+      )
     ) {
       return
     }
@@ -422,24 +1122,38 @@ export default function BeatStructureReviewWorkspace({
     setError('')
     setNotice('')
     try {
-      const next = submit
-        ? await submitBeatStructureReview(
-            selectedRecordingId,
-            reviewer,
-            nextDraft,
-          )
-        : await saveBeatStructureReview(
-            selectedRecordingId,
-            reviewer,
-            nextDraft,
-          )
-      setDocument(next)
-      setDraft(draftFromDocument(next))
+      const result = await reopenBeatStructureReview(
+        recordingId,
+        reviewer,
+        reason.trim(),
+      )
+      if (selectedRecordingIdRef.current !== recordingId) {
+        await refreshReviews()
+        return
+      }
+      excludedCandidateBeatsRef.current = [
+        ...(result.document.review.excluded_candidate_beats ?? []),
+      ]
+      addedCandidateBeatsRef.current = [
+        ...(result.document.review.added_candidate_beats ?? []),
+      ]
+      setDocument(result.document)
+      setDraft(draftFromDocument(result.document))
+      setCorrectionOpen(true)
       setDirty(false)
-      setNotice(submit ? '全曲结构已提交' : '结构草稿已保存')
+      setNotice(
+        `已撤回全曲结构，${result.clipsInvalidated} 个关联片段已退回草稿` +
+          (result.goldInvalidated > 0
+            ? `，${result.goldInvalidated} 个金标准已失效归档`
+            : ''),
+      )
       await refreshReviews()
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '结构审核保存失败')
+    } catch (reasonValue) {
+      setError(
+        reasonValue instanceof Error
+          ? reasonValue.message
+          : '全曲结构撤回失败',
+      )
     } finally {
       setSaving(false)
     }
@@ -457,6 +1171,111 @@ export default function BeatStructureReviewWorkspace({
           },
         }
       : null
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (!document || !draft) return
+      const saveShortcut =
+        (event.metaKey || event.ctrlKey) &&
+        event.key.toLowerCase() === 's'
+      if (saveShortcut) {
+        if (readOnly) return
+        event.preventDefault()
+        if (!event.repeat && dirty && !saving) {
+          void persist(false)
+        }
+        return
+      }
+      if (
+        isKeyboardEditingTarget(event.target) ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey
+      ) {
+        return
+      }
+
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault()
+        const direction = event.key === 'ArrowLeft' ? -1 : 1
+        const nextIndex = Math.max(
+          0,
+          Math.min(
+            selectedBeatIndex + direction,
+            candidateBeats.length - 1,
+          ),
+        )
+        setSelectedBeatIndex(nextIndex)
+        if (candidateBeats[nextIndex] !== undefined) {
+          seek(candidateBeats[nextIndex])
+        }
+        return
+      }
+
+      if (event.key === 'Home' || event.key === 'End') {
+        event.preventDefault()
+        const nextIndex =
+          event.key === 'Home' ? 0 : candidateBeats.length - 1
+        setSelectedBeatIndex(nextIndex)
+        if (candidateBeats[nextIndex] !== undefined) {
+          seek(candidateBeats[nextIndex])
+        }
+        return
+      }
+
+      if (event.key === ' ') {
+        event.preventDefault()
+        if (!event.repeat) void togglePlayback()
+        return
+      }
+
+      if (event.key === 'Escape') {
+        const audio = audioRef.current
+        if (audio && !audio.paused) {
+          event.preventDefault()
+          audio.pause()
+        }
+        return
+      }
+
+      if (
+        (event.key === 'Backspace' || event.key === 'Delete') &&
+        correctionOpen &&
+        !readOnly &&
+        !saving
+      ) {
+        event.preventDefault()
+        if (!event.repeat) deleteCandidateBeat()
+        return
+      }
+
+      if (
+        event.key.toLowerCase() === 'a' &&
+        correctionOpen &&
+        !readOnly &&
+        !saving
+      ) {
+        event.preventDefault()
+        if (!event.repeat) addCandidateBeat()
+      }
+    }
+    window.addEventListener('keydown', handleShortcut)
+    return () => window.removeEventListener('keydown', handleShortcut)
+  }, [
+    addCandidateBeat,
+    candidateBeats,
+    correctionOpen,
+    deleteCandidateBeat,
+    dirty,
+    document,
+    draft,
+    persist,
+    readOnly,
+    saving,
+    seek,
+    selectedBeatIndex,
+    togglePlayback,
+  ])
 
   if (loading) {
     return (
@@ -477,7 +1296,11 @@ export default function BeatStructureReviewWorkspace({
   }
 
   return (
-    <div className="beat-structure-shell" data-review-dirty={dirty}>
+    <div
+      className="beat-structure-shell"
+      data-review-dirty={dirty}
+      aria-keyshortcuts="ArrowLeft ArrowRight Home End Space A Delete Backspace Control+S Meta+S"
+    >
       <aside className="beat-structure-queue">
         <header>
           <strong>全曲结构</strong>
@@ -543,8 +1366,15 @@ export default function BeatStructureReviewWorkspace({
                 </span>
                 <h1>{document.review.recording_id}</h1>
                 <small>
-                  候选 {document.candidateBpm.toFixed(2)} BPM ·{' '}
-                  {document.candidateBeats.length} 拍
+                  原始 {document.candidateBpm.toFixed(2)} BPM
+                  {hasBeatCorrections && reviewedBpm !== null
+                    ? ` · 复核 ${reviewedBpm.toFixed(2)} BPM`
+                    : ''}{' '}
+                  ·{' '}
+                  {candidateBeats.length} 拍
+                  {hasBeatCorrections
+                    ? `（删除 ${draft.excluded_candidate_beats.length}，新增 ${draft.added_candidate_beats.length}）`
+                    : ''}
                 </small>
               </div>
               <button
@@ -563,12 +1393,18 @@ export default function BeatStructureReviewWorkspace({
               src={apiAssetUrl(document.audioUrl)}
               crossOrigin="use-credentials"
               preload="auto"
-              onEnded={() => setPlaying(false)}
+              onEnded={(event) => {
+                setCurrentTime(event.currentTarget.currentTime)
+                setPlaying(false)
+              }}
               onLoadedMetadata={(event) => {
                 event.currentTarget.playbackRate = playbackRate
                 event.currentTarget.currentTime = currentTime
               }}
-              onPause={() => setPlaying(false)}
+              onPause={(event) => {
+                setCurrentTime(event.currentTarget.currentTime)
+                setPlaying(false)
+              }}
               onPlay={() => setPlaying(true)}
               onTimeUpdate={(event) => {
                 const at = event.currentTarget.currentTime
@@ -605,6 +1441,7 @@ export default function BeatStructureReviewWorkspace({
                 className="is-primary"
                 type="button"
                 aria-label={playing ? '暂停' : '播放'}
+                aria-keyshortcuts="Space"
                 onClick={() => void togglePlayback()}
               >
                 {playing ? (
@@ -647,7 +1484,7 @@ export default function BeatStructureReviewWorkspace({
                 preserveAspectRatio="none"
                 viewBox="0 0 1000 120"
               >
-                <path d={waveformPath(waveform)} />
+                <path d={waveformShape} />
               </svg>
               {draft.first_downbeat_at !== null && (
                 <i
@@ -723,6 +1560,24 @@ export default function BeatStructureReviewWorkspace({
                 )
               }}
             >
+              <div
+                className="beat-structure-subdivision-grid"
+                aria-hidden="true"
+              >
+                {subdivisionTicks.map((tick) => (
+                  <i
+                    className={tick.quarter ? 'is-quarter' : ''}
+                    key={tick.unit}
+                    style={{
+                      left: `${
+                        ((tick.at - windowStart) /
+                          (windowEnd - windowStart)) *
+                        100
+                      }%`,
+                    }}
+                  />
+                ))}
+              </div>
               {visibleBeats.map((beat) => {
                 const label = beatLabel(beat.index)
                 return (
@@ -730,6 +1585,11 @@ export default function BeatStructureReviewWorkspace({
                     className={[
                       label === 1 ? 'is-downbeat' : '',
                       beat.index === selectedBeatIndex ? 'is-selected' : '',
+                      draft.added_candidate_beats.some((added) =>
+                        sameBeatAt(added, beat.at),
+                      )
+                        ? 'is-added'
+                        : '',
                     ]
                       .filter(Boolean)
                       .join(' ')}
@@ -742,7 +1602,13 @@ export default function BeatStructureReviewWorkspace({
                         100
                       }%`,
                     }}
-                    aria-label={`${formatTime(beat.at)}，${label === null ? '拍位待确认' : `第 ${label} 拍`}`}
+                    aria-label={`${formatTime(beat.at)}，${
+                      draft.added_candidate_beats.some((added) =>
+                        sameBeatAt(added, beat.at),
+                      )
+                        ? '新增拍点，'
+                        : ''
+                    }${label === null ? '拍位待确认' : `第 ${label} 拍`}`}
                     onClick={(event) => {
                       event.stopPropagation()
                       setSelectedBeatIndex(beat.index)
@@ -789,15 +1655,27 @@ export default function BeatStructureReviewWorkspace({
                   <dd>{draft.time_signature.join('/')}</dd>
                 </div>
                 <div>
-                  <dt>速度</dt>
+                  <dt>
+                    {hasBeatCorrections
+                      ? '原始速度'
+                      : '速度'}
+                  </dt>
                   <dd>{document.candidateBpm.toFixed(1)} BPM</dd>
                 </div>
+                {hasBeatCorrections &&
+                  reviewedBpm !== null && (
+                    <div>
+                      <dt>复核后速度</dt>
+                      <dd>{reviewedBpm.toFixed(1)} BPM</dd>
+                    </div>
+                  )}
                 <div>
                   <dt>弱起</dt>
                   <dd>
-                    {draft.pickup_beats === 0
-                      ? '无'
-                      : `${draft.pickup_beats} 拍`}
+                    {formatPickupBeats(
+                      draft.pickup_beats,
+                      draft.time_signature[1],
+                    )}
                   </dd>
                 </div>
                 <div>
@@ -840,6 +1718,7 @@ export default function BeatStructureReviewWorkspace({
                     type="button"
                     disabled={
                       saving ||
+                      dirty ||
                       draft.phase_status !== 'confirmed' ||
                       draft.first_downbeat_at === null
                     }
@@ -863,10 +1742,221 @@ export default function BeatStructureReviewWorkspace({
                   </button>
                 </div>
               )}
+              {readOnly && (
+                <div className="beat-structure-review-actions">
+                  <button
+                    className="is-reopen"
+                    type="button"
+                    disabled={saving}
+                    onClick={() => void reopen()}
+                  >
+                    <RotateCcw aria-hidden="true" />
+                    撤回并重新复核
+                  </button>
+                </div>
+              )}
             </section>
 
             {correctionOpen && !readOnly && (
               <>
+                <section className="beat-structure-beat-correction">
+                  <span>纠正候选拍点</span>
+                  <div className="beat-structure-add-beat">
+                    <div>
+                      <small>当前播放位置</small>
+                      <strong>{formatTime(currentTime)}</strong>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="在播放位置添加拍点"
+                      aria-keyshortcuts="A"
+                      onClick={addCandidateBeat}
+                    >
+                      <Plus aria-hidden="true" />
+                      添加拍点
+                    </button>
+                  </div>
+                  <div className="beat-structure-delete-beat">
+                    <div>
+                      <small>当前候选拍</small>
+                      <strong>{formatTime(selectedBeatAt)}</strong>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={candidateBeats.length <= 2}
+                      aria-label={`删除当前候选拍 ${formatTime(selectedBeatAt)}`}
+                      aria-keyshortcuts="Backspace Delete"
+                      onClick={deleteCandidateBeat}
+                    >
+                      <Trash2 aria-hidden="true" />
+                      删除误检拍
+                    </button>
+                  </div>
+                  <div className="beat-structure-batch-correction">
+                    <div className="beat-structure-batch-controls">
+                      <label>
+                        <span>倍率</span>
+                        <select
+                          aria-label="批量节拍倍率"
+                          value={batchMode}
+                          onChange={(event) => {
+                            setBatchMode(
+                              event.target.value as BeatBatchMode,
+                            )
+                            setBatchPhase(0)
+                          }}
+                        >
+                          <option value="halve">拍点 ÷2</option>
+                          <option value="quarter">拍点 ÷4</option>
+                          <option value="double">拍点 ×2</option>
+                          <option value="quadruple">拍点 ×4</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>范围</span>
+                        <select
+                          aria-label="批量修正范围"
+                          value={batchScope}
+                          onChange={(event) =>
+                            setBatchScope(
+                              event.target.value as BeatBatchScope,
+                            )}
+                        >
+                          <option value="all">全曲</option>
+                          <option value="from-current">
+                            当前拍至结尾
+                          </option>
+                        </select>
+                      </label>
+                    </div>
+                    {isReductionMode(batchMode) && (
+                      <div className="beat-structure-batch-phase">
+                        <span>删除模式</span>
+                        <div
+                          role="group"
+                          aria-label="批量删除模式"
+                        >
+                          {Array.from(
+                            { length: batchFactor(batchMode) },
+                            (_, index) => (
+                              <button
+                                type="button"
+                                key={index}
+                                aria-pressed={batchPhase === index}
+                                onClick={() => setBatchPhase(index)}
+                              >
+                                {batchPhaseLabel(batchMode, index)}
+                              </button>
+                            ),
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={alignBatchPhaseToSelected}
+                        >
+                          <Target aria-hidden="true" />
+                          指定当前拍为保留拍
+                        </button>
+                      </div>
+                    )}
+                    <div
+                      className="beat-structure-batch-preview"
+                      aria-live="polite"
+                    >
+                      <strong>
+                        {candidateBeats.length}
+                        <span>→</span>
+                        {batchPreview?.targetBeats.length ?? 0} 拍
+                      </strong>
+                      <span>
+                        {reviewedBpm?.toFixed(1) ?? '—'}
+                        <i>→</i>
+                        {batchPreview?.bpm?.toFixed(1) ?? '—'} BPM
+                      </span>
+                      <small>
+                        删除{' '}
+                        {batchPreview?.excludedCandidateBeats.length ?? 0}
+                        {' · '}新增{' '}
+                        {batchPreview?.addedCandidateBeats.length ?? 0}
+                      </small>
+                    </div>
+                    <div className="beat-structure-batch-actions">
+                      <button
+                        type="button"
+                        disabled={
+                          !batchPreview?.changed ||
+                          (batchPreview?.targetBeats.length ?? 0) < 2 ||
+                          (batchPreview?.targetBeats.length ?? 0) > 10_000
+                        }
+                        onClick={applyBatchCorrection}
+                      >
+                        应用批量修正
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!batchUndo}
+                        onClick={undoBatchCorrection}
+                      >
+                        <RotateCcw aria-hidden="true" />
+                        撤销
+                      </button>
+                    </div>
+                  </div>
+                  <small>新增或删除后，后续拍位会立即重新计算。</small>
+                  {draft.excluded_candidate_beats.length > 0 && (
+                    <div className="beat-structure-excluded-beats">
+                      {draft.excluded_candidate_beats
+                        .slice(0, 12)
+                        .map((beat) => (
+                        <button
+                          type="button"
+                          key={beat}
+                          aria-label={`恢复 ${formatTime(beat)} 候选拍`}
+                          onClick={() => restoreCandidateBeat(beat)}
+                        >
+                          <RotateCcw aria-hidden="true" />
+                          <span>{formatTime(beat)}</span>
+                        </button>
+                        ))}
+                      {draft.excluded_candidate_beats.length > 12 && (
+                        <small>
+                          另有{' '}
+                          {draft.excluded_candidate_beats.length - 12}{' '}
+                          个删除拍点
+                        </small>
+                      )}
+                    </div>
+                  )}
+                  {draft.added_candidate_beats.length > 0 && (
+                    <div className="beat-structure-added-beats">
+                      {draft.added_candidate_beats
+                        .slice(0, 12)
+                        .map((beat) => (
+                        <button
+                          type="button"
+                          key={beat}
+                          aria-label={`定位到新增拍点 ${formatTime(beat)}`}
+                          onClick={() => {
+                            setSelectedBeatIndex(
+                              nearestBeatIndex(candidateBeats, beat),
+                            )
+                            seek(beat)
+                          }}
+                        >
+                          <Plus aria-hidden="true" />
+                          <span>{formatTime(beat)}</span>
+                        </button>
+                        ))}
+                      {draft.added_candidate_beats.length > 12 && (
+                        <small>
+                          另有 {draft.added_candidate_beats.length - 12}{' '}
+                          个新增拍点
+                        </small>
+                      )}
+                    </div>
+                  )}
+                </section>
+
                 <section>
                   <span>纠正拍号与弱起</span>
                   <div className="beat-structure-meter">
@@ -889,7 +1979,7 @@ export default function BeatStructureReviewWorkspace({
                           ],
                           pickup_beats: Math.min(
                             current.pickup_beats,
-                            numerator - 1,
+                            numerator - 0.25,
                           ),
                         }))
                       }}
@@ -915,19 +2005,27 @@ export default function BeatStructureReviewWorkspace({
                     </select>
                   </div>
                   <label>
-                    <span>弱起拍数</span>
-                    <input
-                      aria-label="弱起拍数"
-                      type="number"
-                      min={0}
-                      max={draft.time_signature[0] - 1}
+                    <span>弱起时值</span>
+                    <select
+                      aria-label="弱起时值"
                       value={draft.pickup_beats}
                       onChange={(event) =>
                         updateDraft((current) => ({
                           ...current,
                           pickup_beats: Number(event.target.value),
                         }))}
-                    />
+                    >
+                      {pickupOptions.map((value) => (
+                        <option value={value} key={value}>
+                          {value === 0
+                            ? '无弱起'
+                            : formatPickupBeats(
+                                value,
+                                draft.time_signature[1],
+                              )}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                 </section>
 
@@ -1090,6 +2188,7 @@ export default function BeatStructureReviewWorkspace({
                 <button
                   type="button"
                   disabled={saving || !dirty}
+                  aria-keyshortcuts="Control+S Meta+S"
                   onClick={() => void persist(false)}
                 >
                   <Save aria-hidden="true" />

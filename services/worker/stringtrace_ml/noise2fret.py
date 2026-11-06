@@ -230,14 +230,19 @@ class Noise2FretUNet(nn.Module):
         )
         self.c_conv = nn.Conv1d(515, base_channels, 3, padding=1)
         self.audio_encoder = AudioEncoder()
-        block = lambda left, right, attention=False: ResidualBlock(
-            left,
-            right,
-            128,
-            audio_channels=64,
-            feature_channels=base_channels,
-            attention=attention,
-        )
+        def block(
+            left: int,
+            right: int,
+            attention: bool = False,
+        ) -> ResidualBlock:
+            return ResidualBlock(
+                left,
+                right,
+                128,
+                audio_channels=64,
+                feature_channels=base_channels,
+                attention=attention,
+            )
         self.down1 = block(64, 128)
         self.down2 = block(128, 256)
         self.down3 = block(256, 512)

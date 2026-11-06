@@ -255,6 +255,10 @@ test('edits, saves and submits an independent beat review', async ({ page }) => 
   await timeInput.pressSequentially('2.625')
   await timeInput.blur()
   await expect(timeInput).toHaveValue('2.625')
+  await page.locator('audio').evaluate((audio: HTMLAudioElement) => {
+    audio.currentTime = 3.125
+  })
+  await page.getByRole('button', { name: '在播放位置添加拍点' }).click()
   for (const label of [
     '拍点时间',
     '强拍位置',
@@ -270,9 +274,15 @@ test('edits, saves and submits an independent beat review', async ({ page }) => 
       savedDraft?.beats as Array<{ at: number; beat: number; measure: number }>
     )[2],
   ).toEqual({ at: 2.625, beat: 2, measure: 8, downbeat: false })
+  assert.ok(
+    (
+      savedDraft?.beats as Array<{ at: number }>
+    ).some((beat) => beat.at === 3.125),
+    'new beat should use the media clock instead of stale UI state',
+  )
 
   page.once('dialog', (dialog) => dialog.accept())
-  await page.getByRole('button', { name: '提交独立审核' }).click()
+  await page.getByRole('button', { name: '提交抽检结果' }).click()
   await expect(page.locator('.beat-review-status > strong')).toHaveText(
     '已提交',
   )
@@ -289,6 +299,8 @@ test('reviews full-song structure before enabling clip timing', async ({
 }) => {
   let savedDraft: Record<string, unknown> | undefined
   let submittedDraft: Record<string, unknown> | undefined
+  let reopenReason: string | undefined
+  let omitSavedCorrectionsOnce = true
   const review = {
     schema_version: 1,
     review_kind: 'beat-structure',
@@ -301,6 +313,8 @@ test('reviews full-song structure before enabling clip timing', async ({
     pickup_beats: 0,
     phase_status: 'confirmed' as const,
     first_downbeat_at: 0.5,
+    excluded_candidate_beats: [] as number[],
+    added_candidate_beats: [] as number[],
     meter_changes: [] as Array<{
       at: number
       time_signature: [number, number]
@@ -324,10 +338,17 @@ test('reviews full-song structure before enabling clip timing', async ({
     meterChangeCount: review.meter_changes.length,
     checks: review.checks,
   })
+  const rawCandidateBeats = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
   const document = () => ({
     review,
     audioUrl: '/api/admin/beat-gold/structure-media/fixture-song',
-    candidateBeats: [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5],
+    rawCandidateBeats,
+    candidateBeats: [
+      ...rawCandidateBeats.filter(
+        (beat) => !review.excluded_candidate_beats.includes(beat),
+      ),
+      ...review.added_candidate_beats,
+    ].sort((left, right) => left - right),
     candidateBpm: 60,
   })
 
@@ -381,7 +402,22 @@ test('reviews full-song structure before enabling clip timing', async ({
     ) {
       savedDraft = request.postDataJSON() as Record<string, unknown>
       Object.assign(review, savedDraft)
-      await route.fulfill({ json: document() })
+      const responseDocument = document()
+      if (omitSavedCorrectionsOnce) {
+        omitSavedCorrectionsOnce = false
+        await route.fulfill({
+          json: {
+            ...responseDocument,
+            review: {
+              ...responseDocument.review,
+              excluded_candidate_beats: [],
+              added_candidate_beats: [],
+            },
+          },
+        })
+      } else {
+        await route.fulfill({ json: responseDocument })
+      }
       return
     }
     if (
@@ -394,6 +430,33 @@ test('reviews full-song structure before enabling clip timing', async ({
       await route.fulfill({ json: document() })
       return
     }
+    if (
+      path ===
+        '/api/admin/beat-gold/structure-reviews/fixture-song/reopen' &&
+      request.method() === 'POST'
+    ) {
+      reopenReason = (
+        request.postDataJSON() as { reason?: string }
+      ).reason
+      Object.assign(review, {
+        status: 'draft',
+        checks: {
+          meter: false,
+          downbeat_phase: false,
+          pickup: false,
+          meter_changes: false,
+        },
+        submission: null,
+      })
+      await route.fulfill({
+        json: {
+          document: document(),
+          clipsInvalidated: 5,
+          goldInvalidated: 1,
+        },
+      })
+      return
+    }
     await route.fulfill({ status: 404, json: { error: 'not found' } })
   })
 
@@ -402,7 +465,7 @@ test('reviews full-song structure before enabling clip timing', async ({
     page.getByRole('button', { name: /全曲结构/u }),
   ).toHaveClass(/is-active/u)
   await expect(
-    page.getByRole('button', { name: /片段时间/u }),
+    page.getByRole('button', { name: /精度抽检/u }),
   ).toBeDisabled()
   await expect(
     page.getByRole('heading', { name: 'fixture-song' }),
@@ -412,34 +475,191 @@ test('reviews full-song structure before enabling clip timing', async ({
   await expect(
     page.getByRole('button', { name: '分析正确，确认并提交' }),
   ).toBeVisible()
+  const subdivisionTicks = page.locator(
+    '.beat-structure-subdivision-grid > i',
+  )
+  const quarterSubdivisionTicks = page.locator(
+    '.beat-structure-subdivision-grid > i.is-quarter',
+  )
+  await expect(subdivisionTicks).not.toHaveCount(0)
+  expect(await subdivisionTicks.count()).toBeGreaterThan(
+    await quarterSubdivisionTicks.count(),
+  )
   for (const label of ['开头', '中段', '结尾']) {
     await expect(
       page.getByRole('button', { name: new RegExp(`试听${label}`, 'u') }),
     ).toBeVisible()
   }
+  await page.keyboard.press('End')
+  await expect(
+    page.locator('.beat-structure-selection strong'),
+  ).toHaveText('0:07.50')
+  await page.keyboard.press('Home')
+  await expect(
+    page.locator('.beat-structure-selection strong'),
+  ).toHaveText('0:00.50')
+  await page.keyboard.press('Space')
+  await expect(page.getByRole('button', { name: '暂停' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: '播放' })).toBeVisible()
   page.once('dialog', (dialog) => dialog.dismiss())
   await page
     .getByRole('button', { name: '分析正确，确认并提交' })
     .click()
   assert.equal(submittedDraft, undefined)
   await page.getByRole('button', { name: '需要纠正' }).click()
+  await page.keyboard.press('ArrowRight')
+  await expect(
+    page.locator('.beat-structure-detail > button.is-selected'),
+  ).toHaveAttribute('aria-label', /0:01.50.*第 2 拍/u)
+  await page.keyboard.press('Backspace')
+  await expect(
+    page.getByRole('button', { name: /0:02.50.*第 2 拍/u }),
+  ).toBeVisible()
+  await page
+    .getByRole('button', { name: '恢复 0:01.50 候选拍' })
+    .click()
+  await expect(
+    page.getByRole('button', { name: /0:02.50.*第 3 拍/u }),
+  ).toBeVisible()
+  const pickupSelect = page.getByRole('combobox', { name: '弱起时值' })
+  await pickupSelect.selectOption('0.25')
+  await expect(
+    page
+      .locator('.beat-structure-candidate dl > div')
+      .filter({ hasText: '弱起' }),
+  ).toContainText('0.25 拍（十六分音符）')
+  const meterInput = page.getByRole('spinbutton', { name: '每小节拍数' })
+  await meterInput.focus()
+  await page.keyboard.press('ArrowRight')
+  await expect(
+    page.locator('.beat-structure-detail > button.is-selected'),
+  ).toHaveAttribute('aria-label', /0:01.50.*第 2 拍/u)
+  await meterInput.evaluate((element) => element.blur())
+  const batchMode = page.getByRole('combobox', {
+    name: '批量节拍倍率',
+  })
+  const batchPreview = page.locator('.beat-structure-batch-preview')
+  await expect(batchMode).toHaveValue('halve')
+  await expect(batchPreview).toContainText('8→4 拍')
+  const keepOddBeats = page.getByRole('button', {
+    name: '删 2、4 · 留 1、3',
+  })
+  const keepEvenBeats = page.getByRole('button', {
+    name: '删 1、3 · 留 2、4',
+  })
+  await expect(keepOddBeats).toHaveAttribute('aria-pressed', 'true')
+  await keepEvenBeats.click()
+  await expect(keepEvenBeats).toHaveAttribute('aria-pressed', 'true')
+  await page
+    .getByRole('button', { name: '指定当前拍为保留拍' })
+    .click()
+  await expect(keepEvenBeats).toHaveAttribute('aria-pressed', 'true')
+  await keepOddBeats.click()
+  await page.getByRole('button', { name: '应用批量修正' }).click()
+  await expect(page.getByText('4 拍（删除 4，新增 0）')).toBeVisible()
+  await page.getByRole('button', { name: '撤销' }).click()
+  await expect(page.locator('.beat-structure-title small')).toContainText(
+    '8 拍',
+  )
+  await batchMode.selectOption('double')
+  await expect(batchPreview).toContainText('8→15 拍')
+  await expect(batchPreview).toContainText('60.0→120.0 BPM')
+  await batchMode.selectOption('halve')
+  await page.getByRole('button', { name: '应用批量修正' }).click()
+  await expect(
+    page
+      .locator('.beat-structure-candidate dl > div')
+      .filter({ hasText: '复核后速度' }),
+  ).toContainText('30.0 BPM')
+  await page.keyboard.press('Home')
+  await page.keyboard.press('ArrowRight')
   await page.getByRole('button', { name: '无法确认' }).click()
   await expect(
     page.getByRole('button', { name: '分析正确，确认并提交' }),
   ).toBeDisabled()
   await page.getByRole('button', { name: '可确认' }).click()
-  await page.getByRole('button', { name: /0:02.50.*第 3 拍/u }).click()
   await page
     .getByRole('button', { name: '当前拍设为首个强拍' })
     .click()
-  await page.getByRole('button', { name: '保存草稿' }).click()
+  await expect(
+    page.getByRole('button', { name: '在播放位置添加拍点' }),
+  ).toBeVisible()
+  await meterInput.focus()
+  await page.keyboard.press('a')
+  await expect(page.getByText('4 拍（删除 4，新增 0）')).toBeVisible()
+  await meterInput.evaluate((element) => element.blur())
+  await page.locator('audio').evaluate((audio: HTMLAudioElement) => {
+    let mediaTime = 3.125
+    Object.defineProperty(audio, 'currentTime', {
+      configurable: true,
+      get: () => mediaTime,
+      set: (value: number) => {
+        mediaTime = value
+      },
+    })
+  })
+  await page.keyboard.press('a')
+  await expect(
+    page.getByRole('button', { name: /0:03.13.*新增拍点/u }),
+  ).toBeVisible()
+  await expect(page.getByText('5 拍（删除 4，新增 1）')).toBeVisible()
+  await expect(
+    page
+      .locator('.beat-structure-candidate dl > div')
+      .filter({ hasText: '复核后速度' }),
+  ).toContainText('35.6 BPM')
+  await page.keyboard.press('Control+s')
+  await expect(
+    page.getByText(
+      '拍点修正未被服务器保存，当前修改已保留，请刷新后重试',
+    ),
+  ).toBeVisible()
+  await expect(page.getByText('5 拍（删除 4，新增 1）')).toBeVisible()
+  await page.keyboard.press('Control+s')
   await expect(page.getByText('结构草稿已保存')).toBeVisible()
   assert(savedDraft)
+  assert.equal(savedDraft.pickup_beats, 0.25)
   assert.equal(savedDraft.first_downbeat_at, 2.5)
+  assert.deepEqual(savedDraft.excluded_candidate_beats, [
+    1.5,
+    3.5,
+    5.5,
+    7.5,
+  ])
+  assert.deepEqual(savedDraft.added_candidate_beats, [3.125])
+
+  await page.reload()
+  await expect(
+    page.getByRole('heading', { name: 'fixture-song' }),
+  ).toBeVisible()
+  await expect(page.getByText('5 拍（删除 4，新增 1）')).toBeVisible()
+  await expect(
+    page
+      .locator('.beat-structure-candidate dl > div')
+      .filter({ hasText: '复核后速度' }),
+  ).toContainText('35.6 BPM')
+  await expect(
+    page
+      .locator('.beat-structure-candidate dl > div')
+      .filter({ hasText: '弱起' }),
+  ).toContainText('0.25 拍（十六分音符）')
+  await expect(
+    page.getByRole('button', { name: /0:01.50/u }),
+  ).toHaveCount(0)
+  await expect(
+    page.getByRole('button', { name: /0:03.13.*新增拍点/u }),
+  ).toBeVisible()
+  await page.getByRole('button', { name: '需要纠正' }).click()
 
   page.once('dialog', (dialog) => dialog.accept())
   await page.getByRole('button', { name: '提交纠正结果' }).click()
   await expect(page.getByText('全曲结构已提交')).toBeVisible()
+  await expect(
+    page
+      .locator('.beat-structure-candidate dl > div')
+      .filter({ hasText: '复核后速度' }),
+  ).toContainText('35.6 BPM')
   assert(submittedDraft)
   assert.deepEqual(submittedDraft.checks, {
     meter: true,
@@ -447,9 +667,39 @@ test('reviews full-song structure before enabling clip timing', async ({
     pickup: true,
     meter_changes: true,
   })
+  assert.equal(submittedDraft.pickup_beats, 0.25)
+  assert.deepEqual(submittedDraft.added_candidate_beats, [3.125])
   await expect(
-    page.getByRole('button', { name: /片段时间/u }),
+    page.getByRole('button', { name: /精度抽检/u }),
   ).toBeEnabled()
+  await expect(
+    page.getByRole('button', { name: '撤回并重新复核' }),
+  ).toBeVisible()
+
+  page.on('dialog', async (dialog) => {
+    if (dialog.type() === 'prompt') {
+      await dialog.accept('强拍相位标注错误')
+    } else {
+      await dialog.accept()
+    }
+  })
+  await page.getByRole('button', { name: '撤回并重新复核' }).click()
+  await expect(
+    page.getByText(
+      '已撤回全曲结构，5 个关联片段已退回草稿，1 个金标准已失效归档',
+    ),
+  ).toBeVisible()
+  assert.equal(reopenReason, '强拍相位标注错误')
+  await expect(
+    page.getByRole('button', { name: /精度抽检/u }),
+  ).toBeDisabled()
+  const saveDraftButton = page.getByRole('button', { name: '保存草稿' })
+  const correctionButton = page.getByRole('button', { name: '需要纠正' })
+  await expect(saveDraftButton.or(correctionButton)).toBeVisible()
+  if (await correctionButton.isVisible()) {
+    await correctionButton.click()
+  }
+  await expect(saveDraftButton).toBeVisible()
 })
 
 for (const phase of ['confirmed', 'uncertain'] as const) {
@@ -475,6 +725,7 @@ for (const phase of ['confirmed', 'uncertain'] as const) {
       pickup_beats: 2,
       phase_status: phase,
       first_downbeat_at: phase === 'confirmed' ? 2.5 : null,
+      excluded_candidate_beats: phase === 'confirmed' ? [1.5] : [],
       meter_changes: [],
       checks: checked,
     }
@@ -567,12 +818,20 @@ for (const phase of ['confirmed', 'uncertain'] as const) {
           },
         })
       } else if (path.endsWith('/structure-reviews/fixture')) {
+        const candidateBeats = Array.from(
+          { length: 60 },
+          (_, index) => index + 0.5,
+        )
+        const effectiveCandidateBeats = candidateBeats.filter(
+          (beat) => !structure.excluded_candidate_beats.includes(beat),
+        )
         await route.fulfill({
           json: {
             review: structure,
             audioUrl: '',
             candidateBpm: 60,
-            candidateBeats: Array.from({ length: 60 }, (_, index) => index + 0.5),
+            rawCandidateBeats: candidateBeats,
+            candidateBeats: effectiveCandidateBeats,
           },
         })
       } else if (path === '/api/admin/beat-gold') {
@@ -598,7 +857,7 @@ for (const phase of ['confirmed', 'uncertain'] as const) {
 
     await page.goto('/admin/reviews/beat?stage=clips')
     await expect(page.getByRole('heading', { name: 'fixture-01' })).toBeVisible()
-    await expect(page.getByRole('button', { name: /片段时间/u })).toBeEnabled()
+    await expect(page.getByRole('button', { name: /精度抽检/u })).toBeEnabled()
     await expect(page.locator('.beat-review-list > button')).toHaveCount(
       phase === 'confirmed' ? 2 : 5,
     )
@@ -606,7 +865,9 @@ for (const phase of ['confirmed', 'uncertain'] as const) {
     await page.getByRole('combobox', { name: '片段队列' }).selectOption('all')
     await expect(page.locator('.beat-review-list > button')).toHaveCount(5)
     await page.getByRole('combobox', { name: '片段队列' }).selectOption('core')
-    const apply = page.getByRole('button', { name: '应用全曲结构' })
+    const apply = page.getByRole('button', {
+      name: '重新同步全曲结构',
+    })
     if (phase === 'uncertain') {
       await expect(apply).toBeDisabled()
       await expect(page.getByText('4/4 · 强拍相位待裁决')).toBeVisible()
@@ -629,7 +890,7 @@ for (const phase of ['confirmed', 'uncertain'] as const) {
     assert(savedDraft)
     assert.deepEqual(
       (savedDraft.beats as Array<{ at: number }>).map((marker) => marker.at),
-      [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5],
+      [0.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5],
     )
     assert.equal(savedDraft.pickup_beats, 2)
     assert.deepEqual(savedDraft.checks, review.checks)

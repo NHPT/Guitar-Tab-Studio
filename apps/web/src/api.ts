@@ -17,6 +17,7 @@ import type {
   BeatReviewSummary,
   BeatStructureDocument,
   BeatStructureDraft,
+  BeatStructureReopenResult,
   BeatStructureSummary,
   BeatTrainingDataset,
   BeatTrainingJob,
@@ -398,6 +399,24 @@ export function submitBeatStructureReview(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(draft),
+    },
+  )
+}
+
+export function reopenBeatStructureReview(
+  recordingId: string,
+  reviewer: string,
+  reason: string,
+): Promise<BeatStructureReopenResult> {
+  return jsonRequest(
+    beatReviewApiPath(
+      `/api/admin/beat-gold/structure-reviews/${encodeURIComponent(recordingId)}/reopen`,
+      reviewer,
+    ),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
     },
   )
 }

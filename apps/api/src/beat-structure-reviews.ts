@@ -12,6 +12,8 @@ import { dirname, isAbsolute, resolve } from 'node:path'
 import {
   BeatReviewRequestError,
   defaultBeatGoldRoot,
+  invalidateBeatReviewsForStructure,
+  regenerateBeatReviewDraftsFromStructure,
   type BeatSubmissionIdentity,
 } from './beat-reviews.js'
 
@@ -51,6 +53,8 @@ export interface BeatStructureReviewPackage {
   phase_status: 'confirmed' | 'uncertain'
   first_downbeat_at: number | null
   meter_changes: BeatMeterChange[]
+  excluded_candidate_beats?: number[]
+  added_candidate_beats?: number[]
   checks: BeatStructureChecks
   candidate_source: {
     kind: 'worker-analysis'
@@ -62,6 +66,20 @@ export interface BeatStructureReviewPackage {
     admin_user_id?: string
     admin_username?: string
   } | null
+  submission_history?: BeatStructureSubmissionHistoryEntry[]
+}
+
+export interface BeatStructureSubmissionHistoryEntry {
+  submitted_at: string
+  content_sha256: string
+  admin_user_id?: string
+  admin_username?: string
+  invalidated_at: string
+  invalidation_reason: string
+  invalidated_by_user_id?: string
+  invalidated_by_username?: string
+  clips_invalidated: number
+  gold_invalidated: number
 }
 
 export interface BeatStructureSummary {
@@ -79,8 +97,15 @@ export interface BeatStructureSummary {
 export interface BeatStructureDocument {
   review: BeatStructureReviewPackage
   audioUrl: string
+  rawCandidateBeats: number[]
   candidateBeats: number[]
   candidateBpm: number
+}
+
+export interface BeatStructureReopenResult {
+  document: BeatStructureDocument
+  clipsInvalidated: number
+  goldInvalidated: number
 }
 
 export interface BeatStructureDraftInput {
@@ -89,6 +114,8 @@ export interface BeatStructureDraftInput {
   phase_status?: unknown
   first_downbeat_at?: unknown
   meter_changes?: unknown
+  excluded_candidate_beats?: unknown
+  added_candidate_beats?: unknown
   checks?: unknown
 }
 
@@ -123,6 +150,23 @@ function integer(value: unknown, label: string): number {
     throw new BeatReviewRequestError(`${label}必须是整数`)
   }
   return number
+}
+
+function normalizePickupBeats(
+  value: unknown,
+  timeSignature: [number, number],
+  label: string,
+): number {
+  const pickupBeats = finiteNumber(value, label)
+  const quarterBeatUnits = Math.round(pickupBeats * 4)
+  if (Math.abs(pickupBeats * 4 - quarterBeatUnits) > 0.000001) {
+    throw new BeatReviewRequestError(`${label}必须以 0.25 拍为步进`)
+  }
+  const normalized = quarterBeatUnits / 4
+  if (normalized < 0 || normalized >= timeSignature[0]) {
+    throw new BeatReviewRequestError(`${label}必须小于每小节拍数且不能为负数`)
+  }
+  return normalized
 }
 
 function sha256File(path: string): string {
@@ -161,7 +205,8 @@ export function beatStructureContentDigest(
 ): string {
   const payload = Object.fromEntries(
     Object.entries(review).filter(
-      ([key]) => !['status', 'submission'].includes(key),
+      ([key]) =>
+        !['status', 'submission', 'submission_history'].includes(key),
     ),
   )
   return createHash('sha256')
@@ -296,13 +341,11 @@ function recordingCandidates(root: string): RecordingCandidate[] {
       const timeSignature = normalizeTimeSignature(
         analysis.time_signature ?? [4, 4],
       )
-      const pickupBeats = integer(
+      const pickupBeats = normalizePickupBeats(
         analysis.pickup_beats ?? 0,
+        timeSignature,
         '候选弱起拍数',
       )
-      if (pickupBeats < 0 || pickupBeats >= timeSignature[0]) {
-        throw new BeatReviewRequestError('候选弱起拍数无效', 500)
-      }
       return {
         recordingId,
         split,
@@ -374,9 +417,105 @@ function matchesCandidateBeat(
   return beats.some((beat) => Math.abs(beat - at) <= 0.001)
 }
 
+function normalizeExcludedCandidateBeats(
+  value: unknown,
+  candidate: RecordingCandidate,
+): number[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > candidate.beats.length - 2
+  ) {
+    throw new BeatReviewRequestError('删除的候选拍点列表无效')
+  }
+  const excluded = value.map((item, index) => {
+    const at = finiteNumber(item, `第 ${index + 1} 个删除拍点`)
+    const candidateBeat = candidate.beats.find(
+      (beat) => Math.abs(beat - at) <= 0.001,
+    )
+    if (candidateBeat === undefined) {
+      throw new BeatReviewRequestError(
+        `第 ${index + 1} 个删除拍点不在原始候选中`,
+      )
+    }
+    return Math.round(candidateBeat * 1_000_000) / 1_000_000
+  })
+  excluded.sort((left, right) => left - right)
+  for (let index = 1; index < excluded.length; index += 1) {
+    if (excluded[index] - excluded[index - 1] <= 0.001) {
+      throw new BeatReviewRequestError('删除的候选拍点不能重复')
+    }
+  }
+  return excluded
+}
+
+function normalizeAddedCandidateBeats(
+  value: unknown,
+  candidate: RecordingCandidate,
+  survivingCandidateBeats: readonly number[],
+): number[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > 10_000 ||
+    survivingCandidateBeats.length + value.length > 10_000
+  ) {
+    throw new BeatReviewRequestError('新增的候选拍点列表无效')
+  }
+  const added = value.map((item, index) => {
+    const at = finiteNumber(item, `第 ${index + 1} 个新增拍点`)
+    if (at < 0 || at > candidate.audioDuration) {
+      throw new BeatReviewRequestError(
+        `第 ${index + 1} 个新增拍点超出音频范围`,
+      )
+    }
+    const normalizedAt = Math.round(at * 1_000_000) / 1_000_000
+    const nearestDistance = Math.min(
+      ...survivingCandidateBeats.map((beat) =>
+        Math.abs(beat - normalizedAt),
+      ),
+    )
+    if (nearestDistance <= 0.001) {
+      throw new BeatReviewRequestError(
+        `第 ${index + 1} 个新增拍点与现有候选拍点重复`,
+      )
+    }
+    if (nearestDistance < 0.03) {
+      throw new BeatReviewRequestError(
+        `第 ${index + 1} 个新增拍点与现有候选拍点间隔不足 0.03 秒`,
+      )
+    }
+    return normalizedAt
+  })
+  added.sort((left, right) => left - right)
+  for (let index = 1; index < added.length; index += 1) {
+    if (added[index] - added[index - 1] <= 0.001) {
+      throw new BeatReviewRequestError('新增的候选拍点不能重复')
+    }
+    if (added[index] - added[index - 1] < 0.03) {
+      throw new BeatReviewRequestError(
+        '新增的候选拍点间隔必须至少为 0.03 秒',
+      )
+    }
+  }
+  return added
+}
+
+function effectiveCandidateBeats(
+  candidate: RecordingCandidate,
+  excluded: readonly number[],
+  added: readonly number[],
+): number[] {
+  return [
+    ...candidate.beats.filter(
+      (beat) => !matchesCandidateBeat(beat, excluded),
+    ),
+    ...added,
+  ].sort((left, right) => left - right)
+}
+
 function normalizeMeterChanges(
   value: unknown,
   candidate: RecordingCandidate,
+  candidateBeats: readonly number[],
 ): BeatMeterChange[] {
   if (!Array.isArray(value) || value.length > 32) {
     throw new BeatReviewRequestError('变拍列表无效')
@@ -389,7 +528,7 @@ function normalizeMeterChanges(
     if (
       at <= 0 ||
       at >= candidate.audioDuration ||
-      !matchesCandidateBeat(at, candidate.beats)
+      !matchesCandidateBeat(at, candidateBeats)
     ) {
       throw new BeatReviewRequestError(
         `第 ${index + 1} 个变拍点必须落在候选拍点上`,
@@ -430,15 +569,41 @@ function validateReview(
     throw new BeatReviewRequestError('全曲结构审核文件格式无效', 500)
   }
   const timeSignature = normalizeTimeSignature(value.time_signature)
-  const pickupBeats = integer(value.pickup_beats, '弱起拍数')
-  if (pickupBeats < 0 || pickupBeats >= timeSignature[0]) {
-    throw new BeatReviewRequestError('弱起拍数必须小于每小节拍数')
-  }
+  const pickupBeats = normalizePickupBeats(
+    value.pickup_beats,
+    timeSignature,
+    '弱起拍数',
+  )
   if (!['confirmed', 'uncertain'].includes(String(value.phase_status))) {
     throw new BeatReviewRequestError('强拍相位状态无效')
   }
   const phaseStatus =
     value.phase_status as BeatStructureReviewPackage['phase_status']
+  const hasExcludedCandidateBeats = Object.prototype.hasOwnProperty.call(
+    value,
+    'excluded_candidate_beats',
+  )
+  const hasAddedCandidateBeats = Object.prototype.hasOwnProperty.call(
+    value,
+    'added_candidate_beats',
+  )
+  const excludedCandidateBeats = normalizeExcludedCandidateBeats(
+    value.excluded_candidate_beats ?? [],
+    candidate,
+  )
+  const survivingCandidateBeats = candidate.beats.filter(
+    (beat) => !matchesCandidateBeat(beat, excludedCandidateBeats),
+  )
+  const addedCandidateBeats = normalizeAddedCandidateBeats(
+    value.added_candidate_beats ?? [],
+    candidate,
+    survivingCandidateBeats,
+  )
+  const reviewedCandidateBeats = effectiveCandidateBeats(
+    candidate,
+    excludedCandidateBeats,
+    addedCandidateBeats,
+  )
   const firstDownbeatAt =
     value.first_downbeat_at === null
       ? null
@@ -446,7 +611,7 @@ function validateReview(
   if (
     (phaseStatus === 'confirmed' &&
       (firstDownbeatAt === null ||
-        !matchesCandidateBeat(firstDownbeatAt, candidate.beats))) ||
+        !matchesCandidateBeat(firstDownbeatAt, reviewedCandidateBeats))) ||
     (phaseStatus === 'uncertain' && firstDownbeatAt !== null)
   ) {
     throw new BeatReviewRequestError('首个强拍必须选择候选拍点')
@@ -468,7 +633,17 @@ function validateReview(
       firstDownbeatAt === null
         ? null
         : Math.round(firstDownbeatAt * 1_000_000) / 1_000_000,
-    meter_changes: normalizeMeterChanges(value.meter_changes, candidate),
+    meter_changes: normalizeMeterChanges(
+      value.meter_changes,
+      candidate,
+      reviewedCandidateBeats,
+    ),
+    ...(hasExcludedCandidateBeats
+      ? { excluded_candidate_beats: excludedCandidateBeats }
+      : {}),
+    ...(hasAddedCandidateBeats
+      ? { added_candidate_beats: addedCandidateBeats }
+      : {}),
     checks: normalizeChecks(value.checks),
   }
   if (
@@ -509,6 +684,8 @@ function initialReview(
     phase_status: 'confirmed',
     first_downbeat_at: candidate.beats[0],
     meter_changes: [],
+    excluded_candidate_beats: [],
+    added_candidate_beats: [],
     checks: {
       meter: false,
       downbeat_phase: false,
@@ -564,6 +741,10 @@ function applyDraft(
     phaseStatus === 'uncertain'
       ? null
       : input.first_downbeat_at ?? review.first_downbeat_at
+  const excludedCandidateBeats =
+    input.excluded_candidate_beats ?? review.excluded_candidate_beats
+  const addedCandidateBeats =
+    input.added_candidate_beats ?? review.added_candidate_beats
   return validateReview(
     {
       ...review,
@@ -572,6 +753,12 @@ function applyDraft(
       phase_status: phaseStatus,
       first_downbeat_at: firstDownbeatAt,
       meter_changes: input.meter_changes ?? review.meter_changes,
+      ...(excludedCandidateBeats === undefined
+        ? {}
+        : { excluded_candidate_beats: excludedCandidateBeats }),
+      ...(addedCandidateBeats === undefined
+        ? {}
+        : { added_candidate_beats: addedCandidateBeats }),
       checks: input.checks ?? review.checks,
       submission: null,
       status: 'draft',
@@ -635,7 +822,12 @@ export function getBeatStructureReview(
     audioUrl:
       `/api/admin/beat-gold/structure-media/` +
       encodeURIComponent(recordingId),
-    candidateBeats: candidate.beats,
+    rawCandidateBeats: candidate.beats,
+    candidateBeats: effectiveCandidateBeats(
+      candidate,
+      review.excluded_candidate_beats ?? [],
+      review.added_candidate_beats ?? [],
+    ),
     candidateBpm: candidate.bpm,
   }
 }
@@ -708,12 +900,102 @@ export function submitBeatStructureReview(
   review.submission.content_sha256 = beatStructureContentDigest(review)
   validateReview(review, candidate, reviewer)
   writeReview(path, review)
+  if (
+    review.phase_status === 'confirmed' &&
+    review.first_downbeat_at !== null
+  ) {
+    regenerateBeatReviewDraftsFromStructure(
+      {
+        recordingId,
+        reviewer,
+        corpusVersion: review.corpus_version,
+        timeSignature: review.time_signature,
+        pickupBeats: review.pickup_beats,
+        firstDownbeatAt: review.first_downbeat_at,
+        meterChanges: review.meter_changes,
+        candidateBeats: effectiveCandidateBeats(
+          candidate,
+          review.excluded_candidate_beats ?? [],
+          review.added_candidate_beats ?? [],
+        ),
+        contentSha256: review.submission.content_sha256,
+      },
+      root,
+    )
+  }
   return getBeatStructureReview(
     recordingId,
     reviewer,
     root,
     sourceRoot,
   )
+}
+
+export function reopenBeatStructureReview(
+  recordingId: string,
+  reviewerValue: unknown,
+  reasonValue: unknown,
+  root = defaultBeatGoldRoot(),
+  sourceRoot = defaultBeatSourceRoot(root),
+  identity?: BeatSubmissionIdentity,
+): BeatStructureReopenResult {
+  const reviewer = normalizeReviewer(reviewerValue)
+  const candidate = candidateFor(root, recordingId)
+  const path = reviewPath(root, reviewer, recordingId)
+  const review = readReview(root, reviewer, recordingId)
+  if (review.status !== 'submitted' || !review.submission) {
+    throw new BeatReviewRequestError('只有已提交的全曲结构可以撤回', 409)
+  }
+  sourceAudioPath(candidate, sourceRoot)
+  const reason =
+    typeof reasonValue === 'string' && reasonValue.trim()
+      ? reasonValue.trim().slice(0, 200)
+      : '修正全曲结构'
+  const previousSubmission = review.submission
+  const invalidation = invalidateBeatReviewsForStructure(
+    recordingId,
+    reviewer,
+    reason,
+    previousSubmission.content_sha256,
+    root,
+    identity,
+  )
+  const invalidatedAt = new Date().toISOString()
+  review.submission_history = [
+    ...(review.submission_history ?? []),
+    {
+      ...previousSubmission,
+      invalidated_at: invalidatedAt,
+      invalidation_reason: reason,
+      ...(identity
+        ? {
+            invalidated_by_user_id: identity.adminUserId,
+            invalidated_by_username: identity.adminUsername,
+          }
+        : {}),
+      clips_invalidated: invalidation.clipsInvalidated,
+      gold_invalidated: invalidation.goldInvalidated,
+    },
+  ]
+  review.status = 'draft'
+  review.checks = {
+    meter: false,
+    downbeat_phase: false,
+    pickup: false,
+    meter_changes: false,
+  }
+  review.submission = null
+  validateReview(review, candidate, reviewer)
+  writeReview(path, review)
+  return {
+    document: getBeatStructureReview(
+      recordingId,
+      reviewer,
+      root,
+      sourceRoot,
+    ),
+    ...invalidation,
+  }
 }
 
 export function beatStructureReviewers(

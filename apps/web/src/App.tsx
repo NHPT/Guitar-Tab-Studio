@@ -2507,6 +2507,9 @@ function App({ application = studioApplication }: AppProps) {
     (item, index, items) =>
       items.findIndex((candidate) => candidate.id === item.id) === index,
   )
+  const tempoMultiplierWarning = project.warnings.find((warning) =>
+    warning.startsWith('Beat tempo multiplier is ambiguous'),
+  )
 
   return (
     <div
@@ -3135,6 +3138,19 @@ function App({ application = studioApplication }: AppProps) {
             ) : null}
           </div>
         </section>
+        {tempoMultiplierWarning ? (
+          <div
+            className="project-timing-warning"
+            role="alert"
+            title={tempoMultiplierWarning}
+          >
+            <CircleAlert aria-hidden="true" />
+            <span>
+              <strong>{t('节拍倍率待确认')}</strong>
+              <small>{t('发布前请确认四分音符拍点与实际乐曲一致')}</small>
+            </span>
+          </div>
+        ) : null}
 
         <section className="transport-section">
           <div className="transport">

@@ -16,9 +16,11 @@ from .candidate_activity import (
     CandidateActivityDataset,
     CandidateActivityHead,
 )
+from .data_sources import manifest_identity
 from .features import FeatureConfig
 from .onset_position import OnsetPositionConfig, OnsetPositionNet
 from .prepare_guitarset_stems import sha256_file
+from .schema import load_manifest
 from .train import choose_device
 
 
@@ -274,6 +276,16 @@ def main() -> None:
         )
     except ValueError as error:
         parser.error(str(error))
+    training_data_identity = manifest_identity(
+        arguments.manifest.resolve(),
+        load_manifest(arguments.manifest.resolve()),
+        purpose="training",
+    )
+    validation_data_identity = manifest_identity(
+        arguments.validation_manifest.resolve(),
+        load_manifest(arguments.validation_manifest.resolve()),
+        purpose="training",
+    )
 
     random.seed(arguments.seed)
     np.random.seed(arguments.seed)
@@ -511,6 +523,8 @@ def main() -> None:
                         "validation_manifest_name": (
                             arguments.validation_manifest.name
                         ),
+                        "training_data": training_data_identity,
+                        "validation_data": validation_data_identity,
                         "positive_only_datasets": sorted(
                             set(arguments.positive_only_dataset)
                         ),

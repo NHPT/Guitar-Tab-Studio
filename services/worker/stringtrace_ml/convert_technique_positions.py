@@ -7,6 +7,11 @@ import os
 from collections import Counter
 from pathlib import Path
 
+from .data_sources import (
+    SourceLedger,
+    load_source_ledger,
+    source_provenance,
+)
 from .schema import (
     STANDARD_TUNING_LIST,
     LabeledEvent,
@@ -16,22 +21,22 @@ from .schema import (
 from .technique_schema import TechniqueTrack, load_technique_manifest
 
 
+SOURCE_LEDGER = load_source_ledger()
 TRAINING_DATASET_POLICIES: dict[str, dict[str, str]] = {
-    "AG-PT-set": {
-        "license": "CC-BY-4.0",
-        "source": "https://doi.org/10.5281/zenodo.10159492",
-    },
-    "Guitar-TECHS": {
-        "license": "CC-BY-4.0",
-        "source": "https://doi.org/10.5281/zenodo.14963133",
-    },
+    alias: {
+        "source_id": policy.source_id,
+        "license": policy.license_spdx,
+        "source": policy.source_url,
+    }
+    for policy in SOURCE_LEDGER.policies.values()
+    if "training" in policy.allowed_purposes
+    and policy.verification_status in {"verified", "internal"}
+    for alias in policy.aliases
 }
 KNOWN_DATASET_LICENSES = {
-    **{
-        dataset: policy["license"]
-        for dataset, policy in TRAINING_DATASET_POLICIES.items()
-    },
-    "IDMT-SMT-GUITAR_V2": "CC-BY-NC-ND-4.0",
+    alias: policy.license_spdx
+    for policy in SOURCE_LEDGER.policies.values()
+    for alias in policy.aliases
 }
 
 
@@ -54,15 +59,21 @@ def _track_rejection_reason(
     track: TechniqueTrack,
     *,
     source_split: str,
+    purpose: str,
+    ledger: SourceLedger = SOURCE_LEDGER,
 ) -> str | None:
     if track.split != source_split:
-        return "non_training_split"
-    dataset = str(track.provenance.get("dataset", "unknown"))
-    policy = TRAINING_DATASET_POLICIES.get(dataset)
-    if policy is None:
-        return "dataset_not_approved"
-    if track.provenance.get("license") != policy["license"]:
+        return "non_selected_split"
+    try:
+        policy = ledger.resolve(track.provenance)
+    except ValueError:
+        return "source_not_registered"
+    if track.provenance.get("license") != policy.license_spdx:
         return "license_mismatch"
+    if policy.verification_status not in {"verified", "internal"}:
+        return f"source_{policy.verification_status}"
+    if purpose not in policy.allowed_purposes:
+        return f"{purpose}_not_allowed"
     return None
 
 
@@ -83,6 +94,7 @@ def convert_technique_positions(
     output_path = output_path.resolve()
     audit_path = audit_path.resolve()
     tracks = load_technique_manifest(source_path)
+    ledger = load_source_ledger()
 
     source_tracks: Counter[str] = Counter()
     source_events: Counter[str] = Counter()
@@ -108,6 +120,8 @@ def convert_technique_positions(
         rejection_reason = _track_rejection_reason(
             track,
             source_split=source_split,
+            purpose="training",
+            ledger=ledger,
         )
         if rejection_reason is not None:
             key = f"{dataset}:{rejection_reason}"
@@ -143,7 +157,8 @@ def convert_technique_positions(
             rejected_events[key] += len(track.events)
             continue
 
-        provenance = dict(track.provenance)
+        policy = ledger.resolve(track.provenance)
+        provenance = source_provenance(track.provenance, policy)
         provenance["position_conversion"] = {
             "method": "standard-tuning-pitch-minus-open-v1",
             "source_manifest": source_path.name,
@@ -174,6 +189,10 @@ def convert_technique_positions(
     audit: dict[str, object] = {
         "schema_version": 1,
         "conversion": "technique-events-to-standard-tuning-positions-v1",
+        "source_ledger": {
+            "version": ledger.ledger_version,
+            "sha256": ledger.sha256,
+        },
         "source_manifest": {
             "name": source_path.name,
             "sha256": sha256_file(source_path),

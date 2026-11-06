@@ -830,6 +830,27 @@ test('normalizes supported legacy analysis documents to schema version 10', () =
         { at: 0.71, beat: 1, bpm: 117.6, confidence: 0.85 },
       ],
     },
+    tempo_grid_diagnostics: {
+      selected_grid: 'half',
+      selection_reason: 'quarter-note-multiplier-evidence',
+      confidence: 0.91,
+      requires_review: false,
+      selected_phase: 1,
+      selected_bpm: 71.4,
+      fast_bpm: 142.8,
+      slow_bpm: 71.4,
+      high_bpm: 142.8,
+      candidate_ratio: 2,
+      beat_count_ratio: 0.5,
+      high_beat_count: 96,
+      binary_accent_contrast: 0.32,
+      binary_periodicity: 0.41,
+      slow_accent_contrast: 0.08,
+      compound_support: 0.04,
+      fast_irregularity: 0.06,
+      slow_irregularity: 0.04,
+      high_irregularity: 0.06,
+    },
     timing_diagnostics: {
       mix_bpm: 240,
       percussion_bpm: 120,
@@ -926,6 +947,13 @@ test('normalizes supported legacy analysis documents to schema version 10', () =
   assert.equal(analysis.pickup_beats, 5)
   assert.equal(analysis.tempo_map?.mode, 'variable')
   assert.equal(analysis.tempo_map?.medianBpm, 118.5)
+  assert.equal(analysis.tempo_grid_diagnostics?.selectedGrid, 'half')
+  assert.equal(
+    analysis.tempo_grid_diagnostics?.selectionReason,
+    'quarter-note-multiplier-evidence',
+  )
+  assert.equal(analysis.tempo_grid_diagnostics?.confidence, 0.91)
+  assert.equal(analysis.tempo_grid_diagnostics?.requiresReview, false)
   assert.equal(
     analysis.timing_diagnostics?.relationship,
     'percussion-half-tempo',

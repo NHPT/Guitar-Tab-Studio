@@ -15,7 +15,7 @@ from torch.utils.data import Dataset
 
 from .features import FeatureConfig, extract_file_cqt
 from .model import STRING_COUNT
-from .schema import TrackAnnotation, load_manifest
+from .schema import load_manifest
 
 
 CACHE_STORAGE_DTYPE = np.float16

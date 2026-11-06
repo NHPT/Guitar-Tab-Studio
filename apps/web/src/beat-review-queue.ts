@@ -116,17 +116,25 @@ export function draftWithConfirmedStructure(
     })
   }
   const section = sections[sections.length - 1]
-  const firstIndex = nearestIndex(start + (draft.beats[0]?.at ?? 0))
+  const inheritedBeats = beats
+    .map((sourceAt, sourceIndex) => ({ sourceAt, sourceIndex }))
+    .filter(({ sourceAt }) => sourceAt >= start && sourceAt < end)
+  if (inheritedBeats.length === 0) return null
   return {
     ...draft,
     time_signature: [...section.signature],
-    pickup_beats: Math.min(review.pickup_beats, section.signature[0] - 1),
-    beats: draft.beats.map((marker, index) => {
-      const offset = firstIndex + index - section.index
+    pickup_beats: Math.min(
+      review.pickup_beats,
+      section.signature[0] - 0.25,
+    ),
+    beats: inheritedBeats.map(({ sourceAt, sourceIndex }) => {
+      const offset = sourceIndex - section.index
       const numerator = section.signature[0]
       const beat = ((offset % numerator) + numerator) % numerator + 1
       return {
-        ...marker,
+        at:
+          Math.round((sourceAt - start) * 1_000_000) /
+          1_000_000,
         beat,
         measure: Math.max(0, section.measure + Math.floor(offset / numerator)),
         downbeat: beat === 1,

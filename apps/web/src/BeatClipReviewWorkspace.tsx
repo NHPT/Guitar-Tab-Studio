@@ -353,7 +353,21 @@ export default function BeatClipReviewWorkspace({
     return () => controller.abort()
   }, [document])
 
+  useEffect(() => {
+    if (!playing) return
+    let frame = 0
+    const update = () => {
+      const audio = audioRef.current
+      if (!audio || audio.paused) return
+      setCurrentTime(audio.currentTime)
+      frame = window.requestAnimationFrame(update)
+    }
+    frame = window.requestAnimationFrame(update)
+    return () => window.cancelAnimationFrame(frame)
+  }, [playing])
+
   const markers = useMemo(() => draft?.beats ?? [], [draft?.beats])
+  const waveformShape = useMemo(() => waveformPath(waveform), [waveform])
   const selectedMarker = markers[selectedBeat]
   const readOnly = document?.review.status !== 'draft'
   const selectedInEvaluation =
@@ -497,16 +511,17 @@ export default function BeatClipReviewWorkspace({
 
   const addBeat = () => {
     if (!draft || !document || readOnly) return
+    const audioTime = audioRef.current?.currentTime ?? currentTime
     if (
-      currentTime < document.review.evaluation_start ||
-      currentTime >= document.review.evaluation_end
+      audioTime < document.review.evaluation_start ||
+      audioTime >= document.review.evaluation_end
     ) {
       setError('只能在亮色评测窗内添加拍点')
       return
     }
     const at = Math.max(
       document.review.evaluation_start,
-      Math.min(document.review.evaluation_end - 0.001, currentTime),
+      Math.min(document.review.evaluation_end - 0.001, audioTime),
     )
     if (draft.beats.some((beat) => Math.abs(beat.at - at) < 0.03)) {
       setError('新拍点与现有拍点距离不足 30ms')
@@ -571,18 +586,18 @@ export default function BeatClipReviewWorkspace({
     if (!document || !draft || !currentStructure || readOnly) return
     const next = draftWithConfirmedStructure(document, currentStructure, draft)
     if (!next) return
-    if (!window.confirm('将更新此片段的拍号、弱起和拍位，确认应用全曲结构吗？')) {
+    if (!window.confirm('将按已提交的全曲网格重建此片段，确认继续吗？')) {
       return
     }
     updateDraft(() => next)
-    setNotice('已应用全曲结构，请试听检查拍点')
+    setNotice('已按全曲网格重建片段，请试听抽检')
   }
 
   const persist = async (submit: boolean) => {
     if (!draft || !selectedClipId || saving) return
     if (
       submit &&
-      !window.confirm('提交后该标注将锁定，确认提交独立审核吗？')
+      !window.confirm('提交后该抽检结果将锁定，确认继续吗？')
     ) {
       return
     }
@@ -596,7 +611,7 @@ export default function BeatClipReviewWorkspace({
       setDocument(next)
       setDraft(draftFromDocument(next))
       setDirty(false)
-      setNotice(submit ? '独立审核已提交' : '草稿已保存')
+      setNotice(submit ? '抽检结果已提交' : '草稿已保存')
       await refreshReviews()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '审核保存失败')
@@ -789,11 +804,17 @@ export default function BeatClipReviewWorkspace({
                 src={apiAssetUrl(document.audioUrl)}
                 crossOrigin="use-credentials"
                 preload="auto"
-                onEnded={() => setPlaying(false)}
+                onEnded={(event) => {
+                  setCurrentTime(event.currentTarget.currentTime)
+                  setPlaying(false)
+                }}
                 onLoadedMetadata={(event) => {
                   event.currentTarget.playbackRate = playbackRate
                 }}
-                onPause={() => setPlaying(false)}
+                onPause={(event) => {
+                  setCurrentTime(event.currentTarget.currentTime)
+                  setPlaying(false)
+                }}
                 onPlay={() => setPlaying(true)}
                 onTimeUpdate={(event) =>
                   setCurrentTime(event.currentTarget.currentTime)}
@@ -913,7 +934,7 @@ export default function BeatClipReviewWorkspace({
                   preserveAspectRatio="none"
                   viewBox="0 0 1000 140"
                 >
-                  <path d={waveformPath(waveform)} />
+                  <path d={waveformShape} />
                 </svg>
                 <div
                   className="beat-review-playhead"
@@ -1112,7 +1133,7 @@ export default function BeatClipReviewWorkspace({
                     }
                     onClick={applyStructure}
                   >
-                    应用全曲结构
+                    重新同步全曲结构
                   </button>
                 </section>
               )}
@@ -1307,7 +1328,7 @@ export default function BeatClipReviewWorkspace({
                   onClick={() => void persist(true)}
                 >
                   <Check aria-hidden="true" />
-                  提交独立审核
+                  提交抽检结果
                 </button>
               </div>
             </>

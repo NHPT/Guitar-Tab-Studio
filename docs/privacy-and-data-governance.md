@@ -12,6 +12,11 @@ jurisdiction-specific terms before accepting public contributions.
 - Web uploads are processed only for the requested transcription job.
 - Desktop local mode keeps media, projects, revisions and caches in application
   storage. It sends no correction, feature, log or audio telemetry.
+- Exporting diagnostics remains local. A future “report issue” flow may upload
+  only after the user previews the package and explicitly submits it.
+- Future anonymous crash or performance reporting must be separately enabled,
+  default off, and must never include audio, features, notation, corrections,
+  tokens, cookies, local paths or media URLs.
 - Desktop cloud mode uploads media only after the user selects cloud inference.
 - Hugging Face login uses a public OAuth client with PKCE. Access and refresh
   tokens are encrypted with the operating system credential service before
@@ -33,6 +38,21 @@ jurisdiction-specific terms before accepting public contributions.
 | Unknown or conflicting license | Private quarantine only | Rejected | Rejected | Rejected |
 
 Access to media is not evidence of redistribution or training rights.
+
+## Source Ledger And Model Gate
+
+Repository-local training uses the tracked
+`services/worker/stringtrace_ml/source_ledger.json` as the authoritative
+machine-readable policy. A source entry includes a stable ID and version,
+license URL, verification state, allowed purposes, rights flags and hash
+requirements. Unknown or quarantined sources fail closed for training and
+model release.
+
+Production manifests must use relative media paths and stable source IDs. New
+checkpoints contain manifest SHA-256, ledger identity and aggregate source
+counts, not raw manifests or local paths. Production promotion rejects a
+checkpoint when this identity is absent or stale. A model agreement may create
+an `auto-candidate`, but cannot create or replace approved human gold data.
 
 ## Consent Record
 

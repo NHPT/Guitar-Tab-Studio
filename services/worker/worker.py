@@ -21,10 +21,9 @@ import urllib.request
 import zipfile
 from bisect import bisect_left
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Iterable
-
 
 STANDARD_TUNING = {6: 40, 5: 45, 4: 50, 3: 55, 2: 59, 1: 64}
 GUITAR_PITCH_RANGE = (STANDARD_TUNING[6], STANDARD_TUNING[1] + 24)
@@ -319,7 +318,6 @@ def runtime_self_test() -> dict[str, object]:
     from importlib.metadata import version
     from importlib.resources import files
 
-    import basic_pitch
     import demucs
     import soundfile
     import torch
@@ -636,9 +634,12 @@ def prepare_noise2fret_model() -> Path:
     )
     temporary = destination.with_suffix(".pth.part")
     try:
-        with zipfile.ZipFile(archive) as bundle:
-            with bundle.open(member) as source, temporary.open("wb") as output:
-                shutil.copyfileobj(source, output, length=1024 * 1024)
+        with (
+            zipfile.ZipFile(archive) as bundle,
+            bundle.open(member) as source,
+            temporary.open("wb") as output,
+        ):
+            shutil.copyfileobj(source, output, length=1024 * 1024)
         if _sha256(temporary) != NOISE2FRET_MODEL_SHA256:
             raise RuntimeError("Noise2Fret 模型文件校验失败")
         os.chmod(temporary, 0o600)
@@ -2525,6 +2526,228 @@ def prepend_pickup_beats(
     return [*pickup, *beats], pickup_beats
 
 
+def _grid_position_irregularity(positions: Iterable[int | float]) -> float:
+    import numpy as np
+
+    values = np.asarray(
+        [
+            float(value)
+            for value in positions
+            if math.isfinite(float(value))
+        ],
+        dtype=np.float64,
+    )
+    if values.size < 8:
+        return math.inf
+    intervals = np.diff(values)
+    intervals = intervals[np.isfinite(intervals) & (intervals > 0)]
+    if intervals.size < 7:
+        return math.inf
+    median_interval = float(np.median(intervals))
+    relative_errors = np.abs(intervals / max(median_interval, 1e-8) - 1.0)
+    return float(
+        np.median(relative_errors)
+        + np.quantile(relative_errors, 0.9)
+    )
+
+
+def _beat_frame_strengths(
+    onset_envelope: object,
+    frames: Iterable[int],
+) -> list[float]:
+    import numpy as np
+
+    envelope = np.asarray(onset_envelope)
+    return [
+        float(
+            np.max(
+                envelope[
+                    max(0, frame - 1) :
+                    min(len(envelope), frame + 2)
+                ],
+                initial=0.0,
+            )
+        )
+        for frame in frames
+    ]
+
+
+def _period_contrast(values: Iterable[float], period: int) -> float:
+    import numpy as np
+
+    strengths = np.asarray(list(values), dtype=np.float64)
+    if strengths.size < period * 4:
+        return 0.0
+    means = [
+        float(np.mean(strengths[phase::period]))
+        for phase in range(period)
+    ]
+    return (max(means) - min(means)) / max(max(means), 1e-8)
+
+
+def _normalized_autocorrelation(
+    values: Iterable[float],
+    lag: int,
+) -> float:
+    import numpy as np
+
+    strengths = np.asarray(list(values), dtype=np.float64)
+    if strengths.size < lag * 4:
+        return 0.0
+    centered = strengths - float(np.mean(strengths))
+    denominator = float(np.dot(centered, centered))
+    if denominator <= 1e-8:
+        return 0.0
+    return float(
+        np.dot(centered[:-lag], centered[lag:]) / denominator
+    )
+
+
+def _quarter_note_grid_decision(
+    onset_envelope: object,
+    fast_tempo: float,
+    fast_frames: Iterable[int],
+    slow_tempo: float,
+    slow_frames: Iterable[int],
+) -> tuple[float, list[int], dict[str, object]]:
+    import numpy as np
+
+    fast = [int(frame) for frame in fast_frames]
+    slow = [int(frame) for frame in slow_frames]
+    tempo_ratio = fast_tempo / max(slow_tempo, 1e-8)
+    count_ratio = len(slow) / max(len(fast), 1)
+    fast_strengths = _beat_frame_strengths(onset_envelope, fast)
+    slow_strengths = _beat_frame_strengths(onset_envelope, slow)
+    binary_accent = _period_contrast(fast_strengths, 2)
+    binary_periodicity = max(
+        0.0,
+        _normalized_autocorrelation(fast_strengths, 2),
+    )
+    slow_accent = _period_contrast(slow_strengths, 2)
+    compound_support = max(
+        _period_contrast(fast_strengths, 3),
+        max(0.0, _normalized_autocorrelation(fast_strengths, 3)),
+    )
+    fast_irregularity = _grid_position_irregularity(fast)
+    slow_irregularity = _grid_position_irregularity(slow)
+    octave_related = (
+        math.isfinite(fast_tempo)
+        and math.isfinite(slow_tempo)
+        and 1.55 <= tempo_ratio <= 2.2
+        and 0.43 <= count_ratio <= 0.65
+    )
+    plausible_half_tempo = (
+        math.isfinite(fast_tempo)
+        and 115 <= fast_tempo <= 190
+        and 55 <= fast_tempo / 2 <= 100
+    )
+    binary_evidence = max(
+        binary_accent / 0.35,
+        binary_periodicity / 0.35,
+        slow_accent / 0.35,
+    )
+    compound_protected = (
+        compound_support >= 0.35
+        and compound_support
+        >= max(binary_accent, binary_periodicity) + 0.15
+    )
+    select_half = (
+        octave_related
+        and plausible_half_tempo
+        and not compound_protected
+        and (
+            binary_accent >= 0.16
+            or binary_periodicity >= 0.24
+            or slow_accent >= 0.16
+            or (
+                math.isfinite(fast_irregularity)
+                and math.isfinite(slow_irregularity)
+                and slow_irregularity + 0.02 < fast_irregularity
+            )
+        )
+    )
+
+    phase_means = [
+        (
+            float(np.mean(fast_strengths[phase::2]))
+            if fast_strengths[phase::2]
+            else 0.0
+        )
+        for phase in (0, 1)
+    ]
+    selected_phase = (
+        int(np.argmax(phase_means))
+        if binary_accent >= 0.12
+        else 0
+    )
+    selected_frames = fast[selected_phase::2] if select_half else fast
+    selected_tempo = fast_tempo
+    if select_half:
+        derived_tempo = fast_tempo / 2
+        selected_tempo = (
+            slow_tempo
+            if abs(slow_tempo / max(derived_tempo, 1e-8) - 1.0) <= 0.08
+            else derived_tempo
+        )
+        relation_strength = min(
+            max(0.0, 1.0 - abs(tempo_ratio - 2.0) / 0.45),
+            max(0.0, 1.0 - abs(count_ratio - 0.5) / 0.15),
+        )
+        confidence = min(
+            0.98,
+            0.62
+            + min(1.0, binary_evidence) * 0.30
+            + relation_strength * 0.06,
+        )
+        selection_reason = "quarter-note-multiplier-evidence"
+    elif compound_protected:
+        confidence = min(0.96, 0.72 + compound_support * 0.3)
+        selection_reason = "compound-meter-evidence"
+    elif not plausible_half_tempo or not octave_related:
+        confidence = 0.94
+        selection_reason = "candidates-not-octave-related"
+    elif (
+        math.isfinite(fast_irregularity)
+        and math.isfinite(slow_irregularity)
+        and fast_irregularity + 0.025 < slow_irregularity
+    ):
+        confidence = min(
+            0.92,
+            0.78 + (slow_irregularity - fast_irregularity),
+        )
+        selection_reason = "fast-grid-more-regular"
+    else:
+        confidence = min(0.59, 0.38 + binary_evidence * 0.15)
+        selection_reason = "octave-ambiguity-insufficient-evidence"
+
+    diagnostics: dict[str, object] = {
+        "selected_grid": "half" if select_half else "fast",
+        "selection_reason": selection_reason,
+        "confidence": round(float(confidence), 6),
+        "requires_review": confidence < 0.65,
+        "selected_phase": selected_phase if select_half else None,
+        "fast_bpm": round(float(fast_tempo), 4),
+        "slow_bpm": round(float(slow_tempo), 4),
+        "candidate_ratio": round(float(tempo_ratio), 6),
+        "beat_count_ratio": round(float(count_ratio), 6),
+        "binary_accent_contrast": round(float(binary_accent), 6),
+        "binary_periodicity": round(float(binary_periodicity), 6),
+        "slow_accent_contrast": round(float(slow_accent), 6),
+        "compound_support": round(float(compound_support), 6),
+        "fast_irregularity": (
+            round(float(fast_irregularity), 6)
+            if math.isfinite(fast_irregularity)
+            else None
+        ),
+        "slow_irregularity": (
+            round(float(slow_irregularity), 6)
+            if math.isfinite(slow_irregularity)
+            else None
+        ),
+    }
+    return selected_tempo, selected_frames, diagnostics
+
+
 def select_quarter_note_grid(
     onset_envelope: object,
     fast_tempo: float,
@@ -2532,54 +2755,142 @@ def select_quarter_note_grid(
     slow_tempo: float,
     slow_frames: Iterable[int],
 ) -> tuple[float, list[int]]:
-    """Resolve a confident eighth-note/quarter-note octave ambiguity."""
+    """Resolve eighth-note/quarter-note ambiguity with confidence gates."""
+    selected_tempo, selected_frames, _diagnostics = (
+        _quarter_note_grid_decision(
+            onset_envelope,
+            fast_tempo,
+            fast_frames,
+            slow_tempo,
+            slow_frames,
+        )
+    )
+    return selected_tempo, selected_frames
+
+
+def quarter_note_grid_diagnostics(
+    onset_envelope: object,
+    fast_tempo: float,
+    fast_frames: Iterable[int],
+    slow_tempo: float,
+    slow_frames: Iterable[int],
+) -> dict[str, object]:
+    return _quarter_note_grid_decision(
+        onset_envelope,
+        fast_tempo,
+        fast_frames,
+        slow_tempo,
+        slow_frames,
+    )[2]
+
+
+def retarget_beat_times(
+    beat_times: Iterable[float],
+    target_bpm: float,
+) -> list[float]:
     import numpy as np
 
-    fast = [int(frame) for frame in fast_frames]
-    slow = [int(frame) for frame in slow_frames]
-    if (
-        not math.isfinite(fast_tempo)
-        or not math.isfinite(slow_tempo)
-        or fast_tempo < 155
-        or not 65 <= slow_tempo <= 100
-        or not 1.85 <= fast_tempo / max(slow_tempo, 1e-8) <= 2.15
-        or not 0.45 <= len(slow) / max(len(fast), 1) <= 0.55
-    ):
-        return fast_tempo, fast
-
-    envelope = np.asarray(onset_envelope)
-
-    def accent_contrast(frames: list[int]) -> float:
-        strengths = np.asarray(
-            [
-                float(
-                    np.max(
-                        envelope[
-                            max(0, frame - 1) :
-                            min(len(envelope), frame + 2)
-                        ],
-                        initial=0.0,
-                    )
-                )
-                for frame in frames
-            ]
-        )
-        if len(strengths) < 8:
-            return 0.0
-        even = float(np.mean(strengths[::2]))
-        odd = float(np.mean(strengths[1::2]))
-        return abs(even - odd) / max(even, odd, 1e-8)
-
-    fast_contrast = accent_contrast(fast)
-    slow_contrast = accent_contrast(slow)
-    if slow_contrast >= 0.06 and slow_contrast - fast_contrast >= 0.045:
-        return slow_tempo, slow
-    return fast_tempo, fast
+    beats = [
+        float(value)
+        for value in beat_times
+        if math.isfinite(float(value)) and float(value) >= 0
+    ]
+    if len(beats) < 2 or not math.isfinite(target_bpm) or target_bpm <= 0:
+        return beats
+    intervals = np.diff(np.asarray(beats, dtype=np.float64))
+    intervals = intervals[
+        np.isfinite(intervals) & (intervals >= 0.08) & (intervals <= 3.0)
+    ]
+    if intervals.size == 0:
+        return beats
+    source_bpm = 60.0 / float(np.median(intervals))
+    step = source_bpm / target_bpm
+    if not math.isfinite(step) or step <= 0:
+        return beats
+    retargeted: list[float] = []
+    position = 0.0
+    maximum_position = len(beats) - 1
+    while position <= maximum_position + 1e-9:
+        left = min(math.floor(position), len(beats) - 1)
+        right = min(left + 1, len(beats) - 1)
+        fraction = position - left
+        at = beats[left] + (beats[right] - beats[left]) * fraction
+        if not retargeted or at - retargeted[-1] > 0.05:
+            retargeted.append(at)
+        position += step
+    return retargeted
 
 
-def estimate_tempo(
+def _apply_three_over_two_candidate(
+    selected_beats: list[float],
+    high_tempo: float,
+    high_beats: list[float],
+    diagnostics: dict[str, object],
+) -> tuple[list[float], float | None, dict[str, object]]:
+    selected_map = tempo_map_from_beats(
+        selected_beats,
+        float(diagnostics["fast_bpm"]),
+    )
+    high_map = tempo_map_from_beats(high_beats, high_tempo)
+    selected_bpm = float(selected_map["median_bpm"])
+    high_bpm = float(high_map["median_bpm"])
+    tempo_ratio = high_bpm / max(selected_bpm, 1e-8)
+    count_ratio = len(high_beats) / max(len(selected_beats), 1)
+    selected_irregularity = beat_grid_irregularity(selected_beats)
+    high_irregularity = beat_grid_irregularity(high_beats)
+    diagnostics = {
+        **diagnostics,
+        "high_bpm": round(high_bpm, 4),
+        "high_beat_count": len(high_beats),
+        "high_irregularity": (
+            round(high_irregularity, 6)
+            if math.isfinite(high_irregularity)
+            else None
+        ),
+    }
+    should_retarget = (
+        diagnostics["selected_grid"] == "fast"
+        and 80 <= selected_bpm <= 130
+        and 130 <= high_bpm <= 200
+        and 1.42 <= tempo_ratio <= 1.58
+        and 1.42 <= count_ratio <= 1.58
+        and math.isfinite(selected_irregularity)
+        and math.isfinite(high_irregularity)
+        and high_irregularity + 0.02 < selected_irregularity
+    )
+    if not should_retarget:
+        return selected_beats, None, diagnostics
+
+    target_bpm = float(round(high_bpm))
+    improvement = selected_irregularity - high_irregularity
+    diagnostics.update(
+        {
+            "selected_grid": "three-over-two",
+            "selection_reason": "three-over-two-grid-retarget",
+            "confidence": round(
+                min(0.95, 0.78 + improvement * 3.0),
+                6,
+            ),
+            "requires_review": False,
+            "selected_phase": None,
+        }
+    )
+    return (
+        retarget_beat_times(selected_beats, target_bpm),
+        target_bpm,
+        diagnostics,
+    )
+
+
+def estimate_tempo_with_diagnostics(
     path: Path,
-) -> tuple[float, list[float], list[float], dict[str, object]]:
+) -> tuple[
+    float,
+    list[float],
+    list[float],
+    dict[str, object],
+    dict[str, object],
+]:
     import librosa
     import numpy as np
 
@@ -2600,7 +2911,13 @@ def estimate_tempo(
         start_bpm=80,
         trim=False,
     )
-    value, beat_frames = select_quarter_note_grid(
+    high_tempo, high_beat_frames = librosa.beat.beat_track(
+        onset_envelope=onset_envelope,
+        sr=sample_rate,
+        start_bpm=150,
+        trim=False,
+    )
+    value, beat_frames, grid_diagnostics = _quarter_note_grid_decision(
         onset_envelope,
         float(np.atleast_1d(fast_tempo)[0]),
         fast_beat_frames,
@@ -2614,15 +2931,35 @@ def estimate_tempo(
         units="frames",
         backtrack=False,
     )
-    beat_times = stabilize_beat_times(
-        librosa.frames_to_time(beat_frames, sr=sample_rate),
+    first_onset = (
+        float(librosa.frames_to_time(onset_frames[0], sr=sample_rate))
+        if onset_frames.size
+        else None
     )
-    if onset_frames.size:
-        first_onset = float(librosa.frames_to_time(onset_frames[0], sr=sample_rate))
-        beat_times = [
-            time for time in beat_times if time >= first_onset - 0.08
-        ]
-    beat_times = regularize_beat_times(beat_times)
+
+    def usable_beat_times(frames: Iterable[int]) -> list[float]:
+        times = stabilize_beat_times(
+            librosa.frames_to_time(list(frames), sr=sample_rate),
+        )
+        if first_onset is not None:
+            times = [
+                time for time in times if time >= first_onset - 0.08
+            ]
+        return regularize_beat_times(times)
+
+    beat_times = usable_beat_times(beat_frames)
+    high_value = float(np.atleast_1d(high_tempo)[0])
+    high_beat_times = usable_beat_times(high_beat_frames)
+    beat_times, retargeted_bpm, grid_diagnostics = (
+        _apply_three_over_two_candidate(
+            beat_times,
+            high_value,
+            high_beat_times,
+            grid_diagnostics,
+        )
+    )
+    if retargeted_bpm is not None:
+        fallback_bpm = retargeted_bpm
     usable_beats = [
         round(float(time), 4)
         for time in beat_times
@@ -2636,7 +2973,23 @@ def estimate_tempo(
     ]
     tempo_map = tempo_map_from_beats(usable_beats, fallback_bpm)
     bpm = round(float(tempo_map["median_bpm"]), 2)
-    return bpm, usable_beats, usable_onsets, tempo_map
+    grid_diagnostics["selected_bpm"] = bpm
+    return (
+        bpm,
+        usable_beats,
+        usable_onsets,
+        tempo_map,
+        grid_diagnostics,
+    )
+
+
+def estimate_tempo(
+    path: Path,
+) -> tuple[float, list[float], list[float], dict[str, object]]:
+    bpm, beats, onsets, tempo_map, _diagnostics = (
+        estimate_tempo_with_diagnostics(path)
+    )
+    return bpm, beats, onsets, tempo_map
 
 
 def waveform(path: Path, bar_count: int = 120) -> list[float]:
@@ -2703,6 +3056,14 @@ def visualization_timeline(path: Path, point_count: int = 720) -> list[dict[str,
     mid_mask = (mel_frequencies >= 250) & (mel_frequencies < 2000)
     high_mask = mel_frequencies >= 2000
 
+    def band_level(frame_values: object, mask: object) -> float:
+        selected = frame_values[mask]
+        return (
+            min(1.0, float(np.max(selected)) / band_scale)
+            if selected.size
+            else 0.0
+        )
+
     timeline: list[dict[str, float]] = []
     for point_index in range(point_count):
         start = min(frame_count - 1, int(point_index * frame_count / point_count))
@@ -2720,17 +3081,13 @@ def visualization_timeline(path: Path, point_count: int = 720) -> list[dict[str,
             max(0.0, math.log2(max(70.0, dominant_frequency) / 70.0) / math.log2(2200 / 70)),
         )
 
-        def band_level(mask: object) -> float:
-            selected = frame_slice[mask]
-            return min(1.0, float(np.max(selected)) / band_scale) if selected.size else 0.0
-
         timeline.append(
             {
                 "energy": round(frame_energy, 4),
                 "pitch": round(pitch, 4),
-                "low": round(band_level(low_mask), 4),
-                "mid": round(band_level(mid_mask), 4),
-                "high": round(band_level(high_mask), 4),
+                "low": round(band_level(frame_slice, low_mask), 4),
+                "mid": round(band_level(frame_slice, mid_mask), 4),
+                "high": round(band_level(frame_slice, high_mask), 4),
                 "impact": round(frame_impact, 4),
             }
         )
@@ -3006,7 +3363,7 @@ def assign_fingering_sequence(
                                     (
                                         options[index + 1][0]
                                         if index + 1 < len(options)
-                                        else options[index][0] + 2.0
+                                        else option[0] + 2.0
                                     )
                                     - option[0],
                                 )
@@ -3838,11 +4195,10 @@ def transcribe_mr_mt3(
     path: Path,
     checkpoint_path: Path,
 ) -> tuple[list[NoteEvent], int]:
+    import librosa
     import mido
     import numpy as np
     from mt3_infer.adapters.mr_mt3 import MRMT3Adapter
-
-    import librosa
 
     device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
     audio, _ = librosa.load(path, sr=16000, mono=True)
@@ -3924,12 +4280,11 @@ def transcribe_yourmt3(
     path: Path,
     checkpoint_path: Path,
 ) -> tuple[list[NoteEvent], int]:
+    import librosa
     import mido
     import numpy as np
     import torch
     from mt3_infer.adapters.yourmt3 import YourMT3Adapter
-
-    import librosa
 
     audio, _ = librosa.load(path, sr=16000, mono=True)
     adapter = YourMT3Adapter("yptf_moe_nops")
@@ -5159,16 +5514,27 @@ def main() -> None:
         ),
     )
     emit_progress(57, "transcribing", "正在检测速度与拍点")
-    mix_bpm, mix_beats, onset_times, mix_tempo_map = estimate_tempo(source)
+    (
+        mix_bpm,
+        mix_beats,
+        onset_times,
+        mix_tempo_map,
+        mix_tempo_grid_diagnostics,
+    ) = estimate_tempo_with_diagnostics(source)
     timing_source = "mix"
     bpm = mix_bpm
     beat_times = mix_beats
     tempo_map = mix_tempo_map
+    tempo_grid_diagnostics = mix_tempo_grid_diagnostics
     timing_diagnostics: dict[str, object] | None = None
     try:
-        drum_bpm, drum_beats, _drum_onsets, drum_tempo_map = (
-            estimate_tempo(stems["drums"])
-        )
+        (
+            drum_bpm,
+            drum_beats,
+            _drum_onsets,
+            drum_tempo_map,
+            drum_tempo_grid_diagnostics,
+        ) = estimate_tempo_with_diagnostics(stems["drums"])
         timing_diagnostics = timing_grid_diagnostics(
             mix_bpm,
             mix_beats,
@@ -5189,6 +5555,7 @@ def main() -> None:
         if timing_source == "drums":
             bpm = drum_bpm
             tempo_map = drum_tempo_map
+            tempo_grid_diagnostics = drum_tempo_grid_diagnostics
     except Exception:
         timing_source = "mix"
     emit_progress(63, "transcribing", "拍点检测完成")
@@ -5536,6 +5903,13 @@ def main() -> None:
         f"guitar-part separation ({guitar_leakage_report['removed_energy_ratio']:.1%} "
         "of estimated stem energy removed)."
     )
+    if bool(tempo_grid_diagnostics["requires_review"]):
+        warnings.append(
+            "Beat tempo multiplier is ambiguous "
+            f"({tempo_grid_diagnostics['selection_reason']}, "
+            f"confidence {float(tempo_grid_diagnostics['confidence']):.3f}); "
+            "verify the quarter-note pulse before publishing."
+        )
     warnings.append(
         f"Timing uses the {timing_source} grid, "
         f"{time_signature[0]}/{time_signature[1]} meter "
@@ -5560,6 +5934,7 @@ def main() -> None:
         "beats": beat_times,
         "pickup_beats": pickup_beats,
         "tempo_map": tempo_map,
+        "tempo_grid_diagnostics": tempo_grid_diagnostics,
         "meter_diagnostics": meter_diagnostics,
         **(
             {"timing_diagnostics": timing_diagnostics}

@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
+from .data_sources import manifest_identity
 from .dataset import GuitarTabDataset
 from .features import FeatureConfig
 from .model import (
@@ -21,6 +22,7 @@ from .model import (
     build_pitch_onset_targets,
     transcription_loss,
 )
+from .schema import load_manifest
 
 
 def choose_device(name: str) -> torch.device:
@@ -606,6 +608,11 @@ def main() -> None:
         )
     except ValueError as error:
         parser.error(str(error))
+    training_data_identity = manifest_identity(
+        arguments.manifest.resolve(),
+        load_manifest(arguments.manifest.resolve()),
+        purpose="training",
+    )
 
     random.seed(arguments.seed)
     np.random.seed(arguments.seed)
@@ -1095,6 +1102,7 @@ def main() -> None:
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "dataset": arguments.manifest.resolve().parent.name,
                     "manifest_name": arguments.manifest.name,
+                    "training_data": training_data_identity,
                     "seed": arguments.seed,
                     "epoch": epoch,
                     "validation_loss": validation_metrics["loss"],
