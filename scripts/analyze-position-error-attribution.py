@@ -203,6 +203,53 @@ def decoder_counts(tracks: Iterable[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def merge_count_tree(
+    total: dict[str, Any],
+    current: dict[str, Any],
+) -> None:
+    for name, value in current.items():
+        if isinstance(value, dict):
+            existing = total.setdefault(name, {})
+            assert isinstance(existing, dict)
+            merge_count_tree(existing, value)
+        else:
+            assert type(value) is int
+            existing = total.get(name, 0)
+            assert type(existing) is int
+            total[name] = existing + value
+
+
+def aggregate_stage_trace(
+    tracks: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    track_list = list(tracks)
+    total: dict[str, Any] = {"track_count": len(track_list)}
+    for track in track_list:
+        merge_count_tree(total, track["stage_trace"])
+    return total
+
+
+def count_tree_delta(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    assert set(baseline) == set(candidate)
+    result: dict[str, Any] = {}
+    for name, candidate_value in candidate.items():
+        baseline_value = baseline[name]
+        if isinstance(candidate_value, dict):
+            assert isinstance(baseline_value, dict)
+            result[name] = count_tree_delta(
+                baseline_value,
+                candidate_value,
+            )
+        else:
+            assert type(candidate_value) is int
+            assert type(baseline_value) is int
+            result[name] = candidate_value - baseline_value
+    return result
+
+
 def summarize_tracks(tracks: Iterable[dict[str, Any]]) -> dict[str, Any]:
     track_list = list(tracks)
     counts = decoder_counts(track_list)
@@ -220,6 +267,7 @@ def summarize_tracks(tracks: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "track_count": len(track_list),
         "reference_events": sum(int(track["reference_events"]) for track in track_list),
         "predicted_events": sum(int(track["predicted_events"]) for track in track_list),
+        "stage_trace": aggregate_stage_trace(track_list),
         "metrics": {
             "onset": aggregate_metric(track_list, "onset"),
             "pitch": aggregate_metric(track_list, "pitch"),
@@ -276,6 +324,42 @@ def validate_track(track: dict[str, Any]) -> None:
     assert int(metrics["onset"]["true_positive"]) + int(
         metrics["onset"]["false_positive"]
     ) == eligible_predicted
+    trace = track["stage_trace"]
+    for branch_name in ("primary", "supplemental", "onset_fusion"):
+        branch = trace.get(branch_name)
+        if branch is None:
+            continue
+        assignment = branch["assignment"]
+        assert assignment["candidate_groups"] == (
+            assignment["activity_accepted_groups"]
+            + assignment["activity_rejected_groups"]
+        )
+        assert assignment["candidate_events"] == (
+            assignment["activity_accepted_candidate_events"]
+            + assignment["activity_rejected_candidate_events"]
+        )
+        assert assignment["activity_accepted_groups"] == (
+            assignment["position_accepted_groups"]
+            + assignment["position_rejected_groups"]
+        )
+        assert assignment["position_accepted_events"] == (
+            assignment["confidence_accepted_events"]
+            + assignment["confidence_rejected_events"]
+        )
+        assert assignment["confidence_accepted_events"] == (
+            assignment["emitted_events"]
+        )
+        merge = branch.get("merge")
+        if merge is not None:
+            assert merge["supplemental_events"] == (
+                merge["accepted_supplemental_events"]
+                + merge["suppressed_duplicate_events"]
+            )
+            assert merge["emitted_events"] == (
+                merge["primary_events"]
+                + merge["accepted_supplemental_events"]
+            )
+    assert trace["final_emitted_events"] == track["predicted_events"]
 
 
 def validate_report(
@@ -307,6 +391,7 @@ def validate_report(
         assert summary["decoder_errors"][name] == int(
             report["aggregate"]["decoder_errors"][name]
         )
+    assert summary["stage_trace"] == report["aggregate"]["stage_trace"]
 
 
 def group_summaries(
@@ -474,6 +559,10 @@ def report_comparison(
                 - float(baseline["aggregate"]["tablature"]["f1"])
             ),
         },
+        "stage_trace_delta": count_tree_delta(
+            baseline["aggregate"]["stage_trace"],
+            candidate["aggregate"]["stage_trace"],
+        ),
     }
 
 
@@ -599,6 +688,27 @@ def render_markdown(report: dict[str, Any]) -> str:
     combined = report["aggregate"]
     comparison = report["v24_to_v28_controlled_comparison"]
     sources = report["sources"]
+    primary_trace = combined["stage_trace"]["primary"]["assignment"]
+    supplemental_trace = combined["stage_trace"]["supplemental"][
+        "assignment"
+    ]
+    supplemental_merge = combined["stage_trace"]["supplemental"]["merge"]
+    comparison_deltas = [
+        comparison["GuitarSet"]["stage_trace_delta"],
+        comparison["Guitar-TECHS"]["stage_trace_delta"],
+    ]
+    supplemental_activity_group_delta = sum(
+        delta["supplemental"]["assignment"]["activity_accepted_groups"]
+        for delta in comparison_deltas
+    )
+    supplemental_position_event_delta = sum(
+        delta["supplemental"]["assignment"]["position_accepted_events"]
+        for delta in comparison_deltas
+    )
+    supplemental_unique_event_delta = sum(
+        delta["supplemental"]["merge"]["accepted_supplemental_events"]
+        for delta in comparison_deltas
+    )
     lines = [
         "# v28 受治理 72 轨错误归因",
         "",
@@ -628,19 +738,19 @@ def render_markdown(report: dict[str, Any]) -> str:
         "## 可观测性边界",
         "",
         (
-            "原始评测 JSON 只保存逐轨事件数量和最终 decoder 计数，不保存 "
-            "Basic Pitch 候选事件、活动概率、被活动头拒绝的候选或位置头拒绝记录。"
+            "重建后的评测 JSON 已保存逐轨和聚合阶段计数：候选事件/组、"
+            "活动门控接受/拒绝、位置阶段有输出/整组无输出、置信度拒绝、"
+            "合并去重和最终输出。"
         ),
         "",
         (
-            "因此，本报告能直接测量：最终输出的 `missed_onset` / "
-            "`spurious_onset`，以及保持输入音高的 `same_pitch_wrong_string` "
-            "位置分配错误。`same_string_wrong_fret` 和 "
-            "`wrong_string_and_pitch` 的预测音高已经变化，在缺少阶段追踪时"
-            "只能归为异音高匹配输出，不能归因到弦/品位头。"
-            "不能把 `missed_onset` 继续拆成“候选前端未产生”和“活动头拒绝”；"
-            "也不能把 `spurious_onset` 拆成“前端伪候选”和“下游错误保留”。"
-            "下文统一称其为“最终输出层”，不对不可观测阶段作推断。"
+            "这些计数能直接定位候选流量在哪一阶段减少，但仍不保存候选事件身份、"
+            "活动概率或候选与参考事件的逐事件匹配。因此仍不能把某个 "
+            "`missed_onset` 严格指定为“前端未产生”“活动拒绝”或“位置拒绝”，"
+            "也不能把某个 `spurious_onset` 反向指定到其来源阶段。"
+            "`same_pitch_wrong_string` 仍是可直接归因的位置分配错误；"
+            "`same_string_wrong_fret` 和 `wrong_string_and_pitch` 继续归为"
+            "异音高匹配输出，不作超出证据的因果判断。"
         ),
         "",
         (
@@ -664,8 +774,45 @@ def render_markdown(report: dict[str, Any]) -> str:
                 "脚本已验证：60 条 GuitarSet 与 12 条 Guitar-TECHS 评测轨道"
                 "和受治理 manifest 一一对应；来源状态均为 `verified`；"
                 "每轨 decoder 分区分别完整覆盖可评参考与预测事件；"
-                "聚合计数与逐轨求和一致；"
+                "阶段计数守恒且与逐轨求和一致；"
                 "输出不含音频路径、绝对路径或原始事件。"
+            ),
+            "",
+            "## 阶段追踪证据",
+            "",
+            "| 路径 | 候选事件 | 候选组 | 活动拒绝组 | 位置整组拒绝 | 位置输出 |",
+            "|---|---:|---:|---:|---:|---:|",
+            (
+                f"| 主前端 | {primary_trace['candidate_events']} | "
+                f"{primary_trace['candidate_groups']} | "
+                f"{primary_trace['activity_rejected_groups']} | "
+                f"{primary_trace['position_rejected_groups']} | "
+                f"{primary_trace['position_accepted_events']} |"
+            ),
+            (
+                f"| 补充前端 | {supplemental_trace['candidate_events']} | "
+                f"{supplemental_trace['candidate_groups']} | "
+                f"{supplemental_trace['activity_rejected_groups']} | "
+                f"{supplemental_trace['position_rejected_groups']} | "
+                f"{supplemental_trace['position_accepted_events']} |"
+            ),
+            "",
+            (
+                f"主路径输出 {primary_trace['emitted_events']} 个事件。补充路径输出 "
+                f"{supplemental_trace['emitted_events']} 个事件，但合并时 "
+                f"{supplemental_merge['suppressed_duplicate_events']} 个与主路径重复，"
+                f"仅新增 {supplemental_merge['accepted_supplemental_events']} 个，"
+                f"最终输出 {combined['stage_trace']['final_emitted_events']} 个事件。"
+                "当前 `minimum_output_confidence=0`，所以置信度阶段没有拒绝事件。"
+            ),
+            "",
+            (
+                "Guitar-TECHS 主路径有 "
+                f"{guitar_techs['aggregate']['stage_trace']['primary']['assignment']['activity_accepted_groups']} "
+                "组通过活动门控，其中 "
+                f"{guitar_techs['aggregate']['stage_trace']['primary']['assignment']['position_rejected_groups']} "
+                "组在位置阶段没有任何输出。该比例明显高于 GuitarSet，"
+                "与跨录音域的位置模型失配一致，但不是对单个漏检的因果证明。"
             ),
             "",
             "## 总体归因",
@@ -734,14 +881,21 @@ def render_markdown(report: dict[str, Any]) -> str:
                 "Guitar-TECHS 所有逐轨计数完全不变。"
             ),
             "",
-            "这说明 v28 活动头在当前 72 轨上的净影响近乎为零，且没有提高 TAB。",
+            (
+                f"阶段追踪显示，v28 相对 v24 在 72 轨上少接受 "
+                f"{abs(supplemental_activity_group_delta)} 个补充活动组、少产生 "
+                f"{abs(supplemental_position_event_delta)} 个位置输出，但去重后"
+                f"独有补充事件净变化为 {supplemental_unique_event_delta:+d}。"
+                "这说明 v28 的额外筛选主要移除了原本就会被主路径去重的事件，"
+                "对最终输出和 TAB 没有实质改善。"
+            ),
             "",
             "## 下一步判定",
             "",
             (
-                "1. 在评测器中增加阶段追踪后，再做候选前端与活动拒绝的严格归因："
-                "每个 onset group 至少记录 `frontend_group`、`activity_rejected`、"
-                "`position_rejected`、`emitted` 四个计数。"
+                "1. 阶段计数已实现。若要把最终漏检严格分解到前端、活动门控和"
+                "位置阶段，下一版需要为每个候选保留稳定身份并与参考事件逐阶段匹配；"
+                "不能用当前聚合计数反推单个错误。"
             ),
             (
                 "2. 优先补充独立授权、真实录音且带完整 string/fret/onset 的数据。"
@@ -804,7 +958,7 @@ def main() -> None:
     all_tracks = guitarset_tracks + guitar_techs_tracks
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "scope": {
             "model": "guitarset-low-candidate-activity-governed-v28",
             "track_count": 72,
@@ -830,15 +984,16 @@ def main() -> None:
                 "final spurious onset",
                 "same-pitch wrong-string assignment",
                 "different-pitch matched output (causally unresolved)",
+                "per-track candidate, activity, position, confidence, and merge counts",
             ],
             "not_observable": [
                 (
-                    "Whether a missed onset was absent from the Basic Pitch "
+                    "Which exact missed reference event was absent from the "
                     "candidate frontend or rejected by an activity/position gate."
                 ),
                 (
-                    "Whether a spurious onset originated in the candidate "
-                    "frontend or was incorrectly retained downstream."
+                    "Which exact spurious event originated in the candidate "
+                    "frontend versus a downstream retention decision."
                 ),
             ],
         },

@@ -227,6 +227,7 @@ def assign_detected_events(
     minimum_repeat_probability: float = 0.5,
     repeat_minimum_direct_probability: float = 0.45,
     batch_size: int = 256,
+    stage_trace: dict[str, int] | None = None,
 ) -> list[LabeledEvent]:
     groups = group_event_indexes(
         [float(event["onset"]) for event in events],
@@ -330,6 +331,15 @@ def assign_detected_events(
         else np.ones((len(groups), 2), dtype=np.float32)
     )
     predictions: list[LabeledEvent] = []
+    activity_accepted_groups = 0
+    activity_rejected_groups = 0
+    activity_accepted_candidate_events = 0
+    activity_rejected_candidate_events = 0
+    position_accepted_groups = 0
+    position_rejected_groups = 0
+    position_accepted_events = 0
+    position_rejected_candidate_events = 0
+    confidence_rejected_events = 0
     for grouped, probabilities, activity_probabilities in zip(
         grouped_events,
         all_probabilities,
@@ -340,7 +350,11 @@ def assign_detected_events(
             and float(activity_probabilities[0])
             < minimum_activity_probability
         ):
+            activity_rejected_groups += 1
+            activity_rejected_candidate_events += len(grouped)
             continue
+        activity_accepted_groups += 1
+        activity_accepted_candidate_events += len(grouped)
         pitches = [int(event["pitch"]) for event in grouped]
         if mode == "constrained":
             resolved = [
@@ -380,6 +394,12 @@ def assign_detected_events(
                 resolved.append((source, string_index, fret))
         else:
             raise ValueError(f"Unknown assignment mode: {mode}")
+        if resolved:
+            position_accepted_groups += 1
+            position_accepted_events += len(resolved)
+        else:
+            position_rejected_groups += 1
+            position_rejected_candidate_events += len(grouped)
         for event, string_index, fret in resolved:
             confidence = (
                 max(
@@ -395,6 +415,7 @@ def assign_detected_events(
                 )
             ) ** 0.5
             if confidence < minimum_output_confidence:
+                confidence_rejected_events += 1
                 continue
             predictions.append(
                 LabeledEvent(
@@ -406,7 +427,35 @@ def assign_detected_events(
                     confidence=round(confidence, 4),
                 )
             )
-    return sorted(predictions, key=lambda event: (event.onset, event.string))
+    sorted_predictions = sorted(
+        predictions,
+        key=lambda event: (event.onset, event.string),
+    )
+    if stage_trace is not None:
+        stage_trace.update(
+            {
+                "candidate_events": len(events),
+                "candidate_groups": len(groups),
+                "activity_accepted_groups": activity_accepted_groups,
+                "activity_rejected_groups": activity_rejected_groups,
+                "activity_accepted_candidate_events": (
+                    activity_accepted_candidate_events
+                ),
+                "activity_rejected_candidate_events": (
+                    activity_rejected_candidate_events
+                ),
+                "position_accepted_groups": position_accepted_groups,
+                "position_rejected_groups": position_rejected_groups,
+                "position_accepted_events": position_accepted_events,
+                "position_rejected_candidate_events": (
+                    position_rejected_candidate_events
+                ),
+                "confidence_accepted_events": len(sorted_predictions),
+                "confidence_rejected_events": confidence_rejected_events,
+                "emitted_events": len(sorted_predictions),
+            }
+        )
+    return sorted_predictions
 
 
 def merge_predictions(
@@ -414,8 +463,11 @@ def merge_predictions(
     supplemental: list[LabeledEvent],
     *,
     onset_tolerance: float = 0.05,
+    stage_trace: dict[str, int] | None = None,
 ) -> list[LabeledEvent]:
     merged = list(primary)
+    accepted = 0
+    suppressed = 0
     for candidate in supplemental:
         duplicate = next(
             (
@@ -429,7 +481,55 @@ def merge_predictions(
         )
         if duplicate is None:
             merged.append(candidate)
-    return sorted(merged, key=lambda event: (event.onset, event.string))
+            accepted += 1
+        else:
+            suppressed += 1
+    sorted_predictions = sorted(
+        merged,
+        key=lambda event: (event.onset, event.string),
+    )
+    if stage_trace is not None:
+        stage_trace.update(
+            {
+                "primary_events": len(primary),
+                "supplemental_events": len(supplemental),
+                "accepted_supplemental_events": accepted,
+                "suppressed_duplicate_events": suppressed,
+                "emitted_events": len(sorted_predictions),
+            }
+        )
+    return sorted_predictions
+
+
+def _merge_count_tree(
+    total: dict[str, object],
+    current: dict[str, object],
+) -> None:
+    for name, value in current.items():
+        if isinstance(value, dict):
+            existing = total.setdefault(name, {})
+            if not isinstance(existing, dict):
+                raise ValueError(f"Inconsistent stage trace field: {name}")
+            _merge_count_tree(existing, value)
+        elif type(value) is int:
+            existing = total.get(name, 0)
+            if type(existing) is not int:
+                raise ValueError(f"Inconsistent stage trace field: {name}")
+            total[name] = existing + value
+        else:
+            raise ValueError(f"Stage trace field is not a count: {name}")
+
+
+def aggregate_stage_traces(
+    track_results: list[dict[str, object]],
+) -> dict[str, object]:
+    total: dict[str, object] = {"track_count": len(track_results)}
+    for result in track_results:
+        trace = result.get("stage_trace")
+        if not isinstance(trace, dict):
+            raise ValueError("Track result is missing stage_trace")
+        _merge_count_tree(total, trace)
+    return total
 
 
 def direct_onset_candidates(
@@ -955,6 +1055,7 @@ def main() -> None:
         features = cqt_dataset.load_track_features(
             arguments.start + index - 1
         )
+        primary_assignment_trace: dict[str, int] = {}
         predictions = assign_detected_events(
             events,
             features,
@@ -975,7 +1076,9 @@ def main() -> None:
             repeat_minimum_direct_probability=(
                 arguments.repeat_minimum_direct_probability
             ),
+            stage_trace=primary_assignment_trace,
         )
+        supplemental_stage_trace = None
         pitch_frontend_events = list(events)
         if arguments.supplemental_pitch_onset_threshold is not None:
             supplemental_events, supplemental_dropped = basic_pitch_events(
@@ -998,6 +1101,7 @@ def main() -> None:
                     else arguments.pitch_minimum_note_length
                 ),
             )
+            supplemental_assignment_trace: dict[str, int] = {}
             supplemental_predictions = assign_detected_events(
                 supplemental_events,
                 features,
@@ -1048,14 +1152,22 @@ def main() -> None:
                     )
                     else arguments.supplemental_minimum_direct_probability
                 ),
+                stage_trace=supplemental_assignment_trace,
             )
+            supplemental_merge_trace: dict[str, int] = {}
             predictions = merge_predictions(
                 predictions,
                 supplemental_predictions,
+                stage_trace=supplemental_merge_trace,
             )
+            supplemental_stage_trace = {
+                "assignment": supplemental_assignment_trace,
+                "merge": supplemental_merge_trace,
+            }
             pitch_frontend_events.extend(supplemental_events)
             dropped += supplemental_dropped
         fusion_counts = None
+        fusion_stage_trace = None
         if frame_model is not None and frame_cqt_dataset is not None:
             frame_features = frame_cqt_dataset.load_track_features(
                 arguments.start + index - 1
@@ -1113,6 +1225,7 @@ def main() -> None:
                     ),
                 )
             )
+            fusion_assignment_trace: dict[str, int] = {}
             fusion_predictions = assign_detected_events(
                 unmatched_candidates,
                 features,
@@ -1127,12 +1240,48 @@ def main() -> None:
                 minimum_output_confidence=(
                     arguments.minimum_output_confidence
                 ),
+                stage_trace=fusion_assignment_trace,
             )
+            fusion_merge_trace: dict[str, int] = {}
             predictions = merge_predictions(
                 predictions,
                 fusion_predictions,
                 onset_tolerance=arguments.onset_fusion_match_tolerance,
+                stage_trace=fusion_merge_trace,
             )
+            fusion_stage_trace = {
+                "candidate_generation": {
+                    "direct_candidate_events": len(direct_candidates),
+                    "direct_candidate_groups": len(
+                        group_event_indexes(
+                            [
+                                float(event["onset"])
+                                for event in direct_candidates
+                            ],
+                            tolerance=model_config.group_tolerance,
+                        )
+                    ),
+                },
+                "candidate_filter": {
+                    "matched_candidate_events": (
+                        len(direct_candidates) - len(unmatched_candidates)
+                    ),
+                    "unmatched_candidate_events": len(
+                        unmatched_candidates
+                    ),
+                    "unmatched_candidate_groups": len(
+                        group_event_indexes(
+                            [
+                                float(event["onset"])
+                                for event in unmatched_candidates
+                            ],
+                            tolerance=model_config.group_tolerance,
+                        )
+                    ),
+                },
+                "assignment": fusion_assignment_trace,
+                "merge": fusion_merge_trace,
+            }
             fusion_counts = {
                 "direct_candidate_events": len(direct_candidates),
                 "unmatched_candidate_events": len(unmatched_candidates),
@@ -1143,6 +1292,22 @@ def main() -> None:
             "reference_events": len(annotation.events),
             "predicted_events": len(predictions),
             "dropped_out_of_range_pitch_events": dropped,
+            "stage_trace": {
+                "primary": {
+                    "assignment": primary_assignment_trace,
+                },
+                **(
+                    {"supplemental": supplemental_stage_trace}
+                    if supplemental_stage_trace is not None
+                    else {}
+                ),
+                **(
+                    {"onset_fusion": fusion_stage_trace}
+                    if fusion_stage_trace is not None
+                    else {}
+                ),
+                "final_emitted_events": len(predictions),
+            },
             "metrics": evaluate_events(
                 annotation.events,
                 predictions,
@@ -1370,6 +1535,7 @@ def main() -> None:
         }
         | {
             "decoder_errors": aggregate_decoder_errors(track_results),
+            "stage_trace": aggregate_stage_traces(track_results),
         },
         "tracks": track_results,
     }

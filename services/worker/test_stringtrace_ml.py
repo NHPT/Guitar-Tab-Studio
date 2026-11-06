@@ -26,6 +26,7 @@ from stringtrace_ml.candidate_activity import (
     CandidateActivityConfig,
     CandidateActivityDataset,
     CandidateActivityHead,
+    candidate_group_counts,
     candidate_sampling_weights,
     candidate_temporal_context,
 )
@@ -57,6 +58,7 @@ from stringtrace_ml.download_guitarset import (
 )
 from stringtrace_ml.evaluate import model_identity
 from stringtrace_ml.evaluate_onset_position import (
+    aggregate_stage_traces,
     assign_detected_events,
     direct_pitch_onset_candidates,
     merge_predictions,
@@ -2098,6 +2100,40 @@ class StringTraceMlTest(unittest.TestCase):
             {"Residual-Onset-Manual": 16.0},
         )
 
+    def test_candidate_activity_group_counts_follow_filtered_groups(
+        self,
+    ) -> None:
+        annotations = [
+            TrackAnnotation(
+                track_id="guitarset",
+                group_id="guitarset",
+                audio="guitarset.wav",
+                split="train",
+                duration=1.0,
+                events=[],
+                provenance={"dataset": "GuitarSet"},
+            ),
+            TrackAnnotation(
+                track_id="agpt",
+                group_id="agpt",
+                audio="agpt.wav",
+                split="train",
+                duration=1.0,
+                events=[],
+                provenance={"dataset": "AG-PT-set"},
+            ),
+        ]
+        groups = [
+            OnsetGroupIndex(annotation_index=0, event_indexes=()),
+            OnsetGroupIndex(annotation_index=1, event_indexes=()),
+            OnsetGroupIndex(annotation_index=1, event_indexes=()),
+        ]
+
+        self.assertEqual(
+            candidate_group_counts(annotations, groups),
+            {"AG-PT-set": 2, "GuitarSet": 1},
+        )
+
     def test_candidate_activity_head_lowers_repeat_direct_threshold(
         self,
     ) -> None:
@@ -2199,6 +2235,7 @@ class StringTraceMlTest(unittest.TestCase):
         ]
         features = np.zeros((30, feature_config.n_bins), dtype=np.float32)
 
+        accepted_trace: dict[str, int] = {}
         accepted = assign_detected_events(
             events,
             features,
@@ -2209,7 +2246,9 @@ class StringTraceMlTest(unittest.TestCase):
             mode="direct",
             minimum_direct_probability=0.5,
             minimum_output_confidence=0.4,
+            stage_trace=accepted_trace,
         )
+        rejected_trace: dict[str, int] = {}
         rejected = assign_detected_events(
             events,
             features,
@@ -2220,10 +2259,65 @@ class StringTraceMlTest(unittest.TestCase):
             mode="direct",
             minimum_direct_probability=0.5,
             minimum_output_confidence=0.5,
+            stage_trace=rejected_trace,
         )
 
         self.assertEqual(len(accepted), 1)
         self.assertEqual(rejected, [])
+        self.assertEqual(accepted_trace["candidate_groups"], 1)
+        self.assertEqual(accepted_trace["activity_accepted_groups"], 1)
+        self.assertEqual(accepted_trace["position_accepted_events"], 1)
+        self.assertEqual(accepted_trace["confidence_accepted_events"], 1)
+        self.assertEqual(accepted_trace["confidence_rejected_events"], 0)
+        self.assertEqual(rejected_trace["position_accepted_events"], 1)
+        self.assertEqual(rejected_trace["confidence_accepted_events"], 0)
+        self.assertEqual(rejected_trace["confidence_rejected_events"], 1)
+
+    def test_onset_position_trace_records_activity_rejection(self) -> None:
+        feature_config = FeatureConfig()
+        position_config = OnsetPositionConfig(dropout=0)
+        position_model = OnsetPositionNet(
+            feature_config,
+            position_config,
+        ).eval()
+        activity_head = CandidateActivityHead(
+            position_config,
+            CandidateActivityConfig(hidden_size=8, dropout=0),
+        ).eval()
+        with torch.no_grad():
+            for parameter in position_model.parameters():
+                parameter.zero_()
+            for parameter in activity_head.parameters():
+                parameter.zero_()
+            activity_head.network[-1].bias.fill_(-10)
+        events = [
+            {
+                "onset": 0.1,
+                "offset": 0.3,
+                "pitch": 64,
+                "confidence": 1.0,
+            }
+        ]
+        trace: dict[str, int] = {}
+
+        predictions = assign_detected_events(
+            events,
+            np.zeros((30, feature_config.n_bins), dtype=np.float32),
+            position_model,
+            feature_config,
+            position_config,
+            torch.device("cpu"),
+            activity_head=activity_head,
+            minimum_activity_probability=0.5,
+            stage_trace=trace,
+        )
+
+        self.assertEqual(predictions, [])
+        self.assertEqual(trace["candidate_events"], 1)
+        self.assertEqual(trace["activity_rejected_groups"], 1)
+        self.assertEqual(trace["activity_rejected_candidate_events"], 1)
+        self.assertEqual(trace["position_accepted_events"], 0)
+        self.assertEqual(trace["emitted_events"], 0)
 
     def test_onset_fusion_excludes_an_entire_matched_group(self) -> None:
         primary = [
@@ -2286,16 +2380,67 @@ class StringTraceMlTest(unittest.TestCase):
             LabeledEvent(0.14, 0.4, 3, 5, confidence=0.9),
         ]
 
+        trace: dict[str, int] = {}
         merged = merge_predictions(
             primary,
             supplemental,
             onset_tolerance=0.05,
+            stage_trace=trace,
         )
 
         self.assertEqual(len(merged), 2)
         self.assertEqual(
             [(event.string, event.fret) for event in merged],
             [(2, 5), (3, 5)],
+        )
+        self.assertEqual(trace["accepted_supplemental_events"], 1)
+        self.assertEqual(trace["suppressed_duplicate_events"], 1)
+        self.assertEqual(trace["emitted_events"], 2)
+
+    def test_stage_trace_aggregation_sums_nested_counts(self) -> None:
+        aggregate = aggregate_stage_traces(
+            [
+                {
+                    "stage_trace": {
+                        "primary": {
+                            "assignment": {
+                                "candidate_events": 2,
+                                "emitted_events": 1,
+                            }
+                        },
+                        "final_emitted_events": 1,
+                    }
+                },
+                {
+                    "stage_trace": {
+                        "primary": {
+                            "assignment": {
+                                "candidate_events": 3,
+                                "emitted_events": 2,
+                            }
+                        },
+                        "supplemental": {
+                            "merge": {
+                                "suppressed_duplicate_events": 1,
+                            }
+                        },
+                        "final_emitted_events": 2,
+                    }
+                },
+            ]
+        )
+
+        self.assertEqual(aggregate["track_count"], 2)
+        self.assertEqual(
+            aggregate["primary"]["assignment"]["candidate_events"],
+            5,
+        )
+        self.assertEqual(aggregate["final_emitted_events"], 3)
+        self.assertEqual(
+            aggregate["supplemental"]["merge"][
+                "suppressed_duplicate_events"
+            ],
+            1,
         )
 
     def test_onset_fusion_cli_rejects_invalid_probability(self) -> None:

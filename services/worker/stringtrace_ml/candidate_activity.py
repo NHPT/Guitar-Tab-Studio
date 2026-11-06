@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -219,6 +220,25 @@ def candidate_sampling_weights(
     ]
 
 
+def candidate_group_counts(
+    annotations: list[TrackAnnotation],
+    groups: list[OnsetGroupIndex],
+) -> dict[str, int]:
+    return dict(
+        sorted(
+            Counter(
+                str(
+                    annotations[group.annotation_index].provenance.get(
+                        "dataset",
+                        "unknown",
+                    )
+                )
+                for group in groups
+            ).items()
+        )
+    )
+
+
 class CandidateActivityDataset(Dataset[dict[str, Tensor]]):
     def __init__(
         self,
@@ -346,6 +366,12 @@ class CandidateActivityDataset(Dataset[dict[str, Tensor]]):
             self.annotations,
             self.position_dataset.groups,
             dataset_weights,
+        )
+
+    def dataset_group_counts(self) -> dict[str, int]:
+        return candidate_group_counts(
+            self.annotations,
+            self.position_dataset.groups,
         )
 
     def __len__(self) -> int:

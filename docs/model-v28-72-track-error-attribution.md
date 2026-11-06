@@ -8,9 +8,9 @@
 
 ## 可观测性边界
 
-原始评测 JSON 只保存逐轨事件数量和最终 decoder 计数，不保存 Basic Pitch 候选事件、活动概率、被活动头拒绝的候选或位置头拒绝记录。
+重建后的评测 JSON 已保存逐轨和聚合阶段计数：候选事件/组、活动门控接受/拒绝、位置阶段有输出/整组无输出、置信度拒绝、合并去重和最终输出。
 
-因此，本报告能直接测量：最终输出的 `missed_onset` / `spurious_onset`，以及保持输入音高的 `same_pitch_wrong_string` 位置分配错误。`same_string_wrong_fret` 和 `wrong_string_and_pitch` 的预测音高已经变化，在缺少阶段追踪时只能归为异音高匹配输出，不能归因到弦/品位头。不能把 `missed_onset` 继续拆成“候选前端未产生”和“活动头拒绝”；也不能把 `spurious_onset` 拆成“前端伪候选”和“下游错误保留”。下文统一称其为“最终输出层”，不对不可观测阶段作推断。
+这些计数能直接定位候选流量在哪一阶段减少，但仍不保存候选事件身份、活动概率或候选与参考事件的逐事件匹配。因此仍不能把某个 `missed_onset` 严格指定为“前端未产生”“活动拒绝”或“位置拒绝”，也不能把某个 `spurious_onset` 反向指定到其来源阶段。`same_pitch_wrong_string` 仍是可直接归因的位置分配错误；`same_string_wrong_fret` 和 `wrong_string_and_pitch` 继续归为异音高匹配输出，不作超出证据的因果判断。
 
 `onset` / `tablature` 指标和 `decoder_errors` 使用不同的贪心匹配顺序；后者优先 exact 再逐级放宽。切片中的错误归因全部使用 decoder 层级匹配，TAB F1 和 onset recall 则保留各自官方匹配器结果，二者不可在逐轨层面直接代数换算。
 
@@ -18,14 +18,25 @@
 
 | 输入 | SHA-256 |
 |---|---|
-| `apps/api/data/training/reports/governed-v28-guitarset-mixture-validation.json` | `a5dac5757310fce7d7398f63571e762da2834b8256e5af1ec503670d3e7821d9` |
-| `apps/api/data/training/reports/governed-v28-guitar-techs-validation.json` | `63ee4b15dffb94dbc396f2978850b09115a68b35a20c9ab0b31aff370a1024fa` |
-| `apps/api/data/training/reports/governed-v24-guitarset-mixture-validation.json` | `7c700dd98564b89da87115f543534fa4b57e142d1cbdf0c7f30a47ba57622020` |
-| `apps/api/data/training/reports/governed-v24-guitar-techs-validation.json` | `57510d01bc6a32a5de1cc446a312eec1c99cd574ea5faf75dbc2657b6bff7d50` |
+| `apps/api/data/training/reports/governed-v28-guitarset-mixture-validation.json` | `935cf9223dac61a6c4e785e9dfe218864a74fcec1c46bdc3b94c59bd51a9362a` |
+| `apps/api/data/training/reports/governed-v28-guitar-techs-validation.json` | `d674358550e5165b6f5f8448fe52b50600e0a45db0bda0efa4a0712cbcc79409` |
+| `apps/api/data/training/reports/governed-v24-guitarset-mixture-validation.json` | `d38f900f31aa407951065bb2a4c0105288ccf09b30de70c02055acc5981ddee6` |
+| `apps/api/data/training/reports/governed-v24-guitar-techs-validation.json` | `38dac7222e0318c081181e82e04cf2ea829accdc885f8209592e826f23db8e5a` |
 | `apps/api/data/training/governed-v1/guitarset-mixture-derived.jsonl` | `a90668d480af274c579891990e7192f48b6b604914be33d0d85078f5e648fbda` |
 | `apps/api/data/training/governed-v1/guitar-techs-position-validation.jsonl` | `6f796466be2cae19783c177b4a821389a1f1fee3a7d1346e98dd1c4761540a4b` |
 
-脚本已验证：60 条 GuitarSet 与 12 条 Guitar-TECHS 评测轨道和受治理 manifest 一一对应；来源状态均为 `verified`；每轨 decoder 分区分别完整覆盖可评参考与预测事件；聚合计数与逐轨求和一致；输出不含音频路径、绝对路径或原始事件。
+脚本已验证：60 条 GuitarSet 与 12 条 Guitar-TECHS 评测轨道和受治理 manifest 一一对应；来源状态均为 `verified`；每轨 decoder 分区分别完整覆盖可评参考与预测事件；阶段计数守恒且与逐轨求和一致；输出不含音频路径、绝对路径或原始事件。
+
+## 阶段追踪证据
+
+| 路径 | 候选事件 | 候选组 | 活动拒绝组 | 位置整组拒绝 | 位置输出 |
+|---|---:|---:|---:|---:|---:|
+| 主前端 | 22666 | 12207 | 3580 | 2696 | 10668 |
+| 补充前端 | 35548 | 18213 | 13046 | 1053 | 7083 |
+
+主路径输出 10668 个事件。补充路径输出 7083 个事件，但合并时 6898 个与主路径重复，仅新增 185 个，最终输出 10853 个事件。当前 `minimum_output_confidence=0`，所以置信度阶段没有拒绝事件。
+
+Guitar-TECHS 主路径有 2208 组通过活动门控，其中 1570 组在位置阶段没有任何输出。该比例明显高于 GuitarSet，与跨录音域的位置模型失配一致，但不是对单个漏检的因果证明。
 
 ## 总体归因
 
@@ -84,11 +95,11 @@
 
 两组报告的 Basic Pitch、位置模型和除 supplemental 活动头外的解码参数一致。GuitarSet 有三轨的逐轨 decoder 计数变化；聚合净变化为 onset TP `+1`、FN `-1`，但该新增匹配属于 `wrong_string_and_pitch +1`，TAB F1 变化为 `-0.00003329`。Guitar-TECHS 所有逐轨计数完全不变。
 
-这说明 v28 活动头在当前 72 轨上的净影响近乎为零，且没有提高 TAB。
+阶段追踪显示，v28 相对 v24 在 72 轨上少接受 92 个补充活动组、少产生 49 个位置输出，但去重后独有补充事件净变化为 +1。这说明 v28 的额外筛选主要移除了原本就会被主路径去重的事件，对最终输出和 TAB 没有实质改善。
 
 ## 下一步判定
 
-1. 在评测器中增加阶段追踪后，再做候选前端与活动拒绝的严格归因：每个 onset group 至少记录 `frontend_group`、`activity_rejected`、`position_rejected`、`emitted` 四个计数。
+1. 阶段计数已实现。若要把最终漏检严格分解到前端、活动门控和位置阶段，下一版需要为每个候选保留稳定身份并与参考事件逐阶段匹配；不能用当前聚合计数反推单个错误。
 2. 优先补充独立授权、真实录音且带完整 string/fret/onset 的数据。Guitar-TECHS 的同音高错弦显著，新增数据应覆盖多演奏者、拾音方式和技法。
 3. 不在现有 740 条不变训练集上启动 v29；Basic Pitch 继续保持默认，v24/v28 均不进入生产默认。
 

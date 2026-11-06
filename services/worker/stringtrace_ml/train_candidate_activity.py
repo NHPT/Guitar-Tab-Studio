@@ -353,6 +353,25 @@ def main() -> None:
             arguments.candidate_minimum_note_length
         ),
     )
+    train_counts = train_dataset.target_counts()
+    train_group_counts = train_dataset.dataset_group_counts()
+    sampling_weight_total = sum(
+        count * dataset_sampling_weights.get(dataset, 1.0)
+        for dataset, count in train_group_counts.items()
+    )
+    sampling_plan = {
+        "replacement": bool(dataset_sampling_weights),
+        "num_samples": len(train_dataset),
+        "group_counts": train_group_counts,
+        "dataset_weights": dict(sorted(dataset_sampling_weights.items())),
+        "expected_dataset_share": {
+            dataset: (
+                count * dataset_sampling_weights.get(dataset, 1.0)
+                / sampling_weight_total
+            )
+            for dataset, count in train_group_counts.items()
+        },
+    }
     print(
         json.dumps(
             {
@@ -364,11 +383,11 @@ def main() -> None:
                 "filtered_negative_groups": (
                     train_dataset.filtered_negative_groups
                 ),
+                "sampling_plan": sampling_plan,
             }
         ),
         flush=True,
     )
-    train_counts = train_dataset.target_counts()
     activity_positive_weight = _positive_weight(
         train_counts["active"],
         train_counts["inactive"],
@@ -531,6 +550,43 @@ def main() -> None:
                         "dataset_sampling_weights": dict(
                             sorted(dataset_sampling_weights.items())
                         ),
+                        "sampling_plan": sampling_plan,
+                        "training_config": {
+                            "device": str(device),
+                            "epochs": arguments.epochs,
+                            "batch_size": arguments.batch_size,
+                            "learning_rate": arguments.learning_rate,
+                            "weight_decay": arguments.weight_decay,
+                            "activity_loss_weight": (
+                                arguments.activity_loss_weight
+                            ),
+                            "repeat_loss_weight": (
+                                arguments.repeat_loss_weight
+                            ),
+                            "selection_metric": (
+                                arguments.selection_metric
+                            ),
+                            "optimizer": "AdamW",
+                            "scheduler": {
+                                "name": "CosineAnnealingLR",
+                                "eta_min": (
+                                    arguments.learning_rate * 0.05
+                                ),
+                            },
+                            "candidate_frontend": {
+                                "kind": "spotify-basic-pitch-0.4",
+                                "onset_threshold": (
+                                    arguments.candidate_onset_threshold
+                                ),
+                                "frame_threshold": (
+                                    arguments.candidate_frame_threshold
+                                ),
+                                "minimum_note_length": (
+                                    arguments
+                                    .candidate_minimum_note_length
+                                ),
+                            },
+                        },
                         "initialized_from": initialization,
                         "filtered_negative_groups": (
                             train_dataset.filtered_negative_groups
