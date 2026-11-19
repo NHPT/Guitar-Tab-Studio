@@ -30,6 +30,15 @@ from stringtrace_ml.candidate_activity import (
     candidate_sampling_weights,
     candidate_temporal_context,
 )
+from stringtrace_ml.candidate_sequence import (
+    CandidateSequenceConfig,
+    CandidateSequenceGroup,
+    CandidateSequenceStringModel,
+    candidate_sequence_loss,
+    collate_candidate_sequence_windows,
+    refine_candidate_position_logits,
+    sequence_window_ranges,
+)
 from stringtrace_ml.checkpoint_governance import (
     evaluate_checkpoint_governance,
     load_checkpoint_file,
@@ -61,6 +70,7 @@ from stringtrace_ml.evaluate_onset_position import (
     aggregate_stage_traces,
     assign_detected_events,
     direct_pitch_onset_candidates,
+    merge_candidate_identities,
     merge_predictions,
     parse_arguments,
     unmatched_onset_candidates,
@@ -116,10 +126,19 @@ from stringtrace_ml.onset_position import (
     OnsetPositionNet,
     OnsetGroupIndex,
     augment_pitch_candidates,
+    assign_candidate_pitch_group,
+    assign_hierarchical_candidate_pitch_group,
     assign_pitch_group,
     basic_pitch_cache_path,
+    candidate_harmonic_cqt_indexes,
+    candidate_position_loss,
+    candidate_position_probabilities,
+    candidate_position_query_weights,
+    candidate_position_queries,
+    candidate_string_temporal_context,
     extract_onset_patch,
     group_event_indexes,
+    hierarchical_candidate_probabilities,
     pitch_mask,
 )
 from stringtrace_ml.onset_position_bundle import (
@@ -138,6 +157,10 @@ from stringtrace_ml.prepare_mixture_stems import (
     mix_source_audio,
     procedural_accompaniment,
     stable_track_seed,
+)
+from stringtrace_ml.scan_candidate_none_bias import (
+    candidate_bias_metrics,
+    parse_arguments as parse_candidate_none_bias_arguments,
 )
 from stringtrace_ml.reference_coverage import build_coverage_report
 from stringtrace_ml.reference_queue import (
@@ -1424,6 +1447,919 @@ class StringTraceMlTest(unittest.TestCase):
         self.assertEqual(patch.shape, (3, 14, 216))
         self.assertEqual(tuple(output.shape), (1, 6, 26))
 
+    def test_candidate_position_head_masks_unplayable_strings(self) -> None:
+        feature_config = FeatureConfig()
+        model_config = OnsetPositionConfig(
+            dropout=0,
+            candidate_position_head=True,
+        )
+        model = OnsetPositionNet(feature_config, model_config).eval()
+        features = torch.rand(
+            2,
+            3,
+            model_config.frame_count,
+            feature_config.n_bins,
+        )
+        encoded = model.encode(features, torch.rand(2, 49))
+
+        logits = model.classify_candidate_positions(
+            encoded,
+            torch.tensor([0, 24]),
+        )
+
+        self.assertEqual(tuple(logits.shape), (2, 6))
+        self.assertTrue(torch.all(logits[0, :5] < -20))
+        self.assertGreater(float(logits[0, 5].detach()), -20)
+        self.assertTrue(torch.all(logits[1] > -20))
+
+    def test_categorical_candidate_head_preserves_none_and_masks_strings(
+        self,
+    ) -> None:
+        feature_config = FeatureConfig()
+        model_config = OnsetPositionConfig(
+            dropout=0,
+            candidate_position_head=True,
+            candidate_position_objective="categorical",
+        )
+        model = OnsetPositionNet(feature_config, model_config).eval()
+        features = torch.rand(
+            2,
+            3,
+            model_config.frame_count,
+            feature_config.n_bins,
+        )
+        encoded = model.encode(features, torch.rand(2, 49))
+
+        logits = model.classify_candidate_positions(
+            encoded,
+            torch.tensor([0, 24]),
+        )
+
+        self.assertEqual(tuple(logits.shape), (2, 7))
+        self.assertTrue(torch.all(logits[:, 0] > -20))
+        self.assertTrue(torch.all(logits[0, 1:6] < -20))
+        self.assertGreater(float(logits[0, 6].detach()), -20)
+        self.assertTrue(torch.all(logits[1, 1:] > -20))
+
+    def test_candidate_harmonic_indexes_follow_cqt_pitch_bins(self) -> None:
+        indexes, valid = candidate_harmonic_cqt_indexes(
+            FeatureConfig(),
+            harmonic_count=5,
+            radius=1,
+        )
+
+        self.assertEqual(tuple(indexes.shape), (49, 5, 3))
+        self.assertEqual(indexes[24, 0].tolist(), [71, 72, 73])
+        self.assertEqual(valid[24, 0].tolist(), [True, True, True])
+        self.assertEqual(indexes[24, 1].tolist(), [107, 108, 109])
+        self.assertEqual(valid[0, 0].tolist(), [False, True, True])
+
+    def test_factorized_candidate_head_uses_local_spectral_evidence(
+        self,
+    ) -> None:
+        torch.manual_seed(7)
+        feature_config = FeatureConfig()
+        model_config = OnsetPositionConfig(
+            convolution_channels=(4, 6, 8),
+            hidden_size=16,
+            dropout=0,
+            candidate_position_head=True,
+            candidate_position_objective="factorized",
+            candidate_spectral_evidence=True,
+            candidate_spectral_size=8,
+            candidate_string_embedding_size=4,
+            candidate_position_hidden_size=8,
+        )
+        model = OnsetPositionNet(feature_config, model_config).eval()
+        pitch_masks = torch.zeros((2, 49))
+        pitch_masks[0, 0] = 0.8
+        pitch_masks[1, 24] = 0.6
+        base_features = torch.zeros(
+            2,
+            3,
+            model_config.frame_count,
+            feature_config.n_bins,
+        )
+        spectral_features = base_features.clone()
+        spectral_features[0, :, :, :6] = 1
+        encoded = model.encode(base_features, pitch_masks).detach()
+        pitch_indexes = torch.tensor([0, 24])
+        confidences = torch.tensor([0.8, 0.6])
+
+        base_logits = model.classify_candidate_positions(
+            encoded,
+            pitch_indexes,
+            features=base_features,
+            candidate_confidences=confidences,
+        )
+        spectral_logits = model.classify_candidate_positions(
+            encoded,
+            pitch_indexes,
+            features=spectral_features,
+            candidate_confidences=confidences,
+        )
+
+        self.assertEqual(tuple(base_logits.shape), (2, 7))
+        self.assertTrue(
+            torch.allclose(
+                base_logits.exp().sum(dim=1),
+                torch.ones(2),
+                atol=1e-5,
+            )
+        )
+        self.assertTrue(torch.all(base_logits[0, 1:6] < -20))
+        self.assertGreater(float(base_logits[0, 6].detach()), -20)
+        self.assertFalse(
+            torch.allclose(base_logits[0], spectral_logits[0])
+        )
+
+        targets = torch.tensor(
+            [
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ]
+        )
+        loss, correct, total = candidate_position_loss(
+            spectral_logits,
+            targets,
+            objective="factorized",
+        )
+        loss.backward()
+
+        self.assertGreater(float(loss.detach()), 0)
+        self.assertEqual(total, 1)
+        self.assertIn(correct, (0, 1))
+        self.assertTrue(
+            any(
+                parameter.grad is not None
+                for parameter in model.candidate_head.parameters()
+            )
+        )
+
+    def test_spectral_residual_head_preserves_v2_at_initialization(
+        self,
+    ) -> None:
+        torch.manual_seed(11)
+        feature_config = FeatureConfig()
+        shared = {
+            "convolution_channels": (4, 6, 8),
+            "hidden_size": 16,
+            "dropout": 0,
+            "candidate_position_head": True,
+        }
+        base_config = OnsetPositionConfig(
+            **shared,
+            candidate_position_objective="categorical",
+        )
+        residual_config = OnsetPositionConfig(
+            **shared,
+            candidate_position_objective="spectral_residual",
+            candidate_spectral_evidence=True,
+            candidate_spectral_size=8,
+            candidate_string_embedding_size=4,
+            candidate_position_hidden_size=8,
+        )
+        base_model = OnsetPositionNet(
+            feature_config,
+            base_config,
+        ).eval()
+        residual_model = OnsetPositionNet(
+            feature_config,
+            residual_config,
+        ).eval()
+        incompatible = residual_model.load_state_dict(
+            base_model.state_dict(),
+            strict=False,
+        )
+        self.assertTrue(
+            all(
+                name.startswith("candidate_residual_head.")
+                for name in incompatible.missing_keys
+            )
+        )
+        self.assertEqual(incompatible.unexpected_keys, [])
+
+        features = torch.rand(
+            3,
+            3,
+            base_config.frame_count,
+            feature_config.n_bins,
+        )
+        pitch_masks = torch.rand(3, 49)
+        pitch_indexes = torch.tensor([0, 24, 30])
+        confidences = pitch_masks[torch.arange(3), pitch_indexes]
+        base_encoded = base_model.encode(features, pitch_masks)
+        residual_encoded = residual_model.encode(features, pitch_masks)
+        base_probabilities = candidate_position_probabilities(
+            base_model.classify_candidate_positions(
+                base_encoded,
+                pitch_indexes,
+            ),
+            objective="categorical",
+        )
+        residual_logits = residual_model.classify_candidate_positions(
+            residual_encoded,
+            pitch_indexes,
+            features=features,
+            candidate_confidences=confidences,
+        )
+        residual_probabilities = candidate_position_probabilities(
+            residual_logits,
+            objective="spectral_residual",
+        )
+
+        self.assertTrue(
+            torch.allclose(
+                base_probabilities,
+                residual_probabilities,
+                atol=1e-5,
+            )
+        )
+        targets = torch.tensor(
+            [
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ]
+        )
+        loss, _correct, total = candidate_position_loss(
+            residual_logits,
+            targets,
+            objective="spectral_residual",
+        )
+        loss.backward()
+
+        self.assertEqual(total, 2)
+        self.assertTrue(
+            any(
+                parameter.grad is not None
+                for parameter in (
+                    residual_model.candidate_residual_head.parameters()
+                )
+            )
+        )
+
+    def test_activity_residual_preserves_v4_at_initialization(
+        self,
+    ) -> None:
+        torch.manual_seed(17)
+        feature_config = FeatureConfig()
+        shared = {
+            "convolution_channels": (4, 6, 8),
+            "hidden_size": 16,
+            "dropout": 0,
+            "candidate_position_head": True,
+            "candidate_position_objective": "spectral_residual",
+            "candidate_spectral_evidence": True,
+            "candidate_spectral_size": 8,
+            "candidate_string_embedding_size": 4,
+            "candidate_position_hidden_size": 8,
+            "candidate_activity_hidden_size": 8,
+        }
+        base_model = OnsetPositionNet(
+            feature_config,
+            OnsetPositionConfig(**shared),
+        ).eval()
+        activity_model = OnsetPositionNet(
+            feature_config,
+            OnsetPositionConfig(
+                **shared,
+                candidate_activity_residual=True,
+            ),
+        ).eval()
+        incompatible = activity_model.load_state_dict(
+            base_model.state_dict(),
+            strict=False,
+        )
+        self.assertTrue(
+            all(
+                name.startswith("candidate_activity_residual_head.")
+                for name in incompatible.missing_keys
+            )
+        )
+        self.assertEqual(incompatible.unexpected_keys, [])
+
+        features = torch.rand(
+            3,
+            3,
+            base_model.config.frame_count,
+            feature_config.n_bins,
+        )
+        pitch_masks = torch.rand(3, 49)
+        pitch_indexes = torch.tensor([0, 24, 30])
+        confidences = pitch_masks[torch.arange(3), pitch_indexes]
+        base_encoded = base_model.encode(features, pitch_masks)
+        activity_encoded = activity_model.encode(features, pitch_masks)
+        base_position_logits = base_model.classify_candidate_positions(
+            base_encoded,
+            pitch_indexes,
+            features=features,
+            candidate_confidences=confidences,
+        )
+        activity_position_logits = (
+            activity_model.classify_candidate_positions(
+                activity_encoded,
+                pitch_indexes,
+                features=features,
+                candidate_confidences=confidences,
+            )
+        )
+        base_activity_logits = base_model.classify_candidate_activity(
+            base_encoded,
+            pitch_indexes,
+            features=features,
+            candidate_confidences=confidences,
+            candidate_position_logits=base_position_logits,
+        )
+        activity_logits = activity_model.classify_candidate_activity(
+            activity_encoded,
+            pitch_indexes,
+            features=features,
+            candidate_confidences=confidences,
+            candidate_position_logits=activity_position_logits,
+        )
+
+        self.assertTrue(
+            torch.allclose(
+                base_position_logits,
+                activity_position_logits,
+                atol=1e-5,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                base_activity_logits,
+                activity_logits,
+                atol=1e-5,
+            )
+        )
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            activity_logits,
+            torch.tensor([1.0, 0.0, 1.0]),
+        )
+        loss.backward()
+        self.assertTrue(
+            any(
+                parameter.grad is not None
+                for parameter in (
+                    activity_model
+                    .candidate_activity_residual_head
+                    .parameters()
+                )
+            )
+        )
+
+    def test_temporal_string_residual_preserves_activity_v1_at_initialization(
+        self,
+    ) -> None:
+        torch.manual_seed(23)
+        feature_config = FeatureConfig()
+        shared = {
+            "convolution_channels": (4, 6, 8),
+            "hidden_size": 16,
+            "dropout": 0,
+            "candidate_position_head": True,
+            "candidate_position_objective": "spectral_residual",
+            "candidate_spectral_evidence": True,
+            "candidate_spectral_size": 8,
+            "candidate_string_embedding_size": 4,
+            "candidate_position_hidden_size": 8,
+            "candidate_activity_residual": True,
+            "candidate_activity_hidden_size": 8,
+        }
+        activity_model = OnsetPositionNet(
+            feature_config,
+            OnsetPositionConfig(**shared),
+        ).eval()
+        temporal_model = OnsetPositionNet(
+            feature_config,
+            OnsetPositionConfig(
+                **shared,
+                candidate_temporal_string_residual=True,
+                candidate_temporal_hidden_size=8,
+            ),
+        ).eval()
+        incompatible = temporal_model.load_state_dict(
+            activity_model.state_dict(),
+            strict=False,
+        )
+        self.assertTrue(
+            all(
+                name.startswith("candidate_temporal_residual_head.")
+                for name in incompatible.missing_keys
+            )
+        )
+        self.assertEqual(incompatible.unexpected_keys, [])
+
+        features = torch.rand(
+            3,
+            3,
+            activity_model.config.frame_count,
+            feature_config.n_bins,
+        )
+        pitch_masks = torch.rand(3, 49)
+        pitch_indexes = torch.tensor([0, 24, 30])
+        confidences = pitch_masks[torch.arange(3), pitch_indexes]
+        temporal_context = torch.rand(3, 6, 20)
+        activity_encoded = activity_model.encode(features, pitch_masks)
+        temporal_encoded = temporal_model.encode(features, pitch_masks)
+        activity_position_logits = (
+            activity_model.classify_candidate_positions(
+                activity_encoded,
+                pitch_indexes,
+                features=features,
+                candidate_confidences=confidences,
+            )
+        )
+        temporal_position_logits = (
+            temporal_model.classify_candidate_positions(
+                temporal_encoded,
+                pitch_indexes,
+                features=features,
+                candidate_confidences=confidences,
+                temporal_context=temporal_context,
+            )
+        )
+        activity_logits = activity_model.classify_candidate_activity(
+            activity_encoded,
+            pitch_indexes,
+            features=features,
+            candidate_confidences=confidences,
+            candidate_position_logits=activity_position_logits,
+        )
+        temporal_activity_logits = (
+            temporal_model.classify_candidate_activity(
+                temporal_encoded,
+                pitch_indexes,
+                features=features,
+                candidate_confidences=confidences,
+                candidate_position_logits=temporal_position_logits,
+            )
+        )
+
+        self.assertTrue(
+            torch.allclose(
+                activity_position_logits,
+                temporal_position_logits,
+                atol=1e-5,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                activity_logits,
+                temporal_activity_logits,
+                atol=1e-5,
+            )
+        )
+        targets = torch.tensor(
+            [
+                [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            ]
+        )
+        loss, _correct, _total = candidate_position_loss(
+            temporal_position_logits,
+            targets,
+            objective="spectral_residual",
+        )
+        loss.backward()
+        self.assertTrue(
+            any(
+                parameter.grad is not None
+                for parameter in (
+                    temporal_model
+                    .candidate_temporal_residual_head
+                    .parameters()
+                )
+            )
+        )
+
+    def test_candidate_sequence_zero_initialization_preserves_local_logits(
+        self,
+    ) -> None:
+        torch.manual_seed(29)
+        model = CandidateSequenceStringModel(
+            CandidateSequenceConfig(
+                sequence_length=4,
+                sequence_stride=2,
+                token_size=8,
+                hidden_size=6,
+                output_hidden_size=7,
+                dropout=0,
+            )
+        )
+        pitches = torch.tensor(
+            [
+                [
+                    [0, 4, 0],
+                    [6, 9, 12],
+                    [15, 0, 0],
+                    [20, 24, 30],
+                ]
+            ]
+        )
+        candidate_mask = torch.tensor(
+            [
+                [
+                    [True, True, False],
+                    [True, True, True],
+                    [True, False, False],
+                    [True, True, True],
+                ]
+            ]
+        )
+        group_mask = torch.ones(1, 4, dtype=torch.bool)
+        valid_strings = torch.ones(1, 4, 3, 6, dtype=torch.bool)
+        base_string_logits = torch.log_softmax(
+            torch.randn(1, 4, 3, 6),
+            dim=3,
+        )
+        residuals = model(
+            pitches,
+            torch.rand(1, 4, 3),
+            torch.rand(1, 4, 3),
+            base_string_logits,
+            valid_strings,
+            candidate_mask,
+            group_mask,
+            torch.tensor([[0.1, 0.4, 0.7, 1.1]]),
+        )
+        self.assertTrue(torch.equal(residuals, torch.zeros_like(residuals)))
+
+        base_joint = torch.log_softmax(torch.randn(12, 7), dim=1)
+        refined = refine_candidate_position_logits(
+            base_joint,
+            residuals.reshape(12, 6),
+            valid_strings.reshape(12, 6),
+        )
+        self.assertTrue(torch.allclose(base_joint, refined, atol=1e-6))
+        self.assertTrue(
+            torch.allclose(
+                torch.logsumexp(base_joint[:, 1:], dim=1),
+                torch.logsumexp(refined[:, 1:], dim=1),
+                atol=1e-6,
+            )
+        )
+        changed = refine_candidate_position_logits(
+            base_joint,
+            torch.randn(12, 6),
+            valid_strings.reshape(12, 6),
+        )
+        self.assertTrue(torch.equal(base_joint[:, 0], changed[:, 0]))
+        self.assertTrue(
+            torch.allclose(
+                torch.logsumexp(base_joint[:, 1:], dim=1),
+                torch.logsumexp(changed[:, 1:], dim=1),
+                atol=1e-6,
+            )
+        )
+
+    def test_candidate_sequence_masks_padding_and_backpropagates(
+        self,
+    ) -> None:
+        model = CandidateSequenceStringModel(
+            CandidateSequenceConfig(
+                sequence_length=3,
+                sequence_stride=2,
+                token_size=8,
+                hidden_size=6,
+                output_hidden_size=7,
+                dropout=0,
+            )
+        )
+        group = CandidateSequenceGroup(
+            annotation_index=0,
+            onset=0.1,
+            pitches=torch.arange(11),
+            confidences=torch.ones(11),
+            durations=torch.full((11,), 0.2),
+            base_string_logits=torch.log_softmax(
+                torch.randn(11, 6),
+                dim=1,
+            ),
+            valid_strings=torch.ones(11, 6, dtype=torch.bool),
+            string_targets=torch.nn.functional.one_hot(
+                torch.arange(11) % 6,
+                num_classes=6,
+            ).float(),
+            target_weights=torch.ones(11),
+        )
+        batch = collate_candidate_sequence_windows(
+            [[group], [group, group]]
+        )
+        self.assertEqual(batch["pitches"].shape, (2, 2, 11))
+        residuals = model(
+            batch["pitches"],
+            batch["confidences"],
+            batch["durations"],
+            batch["base_string_logits"],
+            batch["valid_strings"],
+            batch["candidate_mask"],
+            batch["group_mask"],
+            batch["group_onsets"],
+        )
+        self.assertTrue(
+            torch.equal(
+                residuals[0, 1],
+                torch.zeros_like(residuals[0, 1]),
+            )
+        )
+        loss, correct, total = candidate_sequence_loss(
+            batch["base_string_logits"],
+            residuals,
+            batch["string_targets"],
+            batch["target_weights"],
+            batch["candidate_mask"],
+            batch["valid_strings"],
+        )
+        self.assertGreaterEqual(correct, 0)
+        self.assertEqual(total, 33)
+        loss.backward()
+        self.assertIsNotNone(model.residual_head[-1].weight.grad)
+
+    def test_candidate_sequence_windows_cover_track_end_without_truncation(
+        self,
+    ) -> None:
+        ranges = sequence_window_ranges(
+            70,
+            sequence_length=32,
+            sequence_stride=16,
+        )
+        self.assertEqual(
+            ranges,
+            [(0, 32), (16, 48), (32, 64), (38, 70)],
+        )
+        covered = {
+            index
+            for start, end in ranges
+            for index in range(start, end)
+        }
+        self.assertEqual(covered, set(range(70)))
+        self.assertEqual(
+            sequence_window_ranges(
+                11,
+                sequence_length=32,
+                sequence_stride=16,
+            ),
+            [(0, 11)],
+        )
+
+    def test_candidate_position_queries_merge_unison_targets(self) -> None:
+        batch_indexes, pitch_indexes, targets = (
+            candidate_position_queries(
+                torch.tensor([[64, 64, 67, -1, -1, -1]]),
+                torch.tensor([[0, 2, 1, -1, -1, -1]]),
+            )
+        )
+
+        self.assertEqual(batch_indexes.tolist(), [0, 0])
+        self.assertEqual(pitch_indexes.tolist(), [24, 27])
+        self.assertEqual(
+            targets.tolist(),
+            [
+                [1, 0, 1, 0, 0, 0],
+                [0, 1, 0, 0, 0, 0],
+            ],
+        )
+        loss, correct, total = candidate_position_loss(
+            torch.tensor(
+                [
+                    [3.0, -2.0, 2.0, -2.0, -2.0, -2.0],
+                    [-2.0, 3.0, -2.0, -2.0, -2.0, -2.0],
+                ]
+            ),
+            targets,
+        )
+        self.assertGreater(float(loss), 0)
+        self.assertEqual((correct, total), (3, 3))
+
+    def test_candidate_position_queries_skip_missing_frontend_pitch(
+        self,
+    ) -> None:
+        mask = torch.zeros((1, 49))
+        mask[0, 24] = 1
+
+        batch_indexes, pitch_indexes, targets = (
+            candidate_position_queries(
+                torch.tensor([[64, 67, -1, -1, -1, -1]]),
+                torch.tensor([[0, 1, -1, -1, -1, -1]]),
+                mask,
+            )
+        )
+
+        self.assertEqual(batch_indexes.tolist(), [0])
+        self.assertEqual(pitch_indexes.tolist(), [24])
+        self.assertEqual(targets[0].tolist(), [1, 0, 0, 0, 0, 0])
+
+    def test_candidate_position_queries_include_unmatched_negatives(
+        self,
+    ) -> None:
+        mask = torch.zeros((1, 49))
+        mask[0, 24] = 1
+        mask[0, 27] = 0.6
+
+        _batch_indexes, pitch_indexes, targets = (
+            candidate_position_queries(
+                torch.tensor([[64, -1, -1, -1, -1, -1]]),
+                torch.tensor([[0, -1, -1, -1, -1, -1]]),
+                mask,
+            )
+        )
+
+        self.assertEqual(pitch_indexes.tolist(), [24, 27])
+        self.assertEqual(targets[0].tolist(), [1, 0, 0, 0, 0, 0])
+        self.assertEqual(targets[1].tolist(), [0, 0, 0, 0, 0, 0])
+
+    def test_categorical_candidate_queries_include_none_and_soft_unison(
+        self,
+    ) -> None:
+        mask = torch.zeros((1, 49))
+        mask[0, 24] = 1
+        mask[0, 27] = 0.6
+
+        _batch_indexes, pitch_indexes, targets = (
+            candidate_position_queries(
+                torch.tensor([[64, 64, -1, -1, -1, -1]]),
+                torch.tensor([[0, 2, -1, -1, -1, -1]]),
+                mask,
+                categorical=True,
+            )
+        )
+
+        self.assertEqual(pitch_indexes.tolist(), [24, 27])
+        self.assertEqual(
+            targets[0].tolist(),
+            [0, 0.5, 0, 0.5, 0, 0, 0],
+        )
+        self.assertEqual(targets[1].tolist(), [1, 0, 0, 0, 0, 0, 0])
+        loss, correct, total = candidate_position_loss(
+            torch.tensor(
+                [
+                    [-2.0, 3.0, -2.0, 2.0, -2.0, -2.0, -2.0],
+                    [3.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0],
+                ]
+            ),
+            targets,
+        )
+        self.assertGreater(float(loss), 0)
+        self.assertEqual((correct, total), (1, 1))
+
+    def test_candidate_position_probabilities_apply_none_logit_bias(
+        self,
+    ) -> None:
+        logits = torch.zeros((1, 7))
+
+        baseline = candidate_position_probabilities(
+            logits,
+            objective="categorical",
+        )
+        retained = candidate_position_probabilities(
+            logits,
+            objective="categorical",
+            none_logit_bias=-2.0,
+        )
+
+        self.assertAlmostEqual(float(baseline[0, 0]), 1 / 7)
+        self.assertLess(float(retained[0, 0]), float(baseline[0, 0]))
+        self.assertGreater(float(retained[0, 1]), float(baseline[0, 1]))
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires a categorical objective",
+        ):
+            candidate_position_probabilities(
+                torch.zeros((1, 6)),
+                objective="binary",
+                none_logit_bias=-1.0,
+            )
+
+    def test_hierarchical_candidate_probabilities_separate_activity(
+        self,
+    ) -> None:
+        logits = torch.log(
+            torch.tensor(
+                [
+                    [0.4, 0.3, 0.1, 0.05, 0.05, 0.05, 0.05],
+                    [0.4, 0.05, 0.05, 0.05, 0.05, 0.1, 0.3],
+                ]
+            )
+        )
+
+        activity, strings = hierarchical_candidate_probabilities(
+            logits,
+            objective="spectral_residual",
+        )
+
+        self.assertTrue(
+            torch.allclose(activity, torch.tensor([0.6, 0.6]))
+        )
+        self.assertTrue(
+            torch.allclose(strings.sum(dim=1), torch.ones(2))
+        )
+        self.assertNotEqual(
+            int(strings[0].argmax()),
+            int(strings[1].argmax()),
+        )
+        overridden_activity, overridden_strings = (
+            hierarchical_candidate_probabilities(
+                logits,
+                objective="spectral_residual",
+                activity_logits=torch.tensor([-2.0, 2.0]),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                overridden_activity,
+                torch.sigmoid(torch.tensor([-2.0, 2.0])),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                overridden_strings.sum(dim=1),
+                torch.ones(2),
+            )
+        )
+        self.assertTrue(torch.allclose(strings, overridden_strings))
+        with self.assertRaisesRegex(
+            ValueError,
+            "require a categorical objective",
+        ):
+            hierarchical_candidate_probabilities(
+                torch.zeros((1, 6)),
+                objective="binary",
+            )
+
+    def test_candidate_none_bias_metrics_separate_rejection_and_strings(
+        self,
+    ) -> None:
+        logits = torch.tensor(
+            [
+                [3.0, 2.0, -2.0, -2.0, -2.0, -2.0, -2.0],
+                [3.0, -2.0, 2.0, -2.0, -2.0, -2.0, -2.0],
+                [3.0, -2.0, -2.0, 2.0, -2.0, -2.0, -2.0],
+            ]
+        )
+        targets = torch.tensor(
+            [
+                [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            ]
+        )
+
+        baseline = candidate_bias_metrics(
+            logits,
+            targets,
+            none_logit_bias=0.0,
+        )
+        retained = candidate_bias_metrics(
+            logits,
+            targets,
+            none_logit_bias=-2.0,
+        )
+
+        self.assertEqual(baseline["counts"]["false_rejects"], 2)
+        self.assertEqual(retained["counts"]["false_rejects"], 0)
+        self.assertEqual(retained["counts"]["false_accepts"], 1)
+        self.assertEqual(retained["counts"]["wrong_strings"], 1)
+        self.assertAlmostEqual(retained["active_string_accuracy"], 0.5)
+        self.assertAlmostEqual(
+            retained["oracle_active_string_accuracy"],
+            0.5,
+        )
+        self.assertAlmostEqual(
+            retained["conditional_accepted_string_accuracy"],
+            0.5,
+        )
+
+    def test_candidate_none_bias_cli_defaults_and_validation(self) -> None:
+        arguments = parse_candidate_none_bias_arguments(
+            [
+                "--manifest",
+                "manifest.jsonl",
+                "--checkpoint",
+                "model.pt",
+                "--output",
+                "report.json",
+            ]
+        )
+
+        self.assertIn(0.0, arguments.biases)
+        self.assertIn(-1.0, arguments.biases)
+        with self.assertRaises(SystemExit):
+            parse_candidate_none_bias_arguments(
+                [
+                    "--manifest",
+                    "manifest.jsonl",
+                    "--checkpoint",
+                    "model.pt",
+                    "--output",
+                    "report.json",
+                    "--biases",
+                    "nan",
+                ]
+            )
+
     def test_zero_initialized_onset_adapter_preserves_base_output(
         self,
     ) -> None:
@@ -1798,6 +2734,61 @@ class StringTraceMlTest(unittest.TestCase):
 
             self.assertEqual(weights, [1.0, 1.75, 1.0, 1.0])
 
+    def test_candidate_supervision_weights_cross_string_transitions(
+        self,
+    ) -> None:
+        with self.temporary_directory() as temporary:
+            manifest_path = Path(temporary) / "manifest.jsonl"
+            write_manifest(
+                manifest_path,
+                [
+                    TrackAnnotation(
+                        track_id="cross-string",
+                        group_id="cross-string",
+                        audio="unused.wav",
+                        split="train",
+                        duration=1.0,
+                        events=[
+                            LabeledEvent(0.1, 0.2, 1, 5),
+                            LabeledEvent(0.1, 0.2, 2, 10),
+                            LabeledEvent(0.5, 0.6, 3, 14),
+                        ],
+                    )
+                ],
+            )
+            dataset = OnsetPositionDataset(
+                manifest_path,
+                split="train",
+                config=OnsetPositionConfig(
+                    candidate_temporal_string_residual=True,
+                ),
+                candidate_ambiguity_weight=1.25,
+                candidate_rare_pair_max_weight=1.5,
+                candidate_cross_string_weight=2.0,
+                candidate_cross_string_interval=2.0,
+                candidate_max_supervision_weight=4.0,
+            )
+
+            self.assertEqual(
+                dataset.candidate_supervision["cross_string_events"],
+                3,
+            )
+            self.assertEqual(
+                dataset.candidate_supervision["maximum_weight"],
+                2.5,
+            )
+            self.assertEqual(
+                dataset.candidate_temporal_contexts[0][69].shape,
+                (6, 20),
+            )
+            self.assertEqual(
+                [
+                    dataset.candidate_target_weights[(0, index)]
+                    for index in range(3)
+                ],
+                [2.5, 2.5, 2.5],
+            )
+
     def test_candidate_activity_dataset_labels_repeated_groups(
         self,
     ) -> None:
@@ -1950,6 +2941,86 @@ class StringTraceMlTest(unittest.TestCase):
             (3, 2),
         )
 
+    def test_candidate_query_weights_merge_same_pitch_events(self) -> None:
+        weights = candidate_position_query_weights(
+            torch.tensor([[64, 64, 67, -1, -1, -1]]),
+            torch.tensor([[2.0, 4.0, 1.5, 1.0, 1.0, 1.0]]),
+        )
+
+        self.assertEqual(weights.tolist(), [3.0, 1.5])
+
+    def test_candidate_position_loss_applies_sample_weights(self) -> None:
+        logits = torch.tensor(
+            [
+                [0.0, -3.0, 3.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 3.0, -3.0, 0.0, 0.0, 0.0, 0.0],
+            ]
+        )
+        targets = torch.tensor(
+            [
+                [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ]
+        )
+        unweighted, _correct, _total = candidate_position_loss(
+            logits,
+            targets,
+            objective="spectral_residual",
+        )
+        weighted, _correct, _total = candidate_position_loss(
+            logits,
+            targets,
+            objective="spectral_residual",
+            sample_weights=torch.tensor([4.0, 1.0]),
+        )
+
+        self.assertGreater(float(weighted), float(unweighted))
+
+    def test_candidate_string_temporal_context_is_bidirectional(
+        self,
+    ) -> None:
+        contexts = candidate_string_temporal_context(
+            [0.1, 0.5, 1.4],
+            [[64], [64, 67], [67]],
+            [[0.8], [0.6, 0.9], [0.7]],
+            [[0.4], [0.3, 0.5], [0.2]],
+            repeat_interval=0.75,
+            maximum_interval=2.0,
+        )
+
+        self.assertEqual(len(contexts), 3)
+        self.assertEqual(contexts[1][64].shape, (6, 20))
+        np.testing.assert_allclose(
+            contexts[1][64][0, :16],
+            np.asarray(
+                [
+                    0.2,
+                    0.45,
+                    0.2,
+                    1.0,
+                    1.0,
+                    0.0,
+                    0.0,
+                    3 / 24,
+                    0.8,
+                    0.7,
+                    0.8,
+                    0.0,
+                    1 / 6,
+                    1 / 6,
+                    0.3 / 2,
+                    0.6,
+                ],
+                dtype=np.float32,
+            ),
+        )
+        self.assertTrue(
+            np.all(contexts[1][64][:, 16:20] >= 0)
+        )
+        self.assertTrue(
+            np.all(contexts[1][64][:, 16:20] <= 1)
+        )
+
     def test_onset_position_research_bundle_is_bound_to_its_models(
         self,
     ) -> None:
@@ -2041,6 +3112,148 @@ class StringTraceMlTest(unittest.TestCase):
                 ],
                 0.85,
             )
+            self.assertEqual(
+                loaded.position_config.candidate_position_objective,
+                "binary",
+            )
+
+    def test_candidate_position_checkpoint_accepts_base_activity_heads(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            feature_config = FeatureConfig()
+            base_config = OnsetPositionConfig(
+                convolution_channels=(4, 6, 8),
+                hidden_size=16,
+                dropout=0,
+            )
+            base_path = root / "base-position.pt"
+            base_model = OnsetPositionNet(feature_config, base_config)
+            torch.save(
+                {
+                    "format_version": 1,
+                    "model_state": base_model.state_dict(),
+                    "model_config": base_config.to_dict(),
+                    "feature_config": feature_config.to_dict(),
+                    "metadata": {"name": "base-position"},
+                },
+                base_path,
+            )
+            base_hash = sha256_file(base_path)
+
+            candidate_config = OnsetPositionConfig(
+                convolution_channels=(4, 6, 8),
+                hidden_size=16,
+                dropout=0,
+                candidate_position_head=True,
+                candidate_position_objective="spectral_residual",
+                candidate_spectral_evidence=True,
+            )
+            candidate_model = OnsetPositionNet(
+                feature_config,
+                candidate_config,
+            )
+            candidate_model.load_state_dict(
+                base_model.state_dict(),
+                strict=False,
+            )
+            candidate_path = root / "candidate-position.pt"
+            torch.save(
+                {
+                    "format_version": 1,
+                    "model_state": candidate_model.state_dict(),
+                    "model_config": candidate_config.to_dict(),
+                    "feature_config": feature_config.to_dict(),
+                    "metadata": {
+                        "name": "candidate-position",
+                        "base_checkpoint": {
+                            "name": base_path.name,
+                            "sha256": base_hash,
+                        },
+                    },
+                },
+                candidate_path,
+            )
+
+            def activity_checkpoint(name: str) -> Path:
+                config = CandidateActivityConfig(
+                    temporal_feature_count=6,
+                )
+                path = root / name
+                torch.save(
+                    {
+                        "format_version": 1,
+                        "model_state": CandidateActivityHead(
+                            base_config,
+                            config,
+                        ).state_dict(),
+                        "activity_config": config.to_dict(),
+                        "position_config": base_config.to_dict(),
+                        "feature_config": feature_config.to_dict(),
+                        "metadata": {
+                            "base_checkpoint": {
+                                "name": base_path.name,
+                                "sha256": base_hash,
+                            }
+                        },
+                    },
+                    path,
+                )
+                return path
+
+            primary_path = activity_checkpoint("primary.pt")
+            supplemental_path = activity_checkpoint("supplemental.pt")
+            sequence_path = root / "candidate-sequence.pt"
+            sequence_config = CandidateSequenceConfig(
+                sequence_length=4,
+                sequence_stride=2,
+                token_size=8,
+                hidden_size=6,
+                output_hidden_size=7,
+                dropout=0,
+            )
+            torch.save(
+                {
+                    "format_version": 1,
+                    "model_state": CandidateSequenceStringModel(
+                        sequence_config
+                    ).state_dict(),
+                    "sequence_config": sequence_config.to_dict(),
+                    "position_config": candidate_config.to_dict(),
+                    "feature_config": feature_config.to_dict(),
+                    "metadata": {
+                        "base_checkpoint": {
+                            "name": candidate_path.name,
+                            "sha256": sha256_file(candidate_path),
+                        }
+                    },
+                },
+                sequence_path,
+            )
+            bundle_path = root / "candidate-bundle.pt"
+
+            build_research_bundle(
+                candidate_path,
+                primary_path,
+                supplemental_path,
+                bundle_path,
+                version="candidate-v1",
+                candidate_sequence_checkpoint_path=sequence_path,
+            )
+            loaded = load_research_bundle(
+                bundle_path,
+                torch.device("cpu"),
+            )
+
+            self.assertTrue(
+                loaded.position_config.candidate_position_head
+            )
+            self.assertEqual(
+                loaded.inference_config["assignment"]["mode"],
+                "candidate",
+            )
+            self.assertIsNotNone(loaded.candidate_sequence_model)
 
     def test_candidate_activity_dataset_sampling_weights(
         self,
@@ -2217,6 +3430,357 @@ class StringTraceMlTest(unittest.TestCase):
             OPEN_STRING_PITCHES[string] + fret == 64
             for string, fret in positions
         ))
+
+    def test_candidate_position_assignment_is_pitch_constrained(
+        self,
+    ) -> None:
+        probabilities = np.full((2, 6), 0.01, dtype=np.float32)
+        probabilities[0, 0] = 0.8
+        probabilities[0, 2] = 0.9
+        probabilities[1, 0] = 0.95
+        probabilities[1, 1] = 0.85
+
+        positions = assign_candidate_pitch_group(
+            probabilities,
+            [64, 59],
+        )
+
+        self.assertEqual(positions, [(2, 9), (1, 0)])
+        self.assertTrue(
+            all(
+                OPEN_STRING_PITCHES[string] + fret == pitch
+                for (string, fret), pitch in zip(
+                    positions,
+                    [64, 59],
+                )
+            )
+        )
+
+    def test_categorical_candidate_assignment_can_reject_and_uses_unique_strings(
+        self,
+    ) -> None:
+        probabilities = np.full((3, 7), 0.001, dtype=np.float32)
+        probabilities[0, 2] = 0.8
+        probabilities[0, 3] = 0.7
+        probabilities[1, 2] = 0.9
+        probabilities[1, 4] = 0.2
+        probabilities[2, 0] = 0.95
+
+        positions = assign_candidate_pitch_group(
+            probabilities,
+            [64, 59, 67],
+        )
+
+        self.assertEqual(positions, [(2, 9), (1, 0), None])
+
+    def test_hierarchical_candidate_assignment_filters_before_strings(
+        self,
+    ) -> None:
+        activity = np.array([0.6, 0.4], dtype=np.float32)
+        strings = np.full((2, 6), 0.01, dtype=np.float32)
+        strings[0, 5] = 0.95
+        strings[1, 1] = 0.95
+
+        positions = assign_hierarchical_candidate_pitch_group(
+            activity,
+            strings,
+            [64, 59],
+            minimum_activity_probability=0.5,
+        )
+
+        self.assertEqual(positions, [(5, 24), None])
+
+    def test_hierarchical_candidate_assignment_filters_string_margin(
+        self,
+    ) -> None:
+        activity = np.array([0.8, 0.8], dtype=np.float32)
+        strings = np.full((2, 6), 0.0, dtype=np.float32)
+        strings[0, 4:6] = [0.51, 0.49]
+        strings[1, 4:6] = [0.8, 0.2]
+
+        positions = assign_hierarchical_candidate_pitch_group(
+            activity,
+            strings,
+            [64, 64],
+            minimum_activity_probability=0.5,
+            minimum_string_margin=0.05,
+        )
+
+        self.assertEqual(positions, [None, (4, 19)])
+
+    def test_candidate_assignment_mode_uses_candidate_position_head(
+        self,
+    ) -> None:
+        feature_config = FeatureConfig()
+        model_config = OnsetPositionConfig(
+            dropout=0,
+            candidate_position_head=True,
+        )
+        model = OnsetPositionNet(feature_config, model_config).eval()
+        base_logits = torch.full((1, 6, 26), -10.0)
+        base_logits[..., 0] = 10.0
+        candidate_logits = torch.full((2, 6), -5.0)
+        candidate_logits[0, 2] = 4.0
+        candidate_logits[1, 1] = 4.0
+        events = [
+            {
+                "onset": 0.1,
+                "offset": 0.3,
+                "pitch": 64,
+                "confidence": 1.0,
+            },
+            {
+                "onset": 0.11,
+                "offset": 0.3,
+                "pitch": 59,
+                "confidence": 1.0,
+            },
+        ]
+        features = np.zeros((30, feature_config.n_bins), dtype=np.float32)
+
+        with (
+            patch.object(
+                model,
+                "encode",
+                return_value=torch.zeros((1, 384)),
+            ),
+            patch.object(model, "classify", return_value=base_logits),
+            patch.object(
+                model,
+                "classify_candidate_positions",
+                return_value=candidate_logits,
+            ),
+        ):
+            predictions = assign_detected_events(
+                events,
+                features,
+                model,
+                feature_config,
+                model_config,
+                torch.device("cpu"),
+                mode="candidate",
+                minimum_direct_probability=0.5,
+            )
+
+        self.assertEqual(
+            [
+                (
+                    event.string,
+                    event.fret,
+                    OPEN_STRING_PITCHES[event.string - 1] + event.fret,
+                )
+                for event in predictions
+            ],
+            [(3, 9, 64), (2, 0, 59)],
+        )
+
+    def test_zero_initialized_sequence_keeps_candidate_assignment(
+        self,
+    ) -> None:
+        feature_config = FeatureConfig()
+        model_config = OnsetPositionConfig(
+            dropout=0,
+            candidate_position_head=True,
+            candidate_position_objective="spectral_residual",
+            candidate_spectral_evidence=True,
+        )
+        model = OnsetPositionNet(feature_config, model_config).eval()
+        sequence_model = CandidateSequenceStringModel(
+            CandidateSequenceConfig(dropout=0)
+        ).eval()
+        base_logits = torch.full((1, 6, 26), -10.0)
+        base_logits[..., 0] = 10.0
+        candidate_logits = torch.full((2, 7), -5.0)
+        candidate_logits[0, 3] = 4.0
+        candidate_logits[1, 2] = 4.0
+        events = [
+            {
+                "onset": 0.1,
+                "offset": 0.3,
+                "pitch": 64,
+                "confidence": 0.9,
+            },
+            {
+                "onset": 0.11,
+                "offset": 0.3,
+                "pitch": 59,
+                "confidence": 0.8,
+            },
+        ]
+        features = np.zeros((30, feature_config.n_bins), dtype=np.float32)
+
+        with (
+            patch.object(
+                model,
+                "encode",
+                return_value=torch.zeros((1, 384)),
+            ),
+            patch.object(model, "classify", return_value=base_logits),
+            patch.object(
+                model,
+                "classify_candidate_positions",
+                return_value=candidate_logits,
+            ),
+        ):
+            baseline = assign_detected_events(
+                events,
+                features,
+                model,
+                feature_config,
+                model_config,
+                torch.device("cpu"),
+                mode="candidate",
+            )
+            refined = assign_detected_events(
+                events,
+                features,
+                model,
+                feature_config,
+                model_config,
+                torch.device("cpu"),
+                mode="candidate",
+                sequence_model=sequence_model,
+            )
+
+        self.assertEqual(baseline, refined)
+
+    def test_categorical_candidate_assignment_honors_none_class(
+        self,
+    ) -> None:
+        feature_config = FeatureConfig()
+        model_config = OnsetPositionConfig(
+            dropout=0,
+            candidate_position_head=True,
+            candidate_position_objective="categorical",
+        )
+        model = OnsetPositionNet(feature_config, model_config).eval()
+        base_logits = torch.full((1, 6, 26), -10.0)
+        base_logits[..., 0] = 10.0
+        candidate_logits = torch.full((2, 7), -5.0)
+        candidate_logits[0, 3] = 4.0
+        candidate_logits[1, 0] = 4.0
+        events = [
+            {
+                "onset": 0.1,
+                "offset": 0.3,
+                "pitch": 64,
+                "confidence": 1.0,
+            },
+            {
+                "onset": 0.11,
+                "offset": 0.3,
+                "pitch": 59,
+                "confidence": 1.0,
+            },
+        ]
+        features = np.zeros((30, feature_config.n_bins), dtype=np.float32)
+
+        with (
+            patch.object(
+                model,
+                "encode",
+                return_value=torch.zeros((1, 384)),
+            ),
+            patch.object(model, "classify", return_value=base_logits),
+            patch.object(
+                model,
+                "classify_candidate_positions",
+                return_value=candidate_logits,
+            ),
+        ):
+            predictions = assign_detected_events(
+                events,
+                features,
+                model,
+                feature_config,
+                model_config,
+                torch.device("cpu"),
+                mode="candidate",
+                minimum_direct_probability=0.0,
+            )
+
+        self.assertEqual(
+            [
+                (
+                    event.string,
+                    event.fret,
+                    OPEN_STRING_PITCHES[event.string - 1] + event.fret,
+                )
+                for event in predictions
+            ],
+            [(3, 9, 64)],
+        )
+
+    def test_hierarchical_candidate_assignment_uses_total_activity(
+        self,
+    ) -> None:
+        feature_config = FeatureConfig()
+        model_config = OnsetPositionConfig(
+            dropout=0,
+            candidate_position_head=True,
+            candidate_position_objective="categorical",
+        )
+        model = OnsetPositionNet(feature_config, model_config).eval()
+        base_logits = torch.full((1, 6, 26), -10.0)
+        base_logits[..., 0] = 10.0
+        candidate_logits = torch.log(
+            torch.tensor(
+                [[0.45, 0.10, 0.10, 0.10, 0.10, 0.10, 0.05]]
+            )
+        )
+        events = [
+            {
+                "onset": 0.1,
+                "offset": 0.3,
+                "pitch": 64,
+                "confidence": 1.0,
+            }
+        ]
+        features = np.zeros((30, feature_config.n_bins), dtype=np.float32)
+
+        with (
+            patch.object(
+                model,
+                "encode",
+                return_value=torch.zeros((1, 384)),
+            ),
+            patch.object(model, "classify", return_value=base_logits),
+            patch.object(
+                model,
+                "classify_candidate_positions",
+                return_value=candidate_logits,
+            ),
+        ):
+            joint = assign_detected_events(
+                events,
+                features,
+                model,
+                feature_config,
+                model_config,
+                torch.device("cpu"),
+                mode="candidate",
+                minimum_direct_probability=0.0,
+            )
+            hierarchical = assign_detected_events(
+                events,
+                features,
+                model,
+                feature_config,
+                model_config,
+                torch.device("cpu"),
+                mode="candidate",
+                minimum_direct_probability=0.0,
+                candidate_decision="hierarchical",
+                candidate_minimum_activity_probability=0.5,
+            )
+
+        self.assertEqual(joint, [])
+        self.assertEqual(len(hierarchical), 1)
+        self.assertEqual(
+            OPEN_STRING_PITCHES[hierarchical[0].string - 1]
+            + hierarchical[0].fret,
+            64,
+        )
 
     def test_onset_position_combined_confidence_can_abstain(self) -> None:
         feature_config = FeatureConfig()
@@ -2397,6 +3961,58 @@ class StringTraceMlTest(unittest.TestCase):
         self.assertEqual(trace["suppressed_duplicate_events"], 1)
         self.assertEqual(trace["emitted_events"], 2)
 
+    def test_frontend_candidate_identity_merge_precedes_position_assignment(
+        self,
+    ) -> None:
+        primary = [
+            {
+                "onset": 0.1,
+                "offset": 0.3,
+                "pitch": 64,
+                "confidence": 0.7,
+            }
+        ]
+        supplemental = [
+            {
+                "onset": 0.13,
+                "offset": 0.4,
+                "pitch": 64,
+                "confidence": 0.9,
+            },
+            {
+                "onset": 0.13,
+                "offset": 0.4,
+                "pitch": 67,
+                "confidence": 0.8,
+            },
+        ]
+
+        trace: dict[str, int] = {}
+        merged = merge_candidate_identities(
+            primary,
+            supplemental,
+            onset_tolerance=0.05,
+            stage_trace=trace,
+        )
+
+        self.assertEqual(
+            [
+                (
+                    event["onset"],
+                    event["offset"],
+                    event["pitch"],
+                    event["confidence"],
+                )
+                for event in merged
+            ],
+            [
+                (0.1, 0.4, 64, 0.9),
+                (0.13, 0.4, 67, 0.8),
+            ],
+        )
+        self.assertEqual(trace["suppressed_supplemental_duplicates"], 1)
+        self.assertEqual(trace["merged_candidate_events"], 2)
+
     def test_stage_trace_aggregation_sums_nested_counts(self) -> None:
         aggregate = aggregate_stage_traces(
             [
@@ -2508,6 +4124,90 @@ class StringTraceMlTest(unittest.TestCase):
                     "-0.1",
                 ]
             )
+
+    def test_hierarchical_candidate_cli_rejects_none_bias(self) -> None:
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            parse_arguments(
+                [
+                    "--manifest",
+                    "manifest.jsonl",
+                    "--checkpoint",
+                    "position.pt",
+                    "--mode",
+                    "candidate",
+                    "--candidate-decision",
+                    "hierarchical",
+                    "--candidate-none-logit-bias",
+                    "-0.5",
+                ]
+            )
+
+        parsed = parse_arguments(
+            [
+                "--manifest",
+                "manifest.jsonl",
+                "--checkpoint",
+                "position.pt",
+                "--mode",
+                "candidate",
+                "--candidate-decision",
+                "hierarchical",
+                "--candidate-minimum-activity-probability",
+                "0.7",
+                "--candidate-minimum-string-margin",
+                "0.1",
+            ]
+        )
+        self.assertEqual(parsed.candidate_decision, "hierarchical")
+        self.assertEqual(
+            parsed.candidate_minimum_activity_probability,
+            0.7,
+        )
+        self.assertEqual(parsed.candidate_minimum_string_margin, 0.1)
+
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            parse_arguments(
+                [
+                    "--manifest",
+                    "manifest.jsonl",
+                    "--checkpoint",
+                    "position.pt",
+                    "--mode",
+                    "candidate",
+                    "--candidate-minimum-string-margin",
+                    "0.1",
+                ]
+            )
+
+    def test_candidate_sequence_cli_requires_candidate_mode(self) -> None:
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            parse_arguments(
+                [
+                    "--manifest",
+                    "manifest.jsonl",
+                    "--checkpoint",
+                    "position.pt",
+                    "--candidate-sequence-checkpoint",
+                    "sequence.pt",
+                ]
+            )
+
+        parsed = parse_arguments(
+            [
+                "--manifest",
+                "manifest.jsonl",
+                "--checkpoint",
+                "position.pt",
+                "--mode",
+                "candidate",
+                "--candidate-sequence-checkpoint",
+                "sequence.pt",
+            ]
+        )
+        self.assertEqual(
+            parsed.candidate_sequence_checkpoint,
+            Path("sequence.pt"),
+        )
 
     def reference_fixture(self, root: Path) -> tuple[Path, Path]:
         project_path = root / "project.json"

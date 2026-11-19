@@ -11,12 +11,17 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from worker import transcribe_basic_pitch
-
 from .candidate_activity import (
     CandidateActivityConfig,
     CandidateActivityHead,
     candidate_temporal_context,
+)
+from .candidate_sequence import (
+    CandidateSequenceGroup,
+    CandidateSequenceStringModel,
+    infer_candidate_sequence_residuals,
+    load_candidate_sequence_model,
+    refine_candidate_position_logits,
 )
 from .dataset import GuitarTabDataset
 from .evaluate import aggregate, aggregate_decoder_errors
@@ -33,9 +38,15 @@ from .model import OPEN_STRING_PITCHES, PITCH_COUNT, PITCH_MIN
 from .onset_position import (
     OnsetPositionConfig,
     OnsetPositionNet,
+    assign_candidate_pitch_group,
+    assign_hierarchical_candidate_pitch_group,
     assign_pitch_group,
+    candidate_string_temporal_context,
+    candidate_position_probabilities,
     extract_onset_patch,
     group_event_indexes,
+    hierarchical_candidate_probabilities,
+    onset_encoder_signature,
     pitch_mask,
 )
 from .schema import LabeledEvent, load_manifest, reject_quarantined_references
@@ -103,7 +114,20 @@ def load_candidate_activity_head(
     base_checkpoint = dict(metadata.get("base_checkpoint", {}))
     expected_hash = str(base_checkpoint.get("sha256", ""))
     actual_hash = sha256_file(position_checkpoint_path)
-    if expected_hash != actual_hash:
+    position_checkpoint = torch.load(
+        position_checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    position_metadata = dict(position_checkpoint.get("metadata", {}))
+    inherited_base = dict(
+        position_metadata.get("base_checkpoint") or {}
+    )
+    compatible_hashes = {
+        actual_hash,
+        str(inherited_base.get("sha256", "")),
+    }
+    if expected_hash not in compatible_hashes:
         raise ValueError(
             "Candidate-activity head was trained against a different "
             "position checkpoint"
@@ -111,7 +135,9 @@ def load_candidate_activity_head(
     expected_position_config = OnsetPositionConfig.from_dict(
         dict(checkpoint.get("position_config", {}))
     )
-    if expected_position_config != position_config:
+    if onset_encoder_signature(
+        expected_position_config
+    ) != onset_encoder_signature(position_config):
         raise ValueError(
             "Candidate-activity and position model configurations differ"
         )
@@ -178,6 +204,8 @@ def basic_pitch_events(
         if int(cached.get("version", 0)) == BASIC_PITCH_CACHE_VERSION:
             return list(cached["events"]), int(cached["dropped"])
 
+    from worker import transcribe_basic_pitch
+
     with contextlib.redirect_stdout(sys.stderr):
         notes, dropped = transcribe_basic_pitch(
             audio_path,
@@ -226,9 +254,39 @@ def assign_detected_events(
     minimum_activity_probability: float = 0.0,
     minimum_repeat_probability: float = 0.5,
     repeat_minimum_direct_probability: float = 0.45,
+    candidate_none_logit_bias: float = 0.0,
+    candidate_decision: str = "joint",
+    candidate_minimum_activity_probability: float = 0.5,
+    candidate_minimum_string_margin: float = 0.0,
+    sequence_model: CandidateSequenceStringModel | None = None,
     batch_size: int = 256,
     stage_trace: dict[str, int] | None = None,
 ) -> list[LabeledEvent]:
+    if candidate_decision not in ("joint", "hierarchical"):
+        raise ValueError("candidate decision must be joint or hierarchical")
+    if not 0 <= candidate_minimum_activity_probability <= 1:
+        raise ValueError(
+            "minimum candidate activity probability must be in 0..1"
+        )
+    if not 0 <= candidate_minimum_string_margin <= 1:
+        raise ValueError("minimum candidate string margin must be in 0..1")
+    if (
+        candidate_decision == "hierarchical"
+        and model_config.candidate_position_objective
+        not in ("categorical", "factorized", "spectral_residual")
+    ):
+        raise ValueError(
+            "hierarchical candidate decisions require a categorical "
+            "position head"
+        )
+    if sequence_model is not None and (
+        mode != "candidate"
+        or model_config.candidate_position_objective
+        != "spectral_residual"
+    ):
+        raise ValueError(
+            "candidate sequence refinement requires spectral candidate mode"
+        )
     groups = group_event_indexes(
         [float(event["onset"]) for event in events],
         tolerance=model_config.group_tolerance,
@@ -294,15 +352,61 @@ def assign_detected_events(
         )
         else np.zeros((len(groups), 0), dtype=np.float32)
     )
+    candidate_string_contexts = (
+        candidate_string_temporal_context(
+            [float(group[0]["onset"]) for group in grouped_events],
+            [
+                [int(event["pitch"]) for event in group]
+                for group in grouped_events
+            ],
+            [
+                [
+                    float(event.get("confidence", 1.0))
+                    for event in group
+                ]
+                for group in grouped_events
+            ],
+            [
+                [
+                    max(
+                        0.0,
+                        float(event["offset"]) - float(event["onset"]),
+                    )
+                    for event in group
+                ]
+                for group in grouped_events
+            ],
+            repeat_interval=(
+                model_config.candidate_temporal_repeat_interval
+            ),
+            maximum_interval=(
+                model_config.candidate_temporal_max_interval
+            ),
+            feature_count=(
+                model_config.candidate_temporal_feature_count
+            ),
+        )
+        if model_config.candidate_temporal_string_residual
+        else [{} for _group in groups]
+    )
     probability_batches = []
     activity_batches = []
+    candidate_position_groups: list[np.ndarray] = []
+    candidate_activity_groups: list[np.ndarray] = []
+    candidate_logit_groups: list[torch.Tensor] = []
+    candidate_activity_logit_groups: list[torch.Tensor | None] = []
+    if mode == "candidate" and model.candidate_head is None:
+        raise ValueError(
+            "candidate assignment requires a candidate position head"
+        )
     with torch.no_grad():
         for start in range(0, len(groups), batch_size):
+            end = min(len(groups), start + batch_size)
             feature_batch = torch.from_numpy(
-                np.stack(patches[start : start + batch_size])
+                np.stack(patches[start:end])
             ).to(device)
             pitch_batch = torch.from_numpy(
-                np.stack(masks[start : start + batch_size])
+                np.stack(masks[start:end])
             ).to(device)
             encoded = model.encode(feature_batch, pitch_batch)
             probability_batches.append(
@@ -320,6 +424,208 @@ def assign_detected_events(
                         activity_head(encoded, temporal_batch)
                     ).cpu().numpy()
                 )
+            if mode == "candidate":
+                query_batch_indexes: list[int] = []
+                query_pitch_indexes: list[int] = []
+                query_temporal_contexts: list[np.ndarray] = []
+                group_sizes: list[int] = []
+                for local_index, group in enumerate(
+                    grouped_events[start:end]
+                ):
+                    group_sizes.append(len(group))
+                    query_batch_indexes.extend(
+                        [local_index] * len(group)
+                    )
+                    query_pitch_indexes.extend(
+                        int(event["pitch"]) - PITCH_MIN
+                        for event in group
+                    )
+                    if model_config.candidate_temporal_string_residual:
+                        query_temporal_contexts.extend(
+                            candidate_string_contexts[start + local_index][
+                                int(event["pitch"])
+                            ]
+                            for event in group
+                        )
+                query_batch_tensor = torch.tensor(
+                    query_batch_indexes,
+                    dtype=torch.long,
+                    device=device,
+                )
+                query_pitch_tensor = torch.tensor(
+                    query_pitch_indexes,
+                    dtype=torch.long,
+                    device=device,
+                )
+                candidate_logits = model.classify_candidate_positions(
+                    encoded[query_batch_tensor],
+                    query_pitch_tensor,
+                    features=feature_batch[query_batch_tensor],
+                    candidate_confidences=pitch_batch[
+                        query_batch_tensor,
+                        query_pitch_tensor,
+                    ],
+                    temporal_context=(
+                        torch.from_numpy(
+                            np.stack(query_temporal_contexts)
+                        ).to(device)
+                        if model_config.candidate_temporal_string_residual
+                        else None
+                    ),
+                )
+                if candidate_decision == "hierarchical":
+                    candidate_activity_logits = (
+                        model.classify_candidate_activity(
+                            encoded[query_batch_tensor],
+                            query_pitch_tensor,
+                            features=feature_batch[query_batch_tensor],
+                            candidate_confidences=pitch_batch[
+                                query_batch_tensor,
+                                query_pitch_tensor,
+                            ],
+                            candidate_position_logits=candidate_logits,
+                        )
+                    )
+                else:
+                    candidate_activity_logits = None
+                cursor = 0
+                for group_size in group_sizes:
+                    candidate_logit_groups.append(
+                        candidate_logits[
+                            cursor : cursor + group_size
+                        ].detach().cpu()
+                    )
+                    candidate_activity_logit_groups.append(
+                        (
+                            candidate_activity_logits[
+                                cursor : cursor + group_size
+                            ].detach().cpu()
+                            if candidate_activity_logits is not None
+                            else None
+                        )
+                    )
+                    cursor += group_size
+    if mode == "candidate":
+        if sequence_model is not None:
+            sequence_groups = []
+            for grouped, candidate_logits in zip(
+                grouped_events,
+                candidate_logit_groups,
+            ):
+                pitch_indexes = torch.tensor(
+                    [
+                        int(event["pitch"]) - PITCH_MIN
+                        for event in grouped
+                    ],
+                    dtype=torch.long,
+                )
+                sequence_groups.append(
+                    CandidateSequenceGroup(
+                        annotation_index=0,
+                        onset=float(grouped[0]["onset"]),
+                        pitches=pitch_indexes,
+                        confidences=torch.tensor(
+                            [
+                                float(event.get("confidence", 1.0))
+                                for event in grouped
+                            ],
+                            dtype=torch.float32,
+                        ),
+                        durations=torch.tensor(
+                            [
+                                max(
+                                    0.0,
+                                    float(event["offset"])
+                                    - float(event["onset"]),
+                                )
+                                for event in grouped
+                            ],
+                            dtype=torch.float32,
+                        ),
+                        base_string_logits=torch.log_softmax(
+                            candidate_logits[:, 1:],
+                            dim=1,
+                        ),
+                        valid_strings=(
+                            model.valid_candidate_positions.detach().cpu()[
+                                pitch_indexes,
+                                1:,
+                            ]
+                        ),
+                        string_targets=torch.zeros(
+                            len(grouped),
+                            6,
+                        ),
+                        target_weights=torch.ones(len(grouped)),
+                    )
+                )
+            sequence_residuals = infer_candidate_sequence_residuals(
+                sequence_model,
+                sequence_groups,
+                device,
+                batch_size=batch_size,
+            )
+        else:
+            sequence_residuals = [
+                torch.zeros(
+                    logits.shape[0],
+                    6,
+                    dtype=logits.dtype,
+                )
+                for logits in candidate_logit_groups
+            ]
+        for (
+            candidate_logits,
+            candidate_activity_logits,
+            sequence_group,
+            sequence_residual,
+        ) in zip(
+            candidate_logit_groups,
+            candidate_activity_logit_groups,
+            (
+                sequence_groups
+                if sequence_model is not None
+                else [None] * len(candidate_logit_groups)
+            ),
+            sequence_residuals,
+        ):
+            if sequence_group is not None:
+                candidate_logits = refine_candidate_position_logits(
+                    candidate_logits,
+                    sequence_residual,
+                    sequence_group.valid_strings,
+                )
+            if candidate_decision == "hierarchical":
+                (
+                    candidate_activity_probabilities,
+                    candidate_probabilities,
+                ) = hierarchical_candidate_probabilities(
+                    candidate_logits,
+                    objective=model_config.candidate_position_objective,
+                    activity_logits=candidate_activity_logits,
+                )
+                candidate_activity_values = (
+                    candidate_activity_probabilities.numpy()
+                )
+                candidate_probability_values = (
+                    candidate_probabilities.numpy()
+                )
+            else:
+                candidate_probability_values = (
+                    candidate_position_probabilities(
+                        candidate_logits,
+                        objective=(
+                            model_config.candidate_position_objective
+                        ),
+                        none_logit_bias=candidate_none_logit_bias,
+                    ).numpy()
+                )
+                candidate_activity_values = np.zeros(
+                    candidate_probability_values.shape[0],
+                    dtype=np.float32,
+                )
+            candidate_position_groups.append(candidate_probability_values)
+            candidate_activity_groups.append(candidate_activity_values)
     all_probabilities = (
         np.concatenate(probability_batches)
         if probability_batches
@@ -339,11 +645,21 @@ def assign_detected_events(
     position_rejected_groups = 0
     position_accepted_events = 0
     position_rejected_candidate_events = 0
+    candidate_activity_accepted_events = 0
+    candidate_activity_rejected_events = 0
+    candidate_string_margin_accepted_events = 0
+    candidate_string_margin_rejected_events = 0
     confidence_rejected_events = 0
-    for grouped, probabilities, activity_probabilities in zip(
-        grouped_events,
-        all_probabilities,
-        all_activity_probabilities,
+    for group_index, (
+        grouped,
+        probabilities,
+        activity_probabilities,
+    ) in enumerate(
+        zip(
+            grouped_events,
+            all_probabilities,
+            all_activity_probabilities,
+        )
     ):
         if (
             activity_head is not None
@@ -356,9 +672,23 @@ def assign_detected_events(
         activity_accepted_groups += 1
         activity_accepted_candidate_events += len(grouped)
         pitches = [int(event["pitch"]) for event in grouped]
+        direct_probability = (
+            repeat_minimum_direct_probability
+            if (
+                activity_head is not None
+                and float(activity_probabilities[1])
+                >= minimum_repeat_probability
+            )
+            else minimum_direct_probability
+        )
         if mode == "constrained":
             resolved = [
-                (event, string_index, fret)
+                (
+                    event,
+                    string_index,
+                    fret,
+                    float(probabilities[string_index, fret + 1]),
+                )
                 for event, (string_index, fret) in zip(
                     grouped,
                     assign_pitch_group(probabilities, pitches),
@@ -366,15 +696,6 @@ def assign_detected_events(
             ]
         elif mode == "direct":
             resolved = []
-            direct_probability = (
-                repeat_minimum_direct_probability
-                if (
-                    activity_head is not None
-                    and float(activity_probabilities[1])
-                    >= minimum_repeat_probability
-                )
-                else minimum_direct_probability
-            )
             for string_index, string_probabilities in enumerate(
                 probabilities
             ):
@@ -391,7 +712,98 @@ def assign_detected_events(
                     grouped,
                     key=lambda event: abs(int(event["pitch"]) - pitch),
                 )
-                resolved.append((source, string_index, fret))
+                resolved.append(
+                    (
+                        source,
+                        string_index,
+                        fret,
+                        float(string_probabilities[state]),
+                    )
+                )
+        elif mode == "candidate":
+            candidate_probabilities = candidate_position_groups[
+                group_index
+            ]
+            resolved = []
+            if candidate_decision == "hierarchical":
+                candidate_activity_probabilities = (
+                    candidate_activity_groups[group_index]
+                )
+                accepted = (
+                    candidate_activity_probabilities
+                    >= candidate_minimum_activity_probability
+                )
+                candidate_activity_accepted_events += int(accepted.sum())
+                candidate_activity_rejected_events += int(
+                    (~accepted).sum()
+                )
+                sorted_string_probabilities = np.sort(
+                    candidate_probabilities,
+                    axis=1,
+                )
+                string_margins = (
+                    sorted_string_probabilities[:, -1]
+                    - sorted_string_probabilities[:, -2]
+                )
+                string_margin_accepted = (
+                    string_margins >= candidate_minimum_string_margin
+                )
+                candidate_string_margin_accepted_events += int(
+                    (accepted & string_margin_accepted).sum()
+                )
+                candidate_string_margin_rejected_events += int(
+                    (accepted & ~string_margin_accepted).sum()
+                )
+                assignments = assign_hierarchical_candidate_pitch_group(
+                    candidate_activity_probabilities,
+                    candidate_probabilities,
+                    pitches,
+                    minimum_activity_probability=(
+                        candidate_minimum_activity_probability
+                    ),
+                    minimum_string_margin=(
+                        candidate_minimum_string_margin
+                    ),
+                )
+                categorical = False
+            else:
+                assignments = assign_candidate_pitch_group(
+                    candidate_probabilities,
+                    pitches,
+                )
+                categorical = (
+                    model_config.candidate_position_objective
+                    in (
+                        "categorical",
+                        "factorized",
+                        "spectral_residual",
+                    )
+                )
+            for event_index, (event, position) in enumerate(
+                zip(grouped, assignments)
+            ):
+                if position is None:
+                    continue
+                string_index, fret = position
+                class_index = (
+                    string_index + 1 if categorical else string_index
+                )
+                position_probability = float(
+                    candidate_probabilities[event_index, class_index]
+                )
+                if (
+                    candidate_decision == "joint"
+                    and position_probability < direct_probability
+                ):
+                    continue
+                resolved.append(
+                    (
+                        event,
+                        string_index,
+                        fret,
+                        position_probability,
+                    )
+                )
         else:
             raise ValueError(f"Unknown assignment mode: {mode}")
         if resolved:
@@ -400,7 +812,7 @@ def assign_detected_events(
         else:
             position_rejected_groups += 1
             position_rejected_candidate_events += len(grouped)
-        for event, string_index, fret in resolved:
+        for event, string_index, fret, position_probability in resolved:
             confidence = (
                 max(
                     0.0,
@@ -410,7 +822,7 @@ def assign_detected_events(
                     0.0,
                     min(
                         1.0,
-                        float(probabilities[string_index, fret + 1]),
+                        position_probability,
                     ),
                 )
             ) ** 0.5
@@ -450,12 +862,313 @@ def assign_detected_events(
                 "position_rejected_candidate_events": (
                     position_rejected_candidate_events
                 ),
+                "candidate_activity_accepted_events": (
+                    candidate_activity_accepted_events
+                ),
+                "candidate_activity_rejected_events": (
+                    candidate_activity_rejected_events
+                ),
+                "candidate_string_margin_accepted_events": (
+                    candidate_string_margin_accepted_events
+                ),
+                "candidate_string_margin_rejected_events": (
+                    candidate_string_margin_rejected_events
+                ),
                 "confidence_accepted_events": len(sorted_predictions),
                 "confidence_rejected_events": confidence_rejected_events,
                 "emitted_events": len(sorted_predictions),
             }
         )
     return sorted_predictions
+
+
+def filter_candidate_activity(
+    events: list[dict[str, float | int]],
+    features: np.ndarray,
+    model: OnsetPositionNet,
+    feature_config: FeatureConfig,
+    model_config: OnsetPositionConfig,
+    device: torch.device,
+    *,
+    activity_head: CandidateActivityHead | None,
+    minimum_activity_probability: float,
+    batch_size: int = 256,
+    stage_trace: dict[str, int] | None = None,
+) -> list[dict[str, float | int]]:
+    groups = group_event_indexes(
+        [float(event["onset"]) for event in events],
+        tolerance=model_config.group_tolerance,
+    )
+    if activity_head is None:
+        retained = list(events)
+        accepted_groups = len(groups)
+        rejected_groups = 0
+    else:
+        grouped_events = [
+            [events[index] for index in indexes]
+            for indexes in groups
+        ]
+        patches = [
+            extract_onset_patch(
+                features,
+                onset=float(group[0]["onset"]),
+                feature_config=feature_config,
+                config=model_config,
+            )
+            for group in grouped_events
+        ]
+        masks = [
+            pitch_mask(
+                [int(event["pitch"]) for event in group],
+                (
+                    [
+                        float(event.get("confidence", 1.0))
+                        for event in group
+                    ]
+                    if model_config.use_candidate_confidence
+                    else None
+                ),
+            )
+            for group in grouped_events
+        ]
+        temporal_contexts = candidate_temporal_context(
+            [float(group[0]["onset"]) for group in grouped_events],
+            [
+                [int(event["pitch"]) for event in group]
+                for group in grouped_events
+            ],
+            [
+                [
+                    float(event.get("confidence", 1.0))
+                    for event in group
+                ]
+                for group in grouped_events
+            ],
+            [
+                [
+                    max(
+                        0.0,
+                        float(event["offset"]) - float(event["onset"]),
+                    )
+                    for event in group
+                ]
+                for group in grouped_events
+            ],
+            repeat_interval=activity_head.config.repeat_interval,
+            maximum_interval=activity_head.config.temporal_max_interval,
+            feature_count=activity_head.config.temporal_feature_count,
+        )
+        activity_probabilities: list[np.ndarray] = []
+        with torch.no_grad():
+            for start in range(0, len(groups), batch_size):
+                end = min(len(groups), start + batch_size)
+                feature_batch = torch.from_numpy(
+                    np.stack(patches[start:end])
+                ).to(device)
+                pitch_batch = torch.from_numpy(
+                    np.stack(masks[start:end])
+                ).to(device)
+                encoded = model.encode(feature_batch, pitch_batch)
+                temporal_batch = torch.from_numpy(
+                    temporal_contexts[start:end]
+                ).to(device)
+                activity_probabilities.extend(
+                    torch.sigmoid(
+                        activity_head(encoded, temporal_batch)
+                    ).cpu().numpy()
+                )
+        accepted_groups = 0
+        rejected_groups = 0
+        retained = []
+        for group, probabilities in zip(
+            grouped_events,
+            activity_probabilities,
+        ):
+            if float(probabilities[0]) < minimum_activity_probability:
+                rejected_groups += 1
+                continue
+            retained.extend(group)
+            accepted_groups += 1
+    result = sorted(
+        retained,
+        key=lambda event: (float(event["onset"]), int(event["pitch"])),
+    )
+    if stage_trace is not None:
+        stage_trace.update(
+            {
+                "candidate_events": len(events),
+                "candidate_groups": len(groups),
+                "activity_accepted_groups": accepted_groups,
+                "activity_rejected_groups": rejected_groups,
+                "activity_accepted_candidate_events": len(result),
+                "activity_rejected_candidate_events": (
+                    len(events) - len(result)
+                ),
+            }
+        )
+    return result
+
+
+def merge_candidate_identities(
+    primary: list[dict[str, float | int]],
+    supplemental: list[dict[str, float | int]],
+    *,
+    onset_tolerance: float = 0.05,
+    stage_trace: dict[str, int] | None = None,
+) -> list[dict[str, float | int]]:
+    if onset_tolerance <= 0:
+        raise ValueError("candidate identity onset tolerance must be positive")
+    merged: list[dict[str, float | int]] = []
+    suppressed_primary = 0
+    suppressed_supplemental = 0
+    for source_name, source in (
+        ("primary", primary),
+        ("supplemental", supplemental),
+    ):
+        for candidate in source:
+            duplicate = next(
+                (
+                    existing
+                    for existing in merged
+                    if int(existing["pitch"]) == int(candidate["pitch"])
+                    and abs(
+                        float(existing["onset"])
+                        - float(candidate["onset"])
+                    )
+                    <= onset_tolerance
+                ),
+                None,
+            )
+            if duplicate is None:
+                merged.append(dict(candidate))
+                continue
+            duplicate["offset"] = max(
+                float(duplicate["offset"]),
+                float(candidate["offset"]),
+            )
+            duplicate["confidence"] = max(
+                float(duplicate.get("confidence", 1.0)),
+                float(candidate.get("confidence", 1.0)),
+            )
+            if source_name == "primary":
+                suppressed_primary += 1
+            else:
+                suppressed_supplemental += 1
+    result = sorted(
+        merged,
+        key=lambda event: (float(event["onset"]), int(event["pitch"])),
+    )
+    if stage_trace is not None:
+        stage_trace.update(
+            {
+                "primary_candidate_events": len(primary),
+                "supplemental_candidate_events": len(supplemental),
+                "suppressed_primary_duplicates": suppressed_primary,
+                "suppressed_supplemental_duplicates": (
+                    suppressed_supplemental
+                ),
+                "merged_candidate_events": len(result),
+            }
+        )
+    return result
+
+
+def assign_fused_candidate_events(
+    primary_events: list[dict[str, float | int]],
+    supplemental_events: list[dict[str, float | int]],
+    features: np.ndarray,
+    model: OnsetPositionNet,
+    feature_config: FeatureConfig,
+    model_config: OnsetPositionConfig,
+    device: torch.device,
+    *,
+    primary_activity_head: CandidateActivityHead | None,
+    supplemental_activity_head: CandidateActivityHead | None,
+    primary_minimum_activity_probability: float,
+    supplemental_minimum_activity_probability: float,
+    minimum_position_probability: float = 0.0,
+    minimum_output_confidence: float = 0.0,
+    candidate_none_logit_bias: float = 0.0,
+    candidate_decision: str = "joint",
+    candidate_minimum_activity_probability: float = 0.5,
+    candidate_minimum_string_margin: float = 0.0,
+    sequence_model: CandidateSequenceStringModel | None = None,
+    onset_tolerance: float = 0.05,
+    stage_trace: dict[str, object] | None = None,
+) -> list[LabeledEvent]:
+    if model_config.candidate_position_objective not in (
+        "categorical",
+        "factorized",
+        "spectral_residual",
+    ):
+        raise ValueError(
+            "fused candidate assignment requires a categorical position head"
+        )
+    primary_trace: dict[str, int] = {}
+    supplemental_trace: dict[str, int] = {}
+    identity_trace: dict[str, int] = {}
+    assignment_trace: dict[str, int] = {}
+    accepted_primary = filter_candidate_activity(
+        primary_events,
+        features,
+        model,
+        feature_config,
+        model_config,
+        device,
+        activity_head=primary_activity_head,
+        minimum_activity_probability=(
+            primary_minimum_activity_probability
+        ),
+        stage_trace=primary_trace,
+    )
+    accepted_supplemental = filter_candidate_activity(
+        supplemental_events,
+        features,
+        model,
+        feature_config,
+        model_config,
+        device,
+        activity_head=supplemental_activity_head,
+        minimum_activity_probability=(
+            supplemental_minimum_activity_probability
+        ),
+        stage_trace=supplemental_trace,
+    )
+    merged = merge_candidate_identities(
+        accepted_primary,
+        accepted_supplemental,
+        onset_tolerance=onset_tolerance,
+        stage_trace=identity_trace,
+    )
+    predictions = assign_detected_events(
+        merged,
+        features,
+        model,
+        feature_config,
+        model_config,
+        device,
+        mode="candidate",
+        minimum_direct_probability=minimum_position_probability,
+        minimum_output_confidence=minimum_output_confidence,
+        candidate_none_logit_bias=candidate_none_logit_bias,
+        candidate_decision=candidate_decision,
+        candidate_minimum_activity_probability=(
+            candidate_minimum_activity_probability
+        ),
+        candidate_minimum_string_margin=candidate_minimum_string_margin,
+        sequence_model=sequence_model,
+        stage_trace=assignment_trace,
+    )
+    if stage_trace is not None:
+        stage_trace.update(
+            {
+                "primary_activity": primary_trace,
+                "supplemental_activity": supplemental_trace,
+                "candidate_identity_merge": identity_trace,
+                "position_assignment": assignment_trace,
+            }
+        )
+    return predictions
 
 
 def merge_predictions(
@@ -712,7 +1425,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
         "--mode",
-        choices=("constrained", "direct"),
+        choices=("constrained", "direct", "candidate"),
         default="constrained",
     )
     parser.add_argument(
@@ -725,8 +1438,45 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
     )
+    parser.add_argument(
+        "--candidate-none-logit-bias",
+        type=float,
+        default=0.0,
+        help=(
+            "Diagnostic offset added to the categorical none logit before "
+            "softmax. Negative values retain more candidates."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-decision",
+        choices=("joint", "hierarchical"),
+        default="joint",
+        help=(
+            "Use the legacy joint none/string search or decide candidate "
+            "activity before conditional string assignment."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-minimum-activity-probability",
+        type=float,
+        default=0.5,
+        help=(
+            "Per-candidate activity threshold used only by hierarchical "
+            "candidate decisions."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-minimum-string-margin",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum top-1 versus top-2 conditional string probability "
+            "margin used only by hierarchical candidate decisions."
+        ),
+    )
     parser.add_argument("--adapter-scale", type=float)
     parser.add_argument("--candidate-activity-checkpoint", type=Path)
+    parser.add_argument("--candidate-sequence-checkpoint", type=Path)
     parser.add_argument(
         "--supplemental-candidate-activity-checkpoint",
         type=Path,
@@ -851,6 +1601,45 @@ def parse_arguments(arguments: list[str] | None = None) -> Namespace:
         )
     ):
         parser.error("--adapter-scale must be finite and non-negative")
+    if not np.isfinite(parsed.candidate_none_logit_bias):
+        parser.error("--candidate-none-logit-bias must be finite")
+    if (
+        parsed.candidate_none_logit_bias != 0
+        and parsed.mode != "candidate"
+    ):
+        parser.error(
+            "--candidate-none-logit-bias requires --mode candidate"
+        )
+    if (
+        parsed.candidate_decision == "hierarchical"
+        and parsed.mode != "candidate"
+    ):
+        parser.error(
+            "--candidate-decision hierarchical requires --mode candidate"
+        )
+    if (
+        parsed.candidate_minimum_string_margin != 0
+        and parsed.candidate_decision != "hierarchical"
+    ):
+        parser.error(
+            "--candidate-minimum-string-margin requires "
+            "--candidate-decision hierarchical"
+        )
+    if (
+        parsed.candidate_sequence_checkpoint is not None
+        and parsed.mode != "candidate"
+    ):
+        parser.error(
+            "--candidate-sequence-checkpoint requires --mode candidate"
+        )
+    if (
+        parsed.candidate_decision == "hierarchical"
+        and parsed.candidate_none_logit_bias != 0
+    ):
+        parser.error(
+            "--candidate-none-logit-bias is incompatible with "
+            "hierarchical candidate decisions"
+        )
     probability_arguments = (
         ("--minimum-direct-probability", parsed.minimum_direct_probability),
         ("--minimum-output-confidence", parsed.minimum_output_confidence),
@@ -861,6 +1650,14 @@ def parse_arguments(arguments: list[str] | None = None) -> Namespace:
         (
             "--minimum-activity-probability",
             parsed.minimum_activity_probability,
+        ),
+        (
+            "--candidate-minimum-activity-probability",
+            parsed.candidate_minimum_activity_probability,
+        ),
+        (
+            "--candidate-minimum-string-margin",
+            parsed.candidate_minimum_string_margin,
         ),
         (
             "--minimum-repeat-probability",
@@ -957,6 +1754,16 @@ def main() -> None:
         arguments.checkpoint,
         device,
     )
+    sequence_model = None
+    sequence_metadata: dict[str, object] = {}
+    if arguments.candidate_sequence_checkpoint is not None:
+        sequence_model, sequence_metadata = load_candidate_sequence_model(
+            arguments.candidate_sequence_checkpoint,
+            arguments.checkpoint,
+            model_config,
+            feature_config,
+            device,
+        )
     if arguments.adapter_scale is not None:
         if model.adapter is None:
             raise ValueError(
@@ -1055,29 +1862,55 @@ def main() -> None:
         features = cqt_dataset.load_track_features(
             arguments.start + index - 1
         )
-        primary_assignment_trace: dict[str, int] = {}
-        predictions = assign_detected_events(
-            events,
-            features,
-            model,
-            feature_config,
-            model_config,
-            device,
-            mode=arguments.mode,
-            minimum_direct_probability=arguments.minimum_direct_probability,
-            minimum_output_confidence=arguments.minimum_output_confidence,
-            activity_head=activity_head,
-            minimum_activity_probability=(
-                arguments.minimum_activity_probability
-            ),
-            minimum_repeat_probability=(
-                arguments.minimum_repeat_probability
-            ),
-            repeat_minimum_direct_probability=(
-                arguments.repeat_minimum_direct_probability
-            ),
-            stage_trace=primary_assignment_trace,
+        categorical_fusion = (
+            model_config.candidate_position_objective
+            in ("categorical", "factorized", "spectral_residual")
+            and arguments.mode == "candidate"
+            and arguments.supplemental_pitch_onset_threshold is not None
         )
+        primary_stage_trace: dict[str, object] = {}
+        if categorical_fusion:
+            predictions: list[LabeledEvent] = []
+        else:
+            primary_assignment_trace: dict[str, int] = {}
+            predictions = assign_detected_events(
+                events,
+                features,
+                model,
+                feature_config,
+                model_config,
+                device,
+                mode=arguments.mode,
+                minimum_direct_probability=(
+                    arguments.minimum_direct_probability
+                ),
+                minimum_output_confidence=(
+                    arguments.minimum_output_confidence
+                ),
+                activity_head=activity_head,
+                minimum_activity_probability=(
+                    arguments.minimum_activity_probability
+                ),
+                minimum_repeat_probability=(
+                    arguments.minimum_repeat_probability
+                ),
+                repeat_minimum_direct_probability=(
+                    arguments.repeat_minimum_direct_probability
+                ),
+                candidate_none_logit_bias=(
+                    arguments.candidate_none_logit_bias
+                ),
+                candidate_decision=arguments.candidate_decision,
+                candidate_minimum_activity_probability=(
+                    arguments.candidate_minimum_activity_probability
+                ),
+                candidate_minimum_string_margin=(
+                    arguments.candidate_minimum_string_margin
+                ),
+                sequence_model=sequence_model,
+                stage_trace=primary_assignment_trace,
+            )
+            primary_stage_trace["assignment"] = primary_assignment_trace
         supplemental_stage_trace = None
         pitch_frontend_events = list(events)
         if arguments.supplemental_pitch_onset_threshold is not None:
@@ -1101,69 +1934,125 @@ def main() -> None:
                     else arguments.pitch_minimum_note_length
                 ),
             )
-            supplemental_assignment_trace: dict[str, int] = {}
-            supplemental_predictions = assign_detected_events(
-                supplemental_events,
-                features,
-                model,
-                feature_config,
-                model_config,
-                device,
-                mode=arguments.mode,
-                minimum_direct_probability=(
-                    arguments.supplemental_minimum_direct_probability
-                ),
-                minimum_output_confidence=(
-                    arguments.minimum_output_confidence
-                ),
-                activity_head=supplemental_activity_head,
-                minimum_activity_probability=(
+            supplemental_activity_probability = (
+                arguments.supplemental_minimum_activity_probability
+                if (
                     arguments.supplemental_minimum_activity_probability
-                    if (
-                        arguments.supplemental_minimum_activity_probability
-                        is not None
-                    )
-                    else arguments.minimum_activity_probability
-                ),
-                minimum_repeat_probability=(
-                    (
-                        arguments.supplemental_minimum_repeat_probability
+                    is not None
+                )
+                else arguments.minimum_activity_probability
+            )
+            if categorical_fusion:
+                fused_trace: dict[str, object] = {}
+                predictions = assign_fused_candidate_events(
+                    events,
+                    supplemental_events,
+                    features,
+                    model,
+                    feature_config,
+                    model_config,
+                    device,
+                    primary_activity_head=activity_head,
+                    supplemental_activity_head=supplemental_activity_head,
+                    primary_minimum_activity_probability=(
+                        arguments.minimum_activity_probability
+                    ),
+                    supplemental_minimum_activity_probability=(
+                        supplemental_activity_probability
+                    ),
+                    minimum_position_probability=(
+                        arguments.minimum_direct_probability
+                    ),
+                    minimum_output_confidence=(
+                        arguments.minimum_output_confidence
+                    ),
+                    candidate_none_logit_bias=(
+                        arguments.candidate_none_logit_bias
+                    ),
+                    candidate_decision=arguments.candidate_decision,
+                    candidate_minimum_activity_probability=(
+                        arguments.candidate_minimum_activity_probability
+                    ),
+                    candidate_minimum_string_margin=(
+                        arguments.candidate_minimum_string_margin
+                    ),
+                    sequence_model=sequence_model,
+                    onset_tolerance=arguments.onset_tolerance,
+                    stage_trace=fused_trace,
+                )
+                primary_stage_trace[
+                    "fused_candidate_assignment"
+                ] = fused_trace
+            else:
+                supplemental_assignment_trace: dict[str, int] = {}
+                supplemental_predictions = assign_detected_events(
+                    supplemental_events,
+                    features,
+                    model,
+                    feature_config,
+                    model_config,
+                    device,
+                    mode=arguments.mode,
+                    minimum_direct_probability=(
+                        arguments.supplemental_minimum_direct_probability
+                    ),
+                    minimum_output_confidence=(
+                        arguments.minimum_output_confidence
+                    ),
+                    activity_head=supplemental_activity_head,
+                    minimum_activity_probability=(
+                        supplemental_activity_probability
+                    ),
+                    minimum_repeat_probability=(
+                        (
+                            arguments.supplemental_minimum_repeat_probability
+                            if (
+                                arguments
+                                .supplemental_minimum_repeat_probability
+                                is not None
+                            )
+                            else arguments.minimum_repeat_probability
+                        )
                         if (
                             arguments
-                            .supplemental_minimum_repeat_probability
+                            .supplemental_repeat_minimum_direct_probability
                             is not None
                         )
-                        else arguments.minimum_repeat_probability
-                    )
-                    if (
+                        else 1.0
+                    ),
+                    repeat_minimum_direct_probability=(
                         arguments
                         .supplemental_repeat_minimum_direct_probability
-                        is not None
-                    )
-                    else 1.0
-                ),
-                repeat_minimum_direct_probability=(
-                    arguments
-                    .supplemental_repeat_minimum_direct_probability
-                    if (
-                        arguments
-                        .supplemental_repeat_minimum_direct_probability
-                        is not None
-                    )
-                    else arguments.supplemental_minimum_direct_probability
-                ),
-                stage_trace=supplemental_assignment_trace,
-            )
-            supplemental_merge_trace: dict[str, int] = {}
-            predictions = merge_predictions(
-                predictions,
-                supplemental_predictions,
-                stage_trace=supplemental_merge_trace,
-            )
-            supplemental_stage_trace = {
-                "assignment": supplemental_assignment_trace,
-                "merge": supplemental_merge_trace,
-            }
+                        if (
+                            arguments
+                            .supplemental_repeat_minimum_direct_probability
+                            is not None
+                        )
+                        else arguments.supplemental_minimum_direct_probability
+                    ),
+                    candidate_none_logit_bias=(
+                        arguments.candidate_none_logit_bias
+                    ),
+                    candidate_decision=arguments.candidate_decision,
+                    candidate_minimum_activity_probability=(
+                        arguments.candidate_minimum_activity_probability
+                    ),
+                    candidate_minimum_string_margin=(
+                        arguments.candidate_minimum_string_margin
+                    ),
+                    sequence_model=sequence_model,
+                    stage_trace=supplemental_assignment_trace,
+                )
+                supplemental_merge_trace: dict[str, int] = {}
+                predictions = merge_predictions(
+                    predictions,
+                    supplemental_predictions,
+                    stage_trace=supplemental_merge_trace,
+                )
+                supplemental_stage_trace = {
+                    "assignment": supplemental_assignment_trace,
+                    "merge": supplemental_merge_trace,
+                }
             pitch_frontend_events.extend(supplemental_events)
             dropped += supplemental_dropped
         fusion_counts = None
@@ -1240,6 +2129,17 @@ def main() -> None:
                 minimum_output_confidence=(
                     arguments.minimum_output_confidence
                 ),
+                candidate_none_logit_bias=(
+                    arguments.candidate_none_logit_bias
+                ),
+                candidate_decision=arguments.candidate_decision,
+                candidate_minimum_activity_probability=(
+                    arguments.candidate_minimum_activity_probability
+                ),
+                candidate_minimum_string_margin=(
+                    arguments.candidate_minimum_string_margin
+                ),
+                sequence_model=sequence_model,
                 stage_trace=fusion_assignment_trace,
             )
             fusion_merge_trace: dict[str, int] = {}
@@ -1293,9 +2193,7 @@ def main() -> None:
             "predicted_events": len(predictions),
             "dropped_out_of_range_pitch_events": dropped,
             "stage_trace": {
-                "primary": {
-                    "assignment": primary_assignment_trace,
-                },
+                "primary": primary_stage_trace,
                 **(
                     {"supplemental": supplemental_stage_trace}
                     if supplemental_stage_trace is not None
@@ -1368,6 +2266,16 @@ def main() -> None:
             "minimum_output_confidence": (
                 arguments.minimum_output_confidence
             ),
+            "candidate_none_logit_bias": (
+                arguments.candidate_none_logit_bias
+            ),
+            "candidate_decision": arguments.candidate_decision,
+            "candidate_minimum_activity_probability": (
+                arguments.candidate_minimum_activity_probability
+            ),
+            "candidate_minimum_string_margin": (
+                arguments.candidate_minimum_string_margin
+            ),
             "adapter_scale": (
                 arguments.adapter_scale
                 if arguments.adapter_scale is not None
@@ -1395,6 +2303,22 @@ def main() -> None:
                     ),
                 }
                 if arguments.candidate_activity_checkpoint is not None
+                else None
+            ),
+            "candidate_sequence": (
+                {
+                    **sequence_metadata,
+                    "checkpoint": {
+                        "name": (
+                            arguments.candidate_sequence_checkpoint.name
+                        ),
+                        "sha256": sha256_file(
+                            arguments.candidate_sequence_checkpoint
+                        ),
+                    },
+                    "activity_path_frozen": True,
+                }
+                if arguments.candidate_sequence_checkpoint is not None
                 else None
             ),
             "supplemental": (

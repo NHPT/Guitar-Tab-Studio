@@ -1027,3 +1027,226 @@ This gate rejects embedded local paths, missing manifest identities, stale
 ledger hashes, unknown/quarantined sources and sources that do not permit model
 release. The existing v24 research bundle contains no absolute local paths,
 but predates training-source identities and therefore remains research-only.
+
+## Candidate position head v1
+
+Candidate position head v1 tested a pitch-conditioned six-string classifier
+on top of the frozen v12 encoder. Only `107,422` new parameters were trained.
+Internal candidate position F1 improved from `0.540901` after epoch 1 to
+`0.643791` after epoch 3, but this did not translate to end-to-end TAB quality.
+
+On the frozen 60-track GuitarSet mixture gate, TAB F1 fell from `0.679886` to
+`0.583764`, repeated TAB recall fell from `0.690274` to `0.639444`, and
+same-pitch wrong-string errors increased from `495` to `903`. A primary-only
+ablation still produced only `0.590750` TAB F1 and `941` same-pitch
+wrong-string errors, so supplemental merge behavior was not the root cause.
+
+The branch is rejected without additional epochs. Its independent binary
+string objective does not jointly represent candidate rejection and string
+selection. Any successor must use a candidate-level `none + six strings`
+categorical head and pass the same frozen gate before broader evaluation.
+Detailed evidence is in `candidate-position-head-v1-result.md`.
+
+## Candidate position head v2
+
+Candidate position head v2 replaced the six binary string outputs with one
+seven-state categorical distribution: `none` plus strings 1 through 6.
+Unplayable string classes are masked before softmax. Primary and supplemental
+frontends are activity-gated independently, merged by pitch and onset, and
+assigned only once. Old binary-head checkpoints and v24 bundles remain
+compatible.
+
+The frozen v12 encoder was trained for three epochs on the governed GuitarSet
+mixture manifest. Only `107,679` candidate-head parameters were trainable.
+Best validation categorical accuracy was `0.763089`; candidate acceptance F1
+was `0.776626`, rejection F1 was `0.817319`, and active-candidate string
+accuracy was `0.681596`.
+
+The corrected frozen gate used the same 60 mixture-Demucs validation tracks as
+v24 and v1. Candidate identity merging suppressed `11,316` supplemental
+duplicates before position assignment, fixing v1's late-merge inflation.
+However, the categorical head over-rejected valid candidates and emitted only
+`7,577` events versus v24's `10,171`.
+
+TAB F1 was `0.608861`, repeated TAB recall was `0.533548`, onset F1 was
+`0.763320`, and same-pitch wrong-string errors were `538`. All values failed
+their preregistered v24-relative gates. V2 is rejected without cross-domain
+evaluation or additional epochs; v24 remains unchanged. Detailed evidence is
+in `candidate-position-head-v2-result.md`.
+
+Post-rejection calibration scanned categorical none-logit offsets on a
+separate set of 60 original GuitarSet microphone validation tracks. The
+frozen 60-track mixture-Demucs gate was not used. Bias `-0.75` was the best
+end-to-end v2 point: TAB F1 improved from `0.643744` at bias `0` to
+`0.662745`, and repeated TAB recall improved from `0.582006` to `0.661810`.
+It still trailed the same-domain v24 baseline by `0.041923` TAB F1 and
+`0.060149` repeated TAB recall, while same-pitch wrong-string errors increased
+from v24's `481` to `726`.
+
+The scan confirms that over-rejection is real but is not the root fix. No
+calibrated v2 bias is promoted. A successor must improve candidate-specific
+string evidence and separate rejection from string selection more cleanly.
+Detailed evidence is in
+`candidate-position-head-v2-none-bias-calibration.md`.
+
+## Candidate position heads v3 and v4
+
+V3 added candidate-local harmonic CQT trajectories and factorized activity
+from conditional string prediction. Governed validation candidate string
+accuracy increased to `0.723305`, but source oracle string accuracy fell from
+v2's `0.867460` to `0.853302`. Its best source TAB F1 was `0.669006` with
+`962` same-pitch wrong-string errors. V3 was rejected before the frozen gate.
+Detailed evidence is in `candidate-position-head-v3-result.md`.
+
+V4 isolated string discrimination by initializing the full v2 categorical
+head, freezing it and training only a zero-initialized spectral string
+residual. It improved governed validation oracle string accuracy from
+`0.860264` to `0.867327` and source oracle string accuracy from `0.867460` to
+`0.876502`. The local harmonic features therefore contain measurable
+string-position signal.
+
+The gain still did not translate end to end. Across representative source
+none-logit biases, the best TAB F1 was `0.655764` at bias `-0.5`, with `710`
+same-pitch wrong-string errors, `0.811654` onset F1 and `0.649949` repeated
+TAB recall. All four source promotion gates failed, so the frozen
+mixture-Demucs gate remained unread and v24 remained unchanged.
+
+The current categorical group assignment compares `none` and individual
+string probabilities in one joint combination search. Redistributing active
+probability among strings can therefore change acceptance even when total
+activity probability is preserved. A successor must make activity acceptance
+independent of the conditional string distribution, then select a string only
+for accepted candidates. Detailed evidence is in
+`candidate-position-head-v4-result.md`.
+
+## Hierarchical candidate activity and string selection
+
+Hierarchical decoder v1 first tested complete decision separation without
+retraining. It accepted candidates from v4's total active probability, then
+used the conditional string distribution only for string assignment. Across
+nine preregistered source thresholds, the best point was threshold `0.50`:
+TAB F1 `0.601503`, onset F1 `0.790740`, repeated TAB recall `0.593189` and
+`1,055` same-pitch wrong-string errors. All source gates failed. Detailed
+evidence is in `candidate-hierarchical-decoder-v1-result.md`.
+
+Candidate activity residual v1 then added a dedicated zero-initialized scalar
+activity residual while freezing the complete v4 conditional string path.
+Only `149,761` parameters were trainable. Validation candidate acceptance F1
+reached `0.829825`, while validation oracle string accuracy remained exactly
+`0.867327` across all epochs, confirming training isolation.
+
+The trained activity head improved the best hierarchical source TAB F1 to
+`0.652654` at threshold `0.50`, with onset F1 `0.814430`, repeated TAB recall
+`0.625042` and `993` same-pitch wrong-string errors. All four source gates
+still failed, so the frozen mixture-Demucs gate remained unread.
+
+The experiment establishes that activity/string coupling can be removed
+cleanly, but separation alone is not sufficient. Further threshold tuning is
+not justified; a successor needs stronger temporal or performance-context
+evidence and better supervised coverage of same-pitch cross-string ambiguity.
+Detailed evidence is in `candidate-activity-residual-v1-result.md`.
+
+## Temporal candidate string context v1
+
+Temporal string v1 added 20 bidirectional, reference-free candidate trajectory
+features and deterministic ambiguity/rare-pair/cross-string loss weights
+above the frozen activity-v1 and v4 path. Only a zero-initialized `2,849`
+parameter conditional-string residual was trained.
+
+Epoch 2 increased governed validation oracle string accuracy from `0.867327`
+to `0.867447`, a gain of only `0.000121`. On the independent 60-track
+original-microphone source calibration, oracle string accuracy remained
+exactly `0.876502` (`7,367 / 8,405` correct). It therefore failed the required
+strict source improvement.
+
+The model was rejected before the end-to-end threshold scan, and the frozen
+mixture-Demucs gate remained unread. Hand-designed trajectory summaries and
+reweighting the same GuitarSet events did not change the source decision
+boundary. A successor needs an explicit sequence representation with
+neighboring string hypotheses and genuinely new aligned cross-string
+performances. Detailed evidence is in
+`candidate-temporal-string-v1-result.md`.
+
+## Explicit candidate sequence context v1
+
+The successor experiment replaces the hand-designed temporal summary with an
+explicit model over ordered Basic Pitch candidate groups. A source audit first
+checked every verified real string/fret source without reading review queues,
+test splits or frozen promotion gates.
+
+GuitarSet is the only available source with meaningful phrase-level
+same-pitch cross-string supervision: the governed mixture manifest contains
+1,674 adjacent same-pitch cross-string transitions within two seconds across
+440 tracks. AG-PT-set train contains none, while Guitar-TECHS train contains
+only two. Both auxiliary sources remain valid for single-note and cross-domain
+evaluation, but are excluded from this sequence baseline rather than being
+misrepresented as new cross-string phrase data.
+
+Candidate sequence string v1 freezes activity-v1 and all v4 local position
+components. A 93,190-parameter sequence residual receives candidate pitch,
+confidence, duration, the six frozen conditional string logits and the
+playable-string mask. Candidate tokens are pooled into ordered group
+embeddings, encoded by a one-layer bidirectional GRU and decoded back to six
+conditional string residuals. The output layer is zero-initialized, invalid
+positions remain masked, and the total candidate activity probability is
+preserved exactly.
+
+Training uses 32-group windows with stride 16 over 69,571 train and 17,400
+validation candidate groups. No candidate is truncated; overlapping residuals
+are averaged at inference. Selection uses unique, unweighted GuitarSet
+validation oracle string accuracy. Source calibration and end-to-end threshold
+search remain gated in that order. Full inputs, optimization settings and
+promotion thresholds are frozen in
+`candidate-sequence-string-v1-preregistration.md`; source evidence is in
+`candidate-sequence-string-v1-data-audit.md`.
+
+Epoch 6 increased governed validation oracle string accuracy from `0.867327`
+to `0.885797`. The gain also held on the fixed 60-track original-microphone
+source slice: oracle accuracy increased from `0.876502` to `0.894349`,
+correcting 150 additional active-candidate string decisions. A later identity
+audit found that this slice is contained in the same 120-track governed
+validation membership, so it is comparability evidence rather than an
+independent transfer result.
+
+The best hierarchical source point was activity threshold `0.50`: TAB F1
+`0.683021`, `785` same-pitch wrong-string errors, onset F1 `0.818519` and
+repeated TAB recall `0.642494`. Only the onset gate passed. The model was
+therefore rejected without a separate mixture-Demucs rerun, and v24 remains
+unchanged. The later audit also found that all 60 historical mixture gate
+tracks were already present in governed validation, so that dataset is no
+longer classified as a sealed unread gate.
+
+This result validates explicit sequence representation as a stronger
+direction than hand-designed temporal summaries, but also confirms that
+conditional string improvements alone cannot meet end-to-end activity and
+repeated-note requirements. Detailed evidence is in
+`candidate-sequence-string-v1-result.md`.
+
+## Candidate sequence decoder calibration v1
+
+A decoder-only successor froze activity-v1, sequence-v1 and all data inputs,
+then scanned 30 combinations of candidate activity threshold and conditional
+string top-1/top-2 probability margin. Selection used only the governed
+validation report and required onset F1 and repeated TAB recall to remain at
+least as high as the activity `0.50`, margin `0` baseline.
+
+The selector retained the unchanged baseline. Its validation TAB F1 was
+`0.664779`; every nonzero margin reduced TAB F1 at the same activity
+threshold. Margin filtering did reduce wrong-string counts, but it removed
+enough correct and repeated events that the end-to-end tradeoff worsened.
+
+The fixed 60-track original-microphone rerun exactly reproduced sequence-v1:
+TAB F1 `0.683021`, `785` same-pitch wrong-string errors, onset F1 `0.818519`
+and repeated TAB recall `0.642494`. There was no decoder gain, and three
+absolute production gates still failed.
+
+The run also corrected the gate interpretation. All 60 source-calibration
+tracks and all 60 historical mixture-Demucs gate tracks occur inside the same
+120-track governed validation split. Those slices are not independent sealed
+gates. The source result is retained only for fixed-slice comparability, the
+mixture slice was not rerun, and production promotion is frozen until a
+genuinely non-overlapping governed gate is established.
+
+The margin option defaults to zero and remains diagnostic only. Sequence-v1
+and v24 remain unchanged. Detailed evidence is in
+`candidate-sequence-decoder-calibration-v1-result.md`.
