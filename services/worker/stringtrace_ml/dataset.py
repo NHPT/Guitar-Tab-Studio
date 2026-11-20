@@ -92,6 +92,7 @@ class GuitarTabDataset(Dataset[dict[str, Tensor | str | float]]):
         feature_frequency_mask_bins: int = 0,
         feature_contrast_range: float = 0.0,
         feature_spectral_tilt: float = 0.0,
+        included_track_ids: set[str] | frozenset[str] | None = None,
     ) -> None:
         self.manifest_path = manifest_path.resolve()
         self.feature_config = feature_config or FeatureConfig()
@@ -126,7 +127,26 @@ class GuitarTabDataset(Dataset[dict[str, Tensor | str | float]]):
             if feature_cache_directory is not None
             else None
         )
-        self.annotations = load_manifest(self.manifest_path, split)
+        annotations = load_manifest(self.manifest_path, split)
+        if included_track_ids is not None:
+            selected_track_ids = frozenset(included_track_ids)
+            if not selected_track_ids:
+                raise ValueError("included_track_ids cannot be empty")
+            available_track_ids = {
+                annotation.track_id for annotation in annotations
+            }
+            missing_track_ids = selected_track_ids - available_track_ids
+            if missing_track_ids:
+                raise ValueError(
+                    "included_track_ids are absent from the selected split: "
+                    + ", ".join(sorted(missing_track_ids))
+                )
+            annotations = [
+                annotation
+                for annotation in annotations
+                if annotation.track_id in selected_track_ids
+            ]
+        self.annotations = annotations
         self.windows: list[WindowIndex] = []
         self._prepared_annotations: set[int] = set()
         self._track_cache_keys: dict[int, str] = {}

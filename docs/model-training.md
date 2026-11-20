@@ -154,22 +154,104 @@ IDMT-SMT-GUITAR is CC BY-NC-ND 4.0 and is evaluation-only. Older generated
 manifests do not override these policies.
 
 The current acquisition snapshot is
-`governed-v1/formal-training-manifest-v2.jsonl`. It preserves the original
-600 GuitarSet, 12 Guitar-TECHS and 128 physical synthetic records, then adds
-353 AG-PT-set training records with 16,908 valid 0-24 fret events. The result
-contains 1,093 records (973 train, 120 validation), 143 groups, no test
-records, no group split leakage and no source-policy violations. Its SHA-256
-is `630d08ede28ba7c220793715738444dab22ca53e3cde3c2311bbc6b028879916`.
+`governed-v1/formal-training-manifest-v3.jsonl`. It preserves all four v2
+sources, then adds 24 Guitar-TECHS P3 music tracks with 3,882 valid 0-24 fret
+events. The result contains 1,117 records (997 train, 120 validation),
+131,502 events and 144 groups. It has no test records, group split leakage or
+source-policy violations. Its SHA-256 is
+`cb7cc83e0a887f3413a58fc0bbd8e4258db17a94936d8472f6cb3952afc6504d`.
+
+The v2 snapshot remains
+`governed-v1/formal-training-manifest-v2.jsonl`: 1,093 records (973 train,
+120 validation), 127,620 events and 143 groups, SHA-256
+`630d08ede28ba7c220793715738444dab22ca53e3cde3c2311bbc6b028879916`.
+It preserves the original 600 GuitarSet, 12 Guitar-TECHS and 128 physical
+synthetic records, then adds 353 AG-PT-set training records with 16,908 valid
+0-24 fret events.
+
 The v28 snapshot remains `formal-training-manifest.jsonl` with 740 records
 and its original SHA-256
 `cb8b456d4ca8736249d3494543a8019d459463d420fb939983865db194707a26`;
-the new snapshot does not authorize a v29 run by itself.
+neither newer snapshot authorizes a production run by itself.
 AG-PT-set validation is kept separate in
 `governed-v1/agpt-position-validation.jsonl`: 72 records, 3,690 valid events,
 one held-out performer group, SHA-256
 `83abea78a2786131bdf3776def93d80c4141cb825afadf44a7908c925d67d708`.
 It is marked evaluation-only and is not part of either formal training
 snapshot.
+
+Import and audit the P3 partition independently before composition:
+
+```bash
+.venv/bin/stringtrace-import-guitar-techs \
+  --root apps/api/data/training/guitar-techs \
+  --players P3 \
+  --output \
+    apps/api/data/training/guitar-techs/p3-music-technique-manifest-v1.jsonl
+
+.venv/bin/stringtrace-convert-technique-positions \
+  --manifest \
+    apps/api/data/training/guitar-techs/p3-music-technique-manifest-v1.jsonl \
+  --output \
+    apps/api/data/training/governed-v1/guitar-techs-p3-music-position-train-candidate-v1.jsonl \
+  --audit-output \
+    apps/api/data/training/reports/guitar-techs-p3-music-position-train-candidate-v1-conversion.json
+
+.venv/bin/stringtrace-audit-guitar-techs-p3 \
+  --root apps/api/data/training/guitar-techs \
+  --technique-manifest \
+    apps/api/data/training/guitar-techs/p3-music-technique-manifest-v1.jsonl \
+  --position-manifest \
+    apps/api/data/training/governed-v1/guitar-techs-p3-music-position-train-candidate-v1.jsonl \
+  --formal-manifest \
+    apps/api/data/training/governed-v1/formal-training-manifest-v2.jsonl \
+  --output \
+    apps/api/data/training/reports/guitar-techs-p3-music-position-candidate-v1-audit.json
+```
+
+Only after that candidate audit passes, compose and audit formal-v3:
+
+```bash
+.venv/bin/stringtrace-compose-training-manifest \
+  --manifest \
+    apps/api/data/training/governed-v1/guitarset-mixture-combined.jsonl \
+  --manifest \
+    apps/api/data/training/governed-v1/guitar-techs-position-train.jsonl \
+  --manifest \
+    apps/api/data/training/governed-v1/agpt-position-train.jsonl \
+  --manifest \
+    apps/api/data/training/governed-v1/synthetic-physical-fret-v1/manifest.jsonl \
+  --manifest \
+    apps/api/data/training/governed-v1/guitar-techs-p3-music-position-train-candidate-v1.jsonl \
+  --output \
+    apps/api/data/training/governed-v1/formal-training-manifest-v3.jsonl \
+  --report \
+    apps/api/data/training/reports/governed-v1-formal-training-v3-composition.json
+
+.venv/bin/stringtrace-data-source-audit \
+  --manifest \
+    apps/api/data/training/governed-v1/formal-training-manifest-v3.jsonl \
+  --purpose training \
+  --output \
+    apps/api/data/training/reports/governed-v1-formal-training-v3-source-audit.json
+
+.venv/bin/stringtrace-manifest-isolation \
+  --reference-manifest \
+    apps/api/data/training/governed-v1/formal-training-manifest-v3.jsonl \
+  --candidate-manifest \
+    apps/api/data/training/governed-v1/agpt-position-validation.jsonl \
+  --candidate-manifest \
+    apps/api/data/training/governed-v1/guitar-techs-position-validation.jsonl \
+  --output \
+    apps/api/data/training/reports/governed-v1-formal-training-v3-cross-source-isolation.json
+```
+
+The formal-v3 composition, source audit and cross-source isolation reports
+have SHA-256 values `6d3b2731e1699df887eabf947b309e665cd196ba93955dfb395a4a76320e4cb0`,
+`ed171d832719ddfac766aabe3e45161e0961f0d0eb819812a052dcdebebad770`
+and `59dbc6a2d5f60ff88dc52d4980389f2be78e13128fe54067e5cc84ab103e2d17`.
+The isolation audit reports zero audio-hash, group, performer and track
+overlap against both locked validation manifests.
 
 ### Deterministic symbolic synthesis
 
@@ -1250,3 +1332,85 @@ genuinely non-overlapping governed gate is established.
 The margin option defaults to zero and remains diagnostic only. Sequence-v1
 and v24 remain unchanged. Detailed evidence is in
 `candidate-sequence-decoder-calibration-v1-result.md`.
+
+## Candidate sequence string v2 and representation audit
+
+String v2 tested source-balanced training and a whole-group structured
+likelihood on the fixed formal-v2 training-only partition. All four trained
+epochs reduced the structured loss but regressed assigned-string accuracy,
+wrong-string decisions and repeated-string true positives. The experiment
+stopped at its training-only gate without reading governed GuitarSet, AG-PT
+validation or Guitar-TECHS P2 validation.
+
+A following representation audit tested candidate-local onset-baseline
+subtraction and gain normalization on the same fixed partition. Source
+balanced accuracy decreased by only `0.004149`, while pooled string accuracy
+decreased by `0.031515`; all real sources lost string accuracy. The
+representation was rejected before model preregistration or training.
+
+These results prohibit nearby retries of the string-v2 structured objective
+or local source normalization. Detailed evidence is in
+`candidate-sequence-string-v2-result.md` and
+`candidate-source-invariant-representation-v1-result.md`.
+
+## Guitar-TECHS P3 phrase supervision and string v3
+
+The P3 music partition contributes 24 correlated direct-input and mic+amp
+tracks from 12 performances. Its candidate cache contains 6,685 candidates
+across 3,416 ordered groups. Frozen string v1 accepts 1,136 reference-active
+candidates, assigns 659 correctly and 477 to the wrong string, for accuracy
+`0.580106`; repeated-string correctness is `246 / 431`.
+
+P3 contributes 250 dual-modality same-pitch cross-string transitions within
+two seconds, representing 125 underlying performance transitions. It has one
+performer, so no P3 track subset is used as internal validation.
+
+Candidate sequence string v3 isolates the data change:
+
+- initialize the complete 93,190-parameter sequence module from string v1;
+- train only on 384 non-calibration GuitarSet tracks plus all 24 P3 tracks;
+- exclude AG-PT-set, Guitar-TECHS P1 and synthetic records from gradients;
+- retain the original per-candidate set-valued cross-entropy and all frozen
+  frontend, activity, architecture and decoder settings;
+- assign P3 20% of replacement-sampler probability mass with fixed weight
+  `4.08955223880597`;
+- select an epoch only on the unchanged 268-record formal-v2 training
+  holdout, then evaluate governed GuitarSet, AG-PT and Guitar-TECHS P2 once
+  in that order.
+
+The full inputs, three-epoch optimization, source-preservation checks,
+cross-source gates and output names are frozen in
+`candidate-sequence-string-v3-preregistration.md`, SHA-256
+`e6594381f5bc45a99afa92f29a775f1362e60d6bb4ef5c61c5863f6497f0173d`.
+
+The dedicated fixed-contract entry point is
+`stringtrace-train-candidate-sequence-v3`. It exposes no experiment
+hyperparameter overrides. Run the deterministic, fail-closed input audit
+without starting training:
+
+```bash
+.venv/bin/stringtrace-train-candidate-sequence-v3 \
+  --training-root apps/api/data/training \
+  --preregistration \
+    docs/candidate-sequence-string-v3-preregistration.md \
+  --audit-only
+```
+
+The audit reproduces the frozen formal-v3 counts, formal-v2 calibration
+partition, gradient selection, P3 cache identity, candidate groups, sequence
+windows and replacement-sampler share. It writes
+`reports/candidate-sequence-string-v3-input-audit.json`.
+
+Only after reviewing that audit, start the single fixed three-epoch job by
+removing `--audit-only`:
+
+```bash
+.venv/bin/stringtrace-train-candidate-sequence-v3 \
+  --training-root apps/api/data/training \
+  --preregistration \
+    docs/candidate-sequence-string-v3-preregistration.md
+```
+
+Implementation and input-audit validation are complete. The three-epoch
+training job has not started, and no governed or cross-source v3 result has
+been read.

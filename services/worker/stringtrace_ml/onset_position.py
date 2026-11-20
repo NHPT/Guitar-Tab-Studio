@@ -555,6 +555,7 @@ class OnsetPositionDataset(Dataset[dict[str, Tensor]]):
         candidate_cross_string_weight: float = 1.0,
         candidate_cross_string_interval: float = 2.0,
         candidate_max_supervision_weight: float = 4.0,
+        included_track_ids: set[str] | frozenset[str] | None = None,
     ) -> None:
         self.manifest_path = manifest_path.resolve()
         self.feature_config = feature_config or FeatureConfig()
@@ -606,6 +607,7 @@ class OnsetPositionDataset(Dataset[dict[str, Tensor]]):
             split=split,
             feature_config=self.feature_config,
             feature_cache_directory=feature_cache_directory,
+            included_track_ids=included_track_ids,
         )
         self.annotations = self.track_dataset.annotations
         self.groups: list[OnsetGroupIndex] = []
@@ -1118,6 +1120,71 @@ def candidate_harmonic_cqt_indexes(
                     0 <= index < feature_config.n_bins
                 )
     return indexes, valid
+
+
+def normalize_candidate_attack_evidence(
+    spectral_evidence: Tensor,
+    *,
+    frame_count: int,
+    frames_before: int,
+    harmonic_count: int,
+    radius: int,
+    minimum_scale: float = 1e-3,
+) -> Tensor:
+    if spectral_evidence.ndim != 2:
+        raise ValueError(
+            "candidate spectral evidence must have shape [items, features]"
+        )
+    if frame_count <= 0 or harmonic_count <= 0:
+        raise ValueError("candidate evidence dimensions must be positive")
+    if not 0 < frames_before <= frame_count:
+        raise ValueError(
+            "candidate evidence needs pre-onset frames within the window"
+        )
+    if radius < 0:
+        raise ValueError("candidate spectral radius must be non-negative")
+    if not math.isfinite(minimum_scale) or minimum_scale <= 0:
+        raise ValueError(
+            "candidate evidence minimum scale must be positive and finite"
+        )
+    spectral_width = radius * 2 + 1
+    expected_features = (
+        3 * frame_count * harmonic_count * spectral_width
+    )
+    if spectral_evidence.shape[1] != expected_features:
+        raise ValueError(
+            "candidate spectral evidence feature count does not match "
+            "the configured window"
+        )
+
+    shaped = spectral_evidence.reshape(
+        -1,
+        3,
+        frame_count,
+        harmonic_count,
+        spectral_width,
+    )
+    pre_onset_baseline = shaped[
+        :,
+        0,
+        :frames_before,
+    ].mean(dim=1, keepdim=True)
+    relative_magnitude = (
+        shaped[:, 0] - pre_onset_baseline
+    ).unsqueeze(1)
+    attack_evidence = torch.cat(
+        (
+            relative_magnitude,
+            shaped[:, 1:2],
+            shaped[:, 2:3],
+        ),
+        dim=1,
+    )
+    scales = attack_evidence.abs().amax(
+        dim=(2, 3, 4),
+        keepdim=True,
+    ).clamp_min(minimum_scale)
+    return (attack_evidence / scales).flatten(1)
 
 
 class FactorizedCandidatePositionHead(nn.Module):

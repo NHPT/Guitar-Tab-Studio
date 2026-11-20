@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import pickle
 import tempfile
@@ -54,8 +55,10 @@ from stringtrace_ml.candidate_sequence import (
     candidate_sequence_activity_audit,
     candidate_sequence_activity_loss,
     candidate_sequence_confidence_loss,
+    candidate_group_structured_objective,
     candidate_sequence_joint_loss,
     candidate_sequence_loss,
+    candidate_sequence_structured_loss,
     collate_candidate_sequence_windows,
     combine_candidate_activity_confidence_logits,
     refine_candidate_activity_logits,
@@ -91,6 +94,7 @@ from stringtrace_ml.download_guitarset import (
 )
 from stringtrace_ml.evaluate import model_identity
 from stringtrace_ml.evaluate_onset_position import (
+    BASIC_PITCH_CACHE_VERSION,
     aggregate_stage_traces,
     assign_detected_events,
     direct_pitch_onset_candidates,
@@ -108,8 +112,10 @@ from stringtrace_ml.evaluate_technique import (
 from stringtrace_ml.features import FeatureConfig
 from stringtrace_ml.import_guitarset import parse_jams
 from stringtrace_ml.import_guitar_techs import (
+    discover_recordings,
     merge_gesture_fragments,
     midi_events,
+    recording_events,
     shifted_events,
 )
 from stringtrace_ml.import_idmt_techniques import parse_idmt_annotation
@@ -164,6 +170,7 @@ from stringtrace_ml.onset_position import (
     extract_onset_patch,
     group_event_indexes,
     hierarchical_candidate_probabilities,
+    normalize_candidate_attack_evidence,
     pitch_mask,
 )
 from stringtrace_ml.onset_position_bundle import (
@@ -251,6 +258,17 @@ from stringtrace_ml.train_candidate_activity import (
 )
 from stringtrace_ml.train_candidate_sequence_activity import (
     window_sampling_plan,
+)
+from stringtrace_ml.train_candidate_sequence_v3 import (
+    EXPECTED_BASELINE,
+    candidate_cache_set_identity,
+    epoch_is_eligible,
+    epoch_selection_key,
+    run_training_epoch as run_v3_training_epoch,
+    select_v3_tracks,
+    validate_candidate_cache_set,
+    validate_epoch_zero,
+    verify_artifact_hashes,
 )
 
 
@@ -2627,6 +2645,261 @@ class StringTraceMlTest(unittest.TestCase):
             all(key[0] == "track" for key in keys if key[1] == "A")
         )
 
+    def test_v3_track_selection_excludes_p3_from_calibration(self) -> None:
+        def annotation(
+            track_id: str,
+            dataset: str,
+            group_id: str,
+        ) -> TrackAnnotation:
+            return TrackAnnotation(
+                track_id=track_id,
+                group_id=group_id,
+                audio=f"{track_id}.wav",
+                split="train",
+                duration=1.0,
+                events=[],
+                provenance={"dataset": dataset},
+            )
+
+        annotations = [
+            annotation("g00-a", "GuitarSet", "guitarset-player-00"),
+            annotation("g00-b", "GuitarSet", "guitarset-player-00"),
+            annotation("g01-a", "GuitarSet", "guitarset-player-01"),
+            annotation("g01-b", "GuitarSet", "guitarset-player-01"),
+            annotation("agpt", "AG-PT-set", "agpt-player"),
+            annotation("p1", "Guitar-TECHS", "guitar-techs-P1"),
+            annotation(
+                "synthetic",
+                "stringtrace-symbolic-synthetic",
+                "synthetic-group",
+            ),
+            annotation("p3-direct", "Guitar-TECHS", "guitar-techs-P3"),
+            annotation("p3-mic", "Guitar-TECHS", "guitar-techs-P3"),
+        ]
+
+        selection = select_v3_tracks(
+            annotations,
+            fraction=0.5,
+            seed=20261122,
+        )
+
+        self.assertEqual(
+            selection.p3_track_ids,
+            frozenset({"p3-direct", "p3-mic"}),
+        )
+        self.assertTrue(
+            selection.p3_track_ids.isdisjoint(
+                selection.calibration_track_ids
+            )
+        )
+        self.assertTrue(
+            all("guitar-techs-P3" not in key for key in selection.partition_keys)
+        )
+        gradient_annotations = [
+            item
+            for item in annotations
+            if item.track_id in selection.gradient_track_ids
+        ]
+        self.assertEqual(
+            {
+                (
+                    item.provenance["dataset"],
+                    item.group_id == "guitar-techs-P3",
+                )
+                for item in gradient_annotations
+            },
+            {("GuitarSet", False), ("Guitar-TECHS", True)},
+        )
+        self.assertFalse(
+            {"agpt", "p1", "synthetic"} & selection.gradient_track_ids
+        )
+
+    def test_v3_candidate_cache_set_identity_is_fail_closed(self) -> None:
+        with self.temporary_directory() as directory:
+            root = Path(directory)
+            cache = root / "cache"
+            cache.mkdir()
+            annotations = [
+                TrackAnnotation(
+                    track_id=f"track-{index}",
+                    group_id="guitar-techs-P3",
+                    audio=f"track-{index}.wav",
+                    split="train",
+                    duration=1.0,
+                    events=[],
+                    provenance={"dataset": "Guitar-TECHS"},
+                )
+                for index in range(2)
+            ]
+            manifest = root / "manifest.jsonl"
+            write_manifest(manifest, annotations)
+            identities: list[tuple[str, str]] = []
+            for index, annotation in enumerate(annotations):
+                audio = annotation.resolve_audio(manifest)
+                audio.touch()
+                cache_path = basic_pitch_cache_path(
+                    audio,
+                    cache,
+                    onset_threshold=0.35,
+                    frame_threshold=0.25,
+                    minimum_note_length=70.0,
+                )
+                cache_path.write_text(
+                    json.dumps(
+                        {
+                            "version": BASIC_PITCH_CACHE_VERSION,
+                            "events": [
+                                {
+                                    "onset": 0.1,
+                                    "offset": 0.2,
+                                    "pitch": 64 + index,
+                                    "confidence": 0.9,
+                                }
+                            ],
+                            "dropped": index,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                identities.append((cache_path.name, sha256_file(cache_path)))
+            digest = hashlib.sha256()
+            for name, cache_sha256 in sorted(identities):
+                digest.update(f"{name}:{cache_sha256}\n".encode())
+            expected = {
+                "audio_files": 2,
+                "events": 2,
+                "dropped": 1,
+                "cache_set_sha256": digest.hexdigest(),
+            }
+
+            actual = candidate_cache_set_identity(manifest, cache)
+
+            self.assertEqual(actual, expected)
+            validate_candidate_cache_set(actual, expected)
+            with self.assertRaisesRegex(ValueError, "cache_set_sha256"):
+                validate_candidate_cache_set(
+                    actual,
+                    {**expected, "cache_set_sha256": "0" * 64},
+                )
+
+    def test_v3_epoch_gate_and_tie_break_are_frozen(self) -> None:
+        baseline = dict(EXPECTED_BASELINE)
+        eligible = {
+            **baseline,
+            "aggregate_accuracy": (
+                float(baseline["aggregate_accuracy"]) + 0.001
+            ),
+            "aggregate_wrong_strings": (
+                int(baseline["aggregate_wrong_strings"]) - 1
+            ),
+            "agpt_accuracy": float(baseline["agpt_accuracy"]) - 0.004,
+            "guitar_techs_p1_accuracy": (
+                float(baseline["guitar_techs_p1_accuracy"]) + 0.004
+            ),
+        }
+        eligible["cross_source_macro_accuracy"] = (
+            float(eligible["agpt_accuracy"])
+            + float(eligible["guitar_techs_p1_accuracy"])
+        ) / 2
+
+        validate_epoch_zero(baseline)
+        with self.assertRaisesRegex(ValueError, "aggregate_wrong_strings"):
+            validate_epoch_zero(
+                {**baseline, "aggregate_wrong_strings": 3373}
+            )
+        self.assertTrue(epoch_is_eligible(eligible))
+        self.assertGreater(
+            epoch_selection_key(1, eligible),
+            epoch_selection_key(2, eligible),
+        )
+        self.assertFalse(
+            epoch_is_eligible(
+                {
+                    **eligible,
+                    "agpt_accuracy": (
+                        float(baseline["agpt_accuracy"]) - 0.005001
+                    ),
+                }
+            )
+        )
+        self.assertFalse(
+            epoch_is_eligible(
+                {
+                    **eligible,
+                    "aggregate_accuracy": baseline["aggregate_accuracy"],
+                }
+            )
+        )
+
+    def test_v3_training_epoch_uses_original_candidate_loss(self) -> None:
+        model = CandidateSequenceStringModel(
+            CandidateSequenceConfig(
+                sequence_length=2,
+                sequence_stride=1,
+                token_size=8,
+                hidden_size=6,
+                output_hidden_size=7,
+                dropout=0,
+            )
+        )
+        group = CandidateSequenceGroup(
+            annotation_index=0,
+            onset=0.1,
+            pitches=torch.tensor([12]),
+            confidences=torch.ones(1),
+            durations=torch.ones(1),
+            base_string_logits=torch.log_softmax(torch.randn(1, 6), dim=1),
+            valid_strings=torch.ones(1, 6, dtype=torch.bool),
+            string_targets=torch.tensor([[1.0, 0, 0, 0, 0, 0]]),
+            target_weights=torch.ones(1),
+        )
+        batch = collate_candidate_sequence_windows([[group]])
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+
+        with (
+            patch(
+                "stringtrace_ml.train_candidate_sequence_v3."
+                "candidate_sequence_loss",
+                wraps=candidate_sequence_loss,
+            ) as loss,
+            patch(
+                "stringtrace_ml.train_candidate_sequence_v3."
+                "torch.nn.utils.clip_grad_norm_",
+                wraps=torch.nn.utils.clip_grad_norm_,
+            ) as clip,
+        ):
+            metrics = run_v3_training_epoch(
+                model,
+                [batch],
+                torch.device("cpu"),
+                optimizer,
+            )
+
+        loss.assert_called_once()
+        clip.assert_called_once()
+        self.assertEqual(metrics["window_active_candidates"], 1)
+
+    def test_v3_artifact_hash_mismatch_fails_closed(self) -> None:
+        with self.temporary_directory() as directory:
+            root = Path(directory)
+            artifact = root / "artifact.json"
+            artifact.write_text('{"version": 1}\n', encoding="utf-8")
+            specs = {
+                "artifact": (
+                    artifact.name,
+                    sha256_file(artifact),
+                )
+            }
+            report = verify_artifact_hashes(root, specs)
+            self.assertEqual(
+                report["artifact"]["sha256"],
+                sha256_file(artifact),
+            )
+
+            artifact.write_text('{"version": 2}\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                verify_artifact_hashes(root, specs)
+
     def test_margin_calibration_post_assignment_uses_group_decisions(
         self,
     ) -> None:
@@ -3097,6 +3370,214 @@ class StringTraceMlTest(unittest.TestCase):
         self.assertEqual(total, 33)
         loss.backward()
         self.assertIsNotNone(model.residual_head[-1].weight.grad)
+
+    def test_structured_group_objective_scores_unique_assignments(
+        self,
+    ) -> None:
+        logits = torch.tensor(
+            [
+                [0.0, 0, 0, 0, 3.0, 0],
+                [0.0, 0, 0, 2.0, 4.0, 0],
+            ],
+            requires_grad=True,
+        )
+        targets = torch.tensor(
+            [
+                [0.0, 0, 0, 0, 1, 0],
+                [0.0, 0, 0, 1, 0, 0],
+            ]
+        )
+        loss, predictions, used_unique = (
+            candidate_group_structured_objective(
+                logits,
+                torch.ones_like(logits, dtype=torch.bool),
+                targets,
+                torch.ones(2, dtype=torch.bool),
+            )
+        )
+        assert loss is not None
+        improved_logits = logits.detach().clone()
+        improved_logits[0, 4] += 2
+        improved_logits[1, 3] += 2
+        improved_loss, _predictions, _used_unique = (
+            candidate_group_structured_objective(
+                improved_logits,
+                torch.ones_like(logits, dtype=torch.bool),
+                targets,
+                torch.ones(2, dtype=torch.bool),
+            )
+        )
+        assert improved_loss is not None
+
+        self.assertTrue(used_unique)
+        self.assertEqual(predictions.tolist(), [4, 3])
+        self.assertLess(
+            float(improved_loss.detach()),
+            float(loss.detach()),
+        )
+        loss.backward()
+        self.assertTrue(torch.isfinite(logits.grad).all())
+
+    def test_structured_group_objective_matches_large_group_fallback(
+        self,
+    ) -> None:
+        logits = torch.randn(7, 6)
+        targets = torch.nn.functional.one_hot(
+            torch.arange(7) % 6,
+            num_classes=6,
+        ).float()
+
+        loss, predictions, used_unique = (
+            candidate_group_structured_objective(
+                logits,
+                torch.ones_like(logits, dtype=torch.bool),
+                targets,
+                torch.ones(7, dtype=torch.bool),
+            )
+        )
+
+        assert loss is not None
+        self.assertFalse(used_unique)
+        self.assertTrue(torch.equal(predictions, logits.argmax(dim=1)))
+        self.assertTrue(torch.isfinite(loss))
+
+    def test_structured_group_objective_detects_reference_collision(
+        self,
+    ) -> None:
+        loss, _predictions, used_unique = (
+            candidate_group_structured_objective(
+                torch.zeros(2, 6),
+                torch.ones(2, 6, dtype=torch.bool),
+                torch.tensor(
+                    [
+                        [1.0, 0, 0, 0, 0, 0],
+                        [1.0, 0, 0, 0, 0, 0],
+                    ]
+                ),
+                torch.ones(2, dtype=torch.bool),
+            )
+        )
+
+        self.assertTrue(used_unique)
+        self.assertIsNone(loss)
+
+    def test_structured_sequence_loss_uses_frozen_activity_acceptance(
+        self,
+    ) -> None:
+        base_logits = torch.zeros(1, 1, 3, 6)
+        residuals = torch.zeros_like(base_logits, requires_grad=True)
+        targets = torch.tensor(
+            [
+                [
+                    [
+                        [0.0, 0, 0, 0, 1, 0],
+                        [0.0, 0, 0, 1, 0, 0],
+                        [0.0, 0, 1, 0, 0, 0],
+                    ]
+                ]
+            ]
+        ).reshape(1, 1, 3, 6)
+        loss, counts = candidate_sequence_structured_loss(
+            base_logits,
+            residuals,
+            targets,
+            torch.ones(1, 1, 3),
+            torch.tensor([[[1.0, 1.0, -1.0]]]),
+            torch.tensor([[[0.0, 1.0, 0.0]]]),
+            torch.ones(1, 1, 3, dtype=torch.bool),
+            torch.ones(1, 1, dtype=torch.bool),
+            torch.ones(1, 1, 3, 6, dtype=torch.bool),
+            multi_candidate_group_weight=2.0,
+            repeat_group_weight=1.5,
+        )
+
+        self.assertEqual(counts["supervised_candidates"], 2)
+        self.assertEqual(counts["groups_with_multiple_accepted"], 1)
+        self.assertEqual(counts["unique_assignment_groups"], 1)
+        self.assertNotIn("unsatisfiable_groups", counts)
+        loss.backward()
+        self.assertIsNotNone(residuals.grad)
+
+    def test_candidate_attack_evidence_removes_baseline_and_scale(
+        self,
+    ) -> None:
+        evidence = torch.tensor(
+            [
+                [
+                    2.0,
+                    4.0,
+                    4.0,
+                    8.0,
+                    6.0,
+                    12.0,
+                    1.0,
+                    2.0,
+                    2.0,
+                    4.0,
+                    3.0,
+                    6.0,
+                    -1.0,
+                    -2.0,
+                    1.0,
+                    2.0,
+                    2.0,
+                    4.0,
+                ],
+                [
+                    4.0,
+                    8.0,
+                    8.0,
+                    16.0,
+                    12.0,
+                    24.0,
+                    2.0,
+                    4.0,
+                    4.0,
+                    8.0,
+                    6.0,
+                    12.0,
+                    -2.0,
+                    -4.0,
+                    2.0,
+                    4.0,
+                    4.0,
+                    8.0,
+                ],
+            ]
+        )
+
+        normalized = normalize_candidate_attack_evidence(
+            evidence,
+            frame_count=3,
+            frames_before=1,
+            harmonic_count=2,
+            radius=0,
+        )
+
+        self.assertEqual(normalized.shape, evidence.shape)
+        self.assertTrue(
+            torch.allclose(normalized[0], normalized[1])
+        )
+        shaped = normalized[0].reshape(3, 3, 2, 1)
+        self.assertTrue(
+            torch.equal(shaped[0, 0], torch.zeros(2, 1))
+        )
+        self.assertAlmostEqual(float(shaped[0].abs().max()), 1.0)
+        self.assertAlmostEqual(float(shaped[1].abs().max()), 1.0)
+        self.assertAlmostEqual(float(shaped[2].abs().max()), 1.0)
+
+    def test_candidate_attack_evidence_validates_shape(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "feature count",
+        ):
+            normalize_candidate_attack_evidence(
+                torch.zeros(1, 17),
+                frame_count=3,
+                frames_before=1,
+                harmonic_count=2,
+                radius=0,
+            )
 
     def test_candidate_sequence_windows_cover_track_end_without_truncation(
         self,
@@ -6676,6 +7157,65 @@ class StringTraceMlTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Data leakage"):
                 load_manifest(manifest, split="train")
 
+    def test_datasets_filter_included_track_ids_before_indexing(self) -> None:
+        with self.temporary_directory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.jsonl"
+            write_manifest(
+                manifest,
+                [
+                    TrackAnnotation(
+                        track_id=track_id,
+                        group_id=track_id,
+                        audio=f"{track_id}.wav",
+                        split="train",
+                        duration=1.0,
+                        events=[
+                            LabeledEvent(
+                                onset=0.1,
+                                offset=0.2,
+                                string=1,
+                                fret=index,
+                            )
+                        ],
+                    )
+                    for index, track_id in enumerate(("first", "second"))
+                ],
+            )
+
+            track_dataset = GuitarTabDataset(
+                manifest,
+                split="train",
+                included_track_ids={"second"},
+            )
+            onset_dataset = OnsetPositionDataset(
+                manifest,
+                split="train",
+                included_track_ids={"second"},
+            )
+
+            self.assertEqual(
+                [item.track_id for item in track_dataset.annotations],
+                ["second"],
+            )
+            self.assertEqual(
+                [item.track_id for item in onset_dataset.annotations],
+                ["second"],
+            )
+            self.assertEqual(len(onset_dataset.groups), 1)
+            with self.assertRaisesRegex(ValueError, "cannot be empty"):
+                GuitarTabDataset(
+                    manifest,
+                    split="train",
+                    included_track_ids=set(),
+                )
+            with self.assertRaisesRegex(ValueError, "absent"):
+                OnsetPositionDataset(
+                    manifest,
+                    split="train",
+                    included_track_ids={"missing"},
+                )
+
     def test_dataset_keeps_repeated_same_fret_onsets(self) -> None:
         with self.temporary_directory() as directory:
             root = Path(directory)
@@ -7592,12 +8132,20 @@ class StringTraceMlTest(unittest.TestCase):
 
             events = midi_events(midi_path, "vibrato")
             shifted = shifted_events(events, -0.02, 1.0)
+            clipped = shifted_events(
+                [TechniqueEvent(0.0, 0.2, 64, 1, "pick")],
+                -0.02,
+                1.0,
+            )
 
             self.assertEqual(
                 [(event.string, event.pitch) for event in shifted],
                 [(1, 69), (6, 43)],
             )
             self.assertAlmostEqual(shifted[0].onset, 0.08)
+            self.assertEqual(len(clipped), 1)
+            self.assertEqual(clipped[0].onset, 0.0)
+            self.assertAlmostEqual(clipped[0].offset, 0.18)
             self.assertTrue(
                 all(
                     isinstance(event, TechniqueEvent)
@@ -7627,6 +8175,67 @@ class StringTraceMlTest(unittest.TestCase):
             (0.0, 0.4, 60),
         )
         self.assertEqual(merged[0].string, 3)
+
+    def test_guitar_techs_p3_preserves_polyphonic_per_string_events(
+        self,
+    ) -> None:
+        with self.temporary_directory() as directory:
+            root = Path(directory)
+            midi_directory = root / "P3_music" / "midi"
+            midi_directory.mkdir(parents=True)
+            for modality in ("directinput", "micamp"):
+                audio_directory = (
+                    root / "P3_music" / "audio" / modality
+                )
+                audio_directory.mkdir(parents=True)
+                (audio_directory / f"{modality}_01.wav").touch()
+
+            midi_path = midi_directory / "midi_01.mid"
+            midi = pretty_midi.PrettyMIDI()
+            high_e = pretty_midi.Instrument(program=0, name="e")
+            high_e.notes.append(
+                pretty_midi.Note(
+                    velocity=100,
+                    pitch=69,
+                    start=0.1,
+                    end=0.4,
+                )
+            )
+            b_string = pretty_midi.Instrument(program=0, name="B")
+            b_string.notes.append(
+                pretty_midi.Note(
+                    velocity=100,
+                    pitch=71,
+                    start=0.1,
+                    end=0.35,
+                )
+            )
+            midi.instruments.extend((high_e, b_string))
+            midi.write(str(midi_path))
+
+            recordings = discover_recordings(root, ("P3",))
+
+            self.assertEqual(len(recordings), 2)
+            self.assertEqual(
+                [recording.audio_path.parent.name for recording in recordings],
+                ["directinput", "micamp"],
+            )
+            self.assertTrue(
+                all(
+                    recording.content_type == "music"
+                    and recording.source_label == "01"
+                    and not recording.merge_gestures
+                    for recording in recordings
+                )
+            )
+            events = recording_events(recordings[0])
+            self.assertEqual(
+                [
+                    (round(event.onset, 6), event.string, event.pitch)
+                    for event in events
+                ],
+                [(0.1, 1, 69), (0.1, 2, 71)],
+            )
 
     def test_technique_dataset_extracts_fixed_event_patches(self) -> None:
         with self.temporary_directory() as directory:

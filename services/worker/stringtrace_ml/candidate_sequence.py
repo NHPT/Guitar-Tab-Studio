@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import itertools
 import math
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 import torch
@@ -1216,6 +1218,253 @@ def candidate_sequence_loss(
     ).squeeze(3) > 0
     correct = int((matches & active_mask).sum().detach().cpu())
     return loss, correct, total
+
+
+@lru_cache(maxsize=STRING_COUNT)
+def unique_string_assignments(
+    candidate_count: int,
+) -> tuple[tuple[int, ...], ...]:
+    if not 1 <= candidate_count <= STRING_COUNT:
+        raise ValueError("unique assignments require one to six candidates")
+    return tuple(
+        itertools.permutations(range(STRING_COUNT), candidate_count)
+    )
+
+
+def candidate_group_structured_objective(
+    string_logits: Tensor,
+    valid_strings: Tensor,
+    string_targets: Tensor,
+    supervised_mask: Tensor,
+) -> tuple[Tensor | None, Tensor, bool]:
+    if (
+        string_logits.ndim != 2
+        or string_logits.shape[1] != STRING_COUNT
+    ):
+        raise ValueError("group string logits must have shape [items, 6]")
+    if (
+        valid_strings.shape != string_logits.shape
+        or string_targets.shape != string_logits.shape
+        or supervised_mask.shape != string_logits.shape[:1]
+    ):
+        raise ValueError("structured group tensors must align")
+    if string_logits.shape[0] == 0:
+        raise ValueError("structured group cannot be empty")
+    if bool((~valid_strings.any(dim=1)).any()):
+        raise ValueError("every structured candidate needs a playable string")
+    target_mask = string_targets > 0
+    if bool((supervised_mask & ~target_mask.any(dim=1)).any()):
+        raise ValueError("supervised candidates need string targets")
+    if bool((target_mask & ~valid_strings).any()):
+        raise ValueError("structured string targets must be playable")
+
+    candidate_count = string_logits.shape[0]
+    if candidate_count == 1:
+        predictions = string_logits.masked_fill(
+            ~valid_strings,
+            -torch.inf,
+        ).argmax(dim=1)
+        allowed = valid_strings & (
+            ~supervised_mask.unsqueeze(1) | target_mask
+        )
+        denominator = torch.logsumexp(
+            string_logits.masked_fill(~valid_strings, -torch.inf),
+            dim=1,
+        ).sum()
+        numerator = torch.logsumexp(
+            string_logits.masked_fill(~allowed, -torch.inf),
+            dim=1,
+        ).sum()
+        return denominator - numerator, predictions, True
+    if candidate_count <= STRING_COUNT:
+        assignments = torch.tensor(
+            unique_string_assignments(candidate_count),
+            device=string_logits.device,
+            dtype=torch.long,
+        )
+        rows = torch.arange(
+            candidate_count,
+            device=string_logits.device,
+        ).unsqueeze(0)
+        feasible = valid_strings[rows, assignments].all(dim=1)
+        if bool(feasible.any()):
+            feasible_assignments = assignments[feasible]
+            feasible_scores = string_logits[
+                rows,
+                feasible_assignments,
+            ].sum(dim=1)
+            best_assignment = feasible_assignments[
+                feasible_scores.argmax()
+            ]
+            correct = (
+                ~supervised_mask.unsqueeze(0)
+                | target_mask[rows, feasible_assignments]
+            ).all(dim=1)
+            if not bool(correct.any()):
+                return None, best_assignment, True
+            loss = torch.logsumexp(feasible_scores, dim=0) - torch.logsumexp(
+                feasible_scores[correct],
+                dim=0,
+            )
+            return loss, best_assignment, True
+
+    allowed = valid_strings & (
+        ~supervised_mask.unsqueeze(1) | target_mask
+    )
+    predictions = string_logits.masked_fill(
+        ~valid_strings,
+        -torch.inf,
+    ).argmax(dim=1)
+    if bool((~allowed.any(dim=1)).any()):
+        return None, predictions, False
+    denominator = torch.logsumexp(
+        string_logits.masked_fill(~valid_strings, -torch.inf),
+        dim=1,
+    ).sum()
+    numerator = torch.logsumexp(
+        string_logits.masked_fill(~allowed, -torch.inf),
+        dim=1,
+    ).sum()
+    return denominator - numerator, predictions, False
+
+
+def candidate_sequence_structured_loss(
+    base_string_logits: Tensor,
+    string_residuals: Tensor,
+    string_targets: Tensor,
+    target_weights: Tensor,
+    base_activity_logits: Tensor,
+    repeat_targets: Tensor,
+    candidate_mask: Tensor,
+    group_mask: Tensor,
+    valid_strings: Tensor,
+    *,
+    multi_candidate_group_weight: float,
+    repeat_group_weight: float,
+) -> tuple[Tensor, dict[str, int | float]]:
+    candidate_shape = candidate_mask.shape
+    string_shape = candidate_shape + (STRING_COUNT,)
+    if (
+        base_string_logits.shape != string_shape
+        or string_residuals.shape != string_shape
+        or string_targets.shape != string_shape
+        or valid_strings.shape != string_shape
+        or target_weights.shape != candidate_shape
+        or base_activity_logits.shape != candidate_shape
+        or repeat_targets.shape != candidate_shape
+        or group_mask.shape != candidate_shape[:2]
+    ):
+        raise ValueError("structured sequence tensors must align")
+    if (
+        not math.isfinite(multi_candidate_group_weight)
+        or multi_candidate_group_weight < 1
+        or not math.isfinite(repeat_group_weight)
+        or repeat_group_weight < 1
+    ):
+        raise ValueError("structured group weights must be at least one")
+
+    refined_logits = base_string_logits + string_residuals
+    weighted_losses: list[Tensor] = []
+    loss_weights: list[float] = []
+    counts: defaultdict[str, int] = defaultdict(int)
+    for batch_index in range(candidate_shape[0]):
+        for group_index in range(candidate_shape[1]):
+            if not bool(group_mask[batch_index, group_index]):
+                continue
+            present = candidate_mask[batch_index, group_index]
+            accepted = present & (
+                base_activity_logits[batch_index, group_index] >= 0
+            )
+            accepted_indexes = torch.nonzero(
+                accepted,
+                as_tuple=False,
+            ).flatten()
+            if not accepted_indexes.numel():
+                continue
+            local_targets = string_targets[
+                batch_index,
+                group_index,
+                accepted_indexes,
+            ]
+            supervised = local_targets.sum(dim=1) > 0
+            if not bool(supervised.any()):
+                continue
+            local_repeat = repeat_targets[
+                batch_index,
+                group_index,
+                accepted_indexes,
+            ] > 0
+            group_loss, predictions, used_unique_assignment = (
+                candidate_group_structured_objective(
+                    refined_logits[
+                        batch_index,
+                        group_index,
+                        accepted_indexes,
+                    ],
+                    valid_strings[
+                        batch_index,
+                        group_index,
+                        accepted_indexes,
+                    ],
+                    local_targets,
+                    supervised,
+                )
+            )
+            matches = torch.gather(
+                local_targets > 0,
+                1,
+                predictions.unsqueeze(1),
+            ).squeeze(1)
+            supervised_matches = matches[supervised]
+            repeat_supervised = supervised & local_repeat
+            counts["supervised_groups"] += 1
+            counts["groups_with_multiple_accepted"] += int(
+                accepted_indexes.numel() > 1
+            )
+            counts["unique_assignment_groups"] += int(
+                used_unique_assignment
+            )
+            counts["fallback_independent_groups"] += int(
+                not used_unique_assignment
+            )
+            counts["supervised_candidates"] += int(supervised.sum())
+            counts["correct_candidates"] += int(
+                supervised_matches.sum().detach().cpu()
+            )
+            counts["wrong_string"] += int(
+                (~supervised_matches).sum().detach().cpu()
+            )
+            counts["exact_groups"] += int(
+                bool(supervised_matches.all())
+            )
+            counts["repeat_true_positive"] += int(
+                (matches & repeat_supervised).sum().detach().cpu()
+            )
+            counts["repeat_false_negative"] += int(
+                (~matches & repeat_supervised).sum().detach().cpu()
+            )
+            if group_loss is None:
+                counts["unsatisfiable_groups"] += 1
+                continue
+            local_weights = target_weights[
+                batch_index,
+                group_index,
+                accepted_indexes,
+            ][supervised]
+            group_weight = float(local_weights.mean().detach().cpu())
+            if accepted_indexes.numel() > 1:
+                group_weight *= multi_candidate_group_weight
+            if bool(repeat_supervised.any()):
+                group_weight *= repeat_group_weight
+            weighted_losses.append(group_loss * group_weight)
+            loss_weights.append(group_weight)
+
+    if not weighted_losses:
+        loss = string_residuals.sum() * 0
+    else:
+        loss = torch.stack(weighted_losses).sum() / sum(loss_weights)
+    counts["loss_weight_millis"] = round(sum(loss_weights) * 1000)
+    return loss, dict(counts)
 
 
 def refine_candidate_activity_logits(
