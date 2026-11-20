@@ -9,6 +9,7 @@ import torch
 
 from .candidate_activity import CandidateActivityConfig, CandidateActivityHead
 from .candidate_sequence import (
+    CandidateSequenceActivityModel,
     CandidateSequenceConfig,
     CandidateSequenceStringModel,
 )
@@ -44,6 +45,9 @@ def default_research_config() -> dict[str, object]:
             "minimum_activity_probability": 0.2,
             "minimum_repeat_probability": 0.44,
             "repeat_minimum_direct_probability": 0.45,
+            "candidate_decision": "joint",
+            "candidate_minimum_activity_probability": 0.5,
+            "candidate_minimum_string_margin": 0.0,
         },
         "supplemental_assignment": {
             "mode": "direct",
@@ -60,6 +64,9 @@ class LoadedOnsetPositionBundle:
     primary_activity_head: CandidateActivityHead
     supplemental_activity_head: CandidateActivityHead
     candidate_sequence_model: CandidateSequenceStringModel | None
+    candidate_sequence_activity_model: (
+        CandidateSequenceActivityModel | None
+    )
     feature_config: FeatureConfig
     position_config: OnsetPositionConfig
     inference_config: dict[str, object]
@@ -176,6 +183,31 @@ def _validate_sequence_checkpoint(
         )
 
 
+def _validate_sequence_activity_checkpoint(
+    checkpoint: dict[str, object],
+    *,
+    position_config: OnsetPositionConfig,
+    feature_config: FeatureConfig,
+    position_sha256: str,
+    sequence_sha256: str,
+) -> None:
+    _validate_sequence_checkpoint(
+        checkpoint,
+        position_config=position_config,
+        feature_config=feature_config,
+        position_sha256=position_sha256,
+    )
+    metadata = dict(checkpoint.get("metadata", {}))
+    string_sequence = dict(
+        metadata.get("string_sequence_checkpoint", {})
+    )
+    if string_sequence.get("sha256") != sequence_sha256:
+        raise ValueError(
+            "Candidate sequence activity targets a different string "
+            "sequence checkpoint"
+        )
+
+
 def _compatible_position_sha256s(
     checkpoint: dict[str, object],
     actual_sha256: str,
@@ -198,6 +230,7 @@ def build_research_bundle(
     *,
     version: str,
     candidate_sequence_checkpoint_path: Path | None = None,
+    candidate_sequence_activity_checkpoint_path: Path | None = None,
 ) -> dict[str, object]:
     position_path = position_checkpoint_path.resolve()
     primary_path = primary_activity_checkpoint_path.resolve()
@@ -216,6 +249,23 @@ def build_research_bundle(
     sequence_checkpoint = (
         _load_checkpoint(sequence_path, "candidate sequence")
         if sequence_path is not None
+        else None
+    )
+    sequence_activity_path = (
+        candidate_sequence_activity_checkpoint_path.resolve()
+        if candidate_sequence_activity_checkpoint_path is not None
+        else None
+    )
+    if sequence_activity_path is not None and sequence_path is None:
+        raise ValueError(
+            "Candidate sequence activity requires a string sequence checkpoint"
+        )
+    sequence_activity_checkpoint = (
+        _load_checkpoint(
+            sequence_activity_path,
+            "candidate sequence activity",
+        )
+        if sequence_activity_path is not None
         else None
     )
     position_config = OnsetPositionConfig.from_dict(
@@ -243,6 +293,15 @@ def build_research_bundle(
             feature_config=feature_config,
             position_sha256=position_sha256,
         )
+    if sequence_activity_checkpoint is not None:
+        assert sequence_path is not None
+        _validate_sequence_activity_checkpoint(
+            sequence_activity_checkpoint,
+            position_config=position_config,
+            feature_config=feature_config,
+            position_sha256=position_sha256,
+            sequence_sha256=sha256_file(sequence_path),
+        )
     _validate_activity_checkpoint(
         supplemental_checkpoint,
         name="Supplemental activity checkpoint",
@@ -269,6 +328,11 @@ def build_research_bundle(
             "name": sequence_path.name,
             "sha256": sha256_file(sequence_path),
         }
+    if sequence_activity_path is not None:
+        source_checkpoints["candidate_sequence_activity"] = {
+            "name": sequence_activity_path.name,
+            "sha256": sha256_file(sequence_activity_path),
+        }
     inference_config = default_research_config()
     if position_config.candidate_position_head:
         inference_config["assignment"] = {
@@ -293,6 +357,11 @@ def build_research_bundle(
                 **dict(inference_config["supplemental_assignment"]),
                 "minimum_direct_probability": 0.0,
             }
+    if sequence_activity_checkpoint is not None:
+        inference_config["assignment"] = {
+            **dict(inference_config["assignment"]),
+            "candidate_decision": "hierarchical",
+        }
     bundle = {
         "format_version": BUNDLE_FORMAT_VERSION,
         "kind": BUNDLE_KIND,
@@ -308,6 +377,11 @@ def build_research_bundle(
         "candidate_sequence_checkpoint": (
             _compact_sequence_checkpoint(sequence_checkpoint)
             if sequence_checkpoint is not None
+            else None
+        ),
+        "candidate_sequence_activity_checkpoint": (
+            _compact_sequence_checkpoint(sequence_activity_checkpoint)
+            if sequence_activity_checkpoint is not None
             else None
         ),
         "inference_config": inference_config,
@@ -403,6 +477,17 @@ def _validate_inference_config(value: object) -> dict[str, object]:
         "repeat_minimum_direct_probability",
     ):
         _probability(assignment.get(name), f"assignment.{name}")
+    candidate_decision = assignment.get("candidate_decision", "joint")
+    if candidate_decision not in ("joint", "hierarchical"):
+        raise ValueError("Bundle candidate decision is invalid")
+    for name, default in (
+        ("candidate_minimum_activity_probability", 0.5),
+        ("candidate_minimum_string_margin", 0.0),
+    ):
+        _probability(
+            assignment.get(name, default),
+            f"assignment.{name}",
+        )
     for name in (
         "minimum_direct_probability",
         "minimum_activity_probability",
@@ -505,6 +590,57 @@ def load_research_bundle(
         )
         candidate_sequence_model.to(device)
         candidate_sequence_model.eval()
+    sequence_activity_checkpoint_value = bundle.get(
+        "candidate_sequence_activity_checkpoint"
+    )
+    candidate_sequence_activity_model = None
+    if sequence_activity_checkpoint_value is not None:
+        if candidate_sequence_model is None:
+            raise ValueError(
+                "Embedded candidate sequence activity requires the string "
+                "sequence model"
+            )
+        sequence_identity = dict(
+            source_checkpoints.get("candidate_sequence", {})
+        )
+        sequence_sha256 = str(sequence_identity.get("sha256", ""))
+        if len(sequence_sha256) != 64:
+            raise ValueError(
+                "Bundle candidate sequence identity is invalid"
+            )
+        sequence_activity_checkpoint = dict(
+            sequence_activity_checkpoint_value
+        )
+        if int(
+            sequence_activity_checkpoint.get("format_version", 0)
+        ) != 1:
+            raise ValueError(
+                "Unsupported embedded candidate sequence activity "
+                "checkpoint format"
+            )
+        _validate_sequence_activity_checkpoint(
+            sequence_activity_checkpoint,
+            position_config=position_config,
+            feature_config=feature_config,
+            position_sha256=position_sha256,
+            sequence_sha256=sequence_sha256,
+        )
+        activity_sequence_config = CandidateSequenceConfig.from_dict(
+            dict(
+                sequence_activity_checkpoint.get(
+                    "sequence_config",
+                    {},
+                )
+            )
+        )
+        candidate_sequence_activity_model = (
+            CandidateSequenceActivityModel(activity_sequence_config)
+        )
+        candidate_sequence_activity_model.load_state_dict(
+            sequence_activity_checkpoint["model_state"]
+        )
+        candidate_sequence_activity_model.to(device)
+        candidate_sequence_activity_model.eval()
     inference_config = _validate_inference_config(
         bundle.get("inference_config")
     )
@@ -524,6 +660,9 @@ def load_research_bundle(
         primary_activity_head=primary_head,
         supplemental_activity_head=supplemental_head,
         candidate_sequence_model=candidate_sequence_model,
+        candidate_sequence_activity_model=(
+            candidate_sequence_activity_model
+        ),
         feature_config=feature_config,
         position_config=position_config,
         inference_config=inference_config,
@@ -564,6 +703,9 @@ def transcribe_with_research_bundle(
             primary_activity_head=loaded.primary_activity_head,
             supplemental_activity_head=loaded.supplemental_activity_head,
             sequence_model=loaded.candidate_sequence_model,
+            sequence_activity_model=(
+                loaded.candidate_sequence_activity_model
+            ),
             primary_minimum_activity_probability=float(
                 assignment["minimum_activity_probability"]
             ),
@@ -572,6 +714,21 @@ def transcribe_with_research_bundle(
             ),
             minimum_position_probability=float(
                 assignment["minimum_direct_probability"]
+            ),
+            candidate_decision=str(
+                assignment.get("candidate_decision", "joint")
+            ),
+            candidate_minimum_activity_probability=float(
+                assignment.get(
+                    "candidate_minimum_activity_probability",
+                    0.5,
+                )
+            ),
+            candidate_minimum_string_margin=float(
+                assignment.get(
+                    "candidate_minimum_string_margin",
+                    0.0,
+                )
             ),
             onset_tolerance=float(config["merge_onset_tolerance"]),
         )
@@ -588,6 +745,9 @@ def transcribe_with_research_bundle(
         ),
         activity_head=loaded.primary_activity_head,
         sequence_model=loaded.candidate_sequence_model,
+        sequence_activity_model=(
+            loaded.candidate_sequence_activity_model
+        ),
         minimum_activity_probability=float(
             assignment["minimum_activity_probability"]
         ),
@@ -611,6 +771,9 @@ def transcribe_with_research_bundle(
         ),
         activity_head=loaded.supplemental_activity_head,
         sequence_model=loaded.candidate_sequence_model,
+        sequence_activity_model=(
+            loaded.candidate_sequence_activity_model
+        ),
         minimum_activity_probability=float(
             supplemental_assignment["minimum_activity_probability"]
         ),
@@ -645,6 +808,10 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--candidate-sequence-checkpoint", type=Path)
+    parser.add_argument(
+        "--candidate-sequence-activity-checkpoint",
+        type=Path,
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--version", required=True)
     arguments = parser.parse_args()
@@ -657,6 +824,9 @@ def main() -> None:
             version=arguments.version,
             candidate_sequence_checkpoint_path=(
                 arguments.candidate_sequence_checkpoint
+            ),
+            candidate_sequence_activity_checkpoint_path=(
+                arguments.candidate_sequence_activity_checkpoint
             ),
         )
     )

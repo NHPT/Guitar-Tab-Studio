@@ -6,6 +6,7 @@ import hashlib
 import json
 import sys
 from argparse import Namespace
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -16,11 +17,24 @@ from .candidate_activity import (
     CandidateActivityHead,
     candidate_temporal_context,
 )
+from .candidate_margin import load_candidate_margin_calibration
 from .candidate_sequence import (
+    CandidateSequenceActivityModel,
+    CandidateSequenceConfidenceModel,
     CandidateSequenceGroup,
+    CandidateSequenceJointModel,
     CandidateSequenceStringModel,
+    combine_candidate_activity_confidence_logits,
+    infer_candidate_sequence_activity_residuals,
+    infer_candidate_sequence_confidence_logits,
+    infer_candidate_sequence_joint_residuals,
     infer_candidate_sequence_residuals,
+    load_candidate_sequence_activity_model,
+    load_candidate_sequence_confidence_model,
+    load_candidate_sequence_joint_model,
     load_candidate_sequence_model,
+    refine_candidate_activity_logits,
+    refine_candidate_joint_logits,
     refine_candidate_position_logits,
 )
 from .dataset import GuitarTabDataset
@@ -258,7 +272,11 @@ def assign_detected_events(
     candidate_decision: str = "joint",
     candidate_minimum_activity_probability: float = 0.5,
     candidate_minimum_string_margin: float = 0.0,
+    candidate_string_margin_assignment_order: str = "pre_assignment",
     sequence_model: CandidateSequenceStringModel | None = None,
+    sequence_activity_model: CandidateSequenceActivityModel | None = None,
+    sequence_joint_model: CandidateSequenceJointModel | None = None,
+    sequence_confidence_model: CandidateSequenceConfidenceModel | None = None,
     batch_size: int = 256,
     stage_trace: dict[str, int] | None = None,
 ) -> list[LabeledEvent]:
@@ -270,6 +288,14 @@ def assign_detected_events(
         )
     if not 0 <= candidate_minimum_string_margin <= 1:
         raise ValueError("minimum candidate string margin must be in 0..1")
+    if candidate_string_margin_assignment_order not in (
+        "pre_assignment",
+        "post_assignment",
+    ):
+        raise ValueError(
+            "candidate string margin assignment order must be "
+            "pre_assignment or post_assignment"
+        )
     if (
         candidate_decision == "hierarchical"
         and model_config.candidate_position_objective
@@ -286,6 +312,35 @@ def assign_detected_events(
     ):
         raise ValueError(
             "candidate sequence refinement requires spectral candidate mode"
+        )
+    if sequence_activity_model is not None and (
+        sequence_model is None
+        or candidate_decision != "hierarchical"
+    ):
+        raise ValueError(
+            "candidate sequence activity refinement requires the frozen "
+            "string sequence model and hierarchical decisions"
+        )
+    if sequence_joint_model is not None and (
+        sequence_model is None
+        or candidate_decision != "hierarchical"
+        or sequence_activity_model is not None
+    ):
+        raise ValueError(
+            "candidate sequence joint refinement requires the frozen "
+            "string sequence model, hierarchical decisions and no "
+            "separate sequence activity model"
+        )
+    if sequence_confidence_model is not None and (
+        sequence_model is None
+        or candidate_decision != "hierarchical"
+        or sequence_activity_model is not None
+        or sequence_joint_model is not None
+    ):
+        raise ValueError(
+            "candidate sequence confidence refinement requires the frozen "
+            "string sequence model, hierarchical decisions and no separate "
+            "sequence activity or joint model"
         )
     groups = group_event_indexes(
         [float(event["onset"]) for event in events],
@@ -508,9 +563,14 @@ def assign_detected_events(
     if mode == "candidate":
         if sequence_model is not None:
             sequence_groups = []
-            for grouped, candidate_logits in zip(
+            for (
+                grouped,
+                candidate_logits,
+                candidate_activity_group_logits,
+            ) in zip(
                 grouped_events,
                 candidate_logit_groups,
+                candidate_activity_logit_groups,
             ):
                 pitch_indexes = torch.tensor(
                     [
@@ -557,6 +617,13 @@ def assign_detected_events(
                             6,
                         ),
                         target_weights=torch.ones(len(grouped)),
+                        base_activity_logits=(
+                            candidate_activity_group_logits
+                            if candidate_activity_group_logits is not None
+                            else torch.zeros(len(grouped))
+                        ),
+                        activity_targets=torch.zeros(len(grouped)),
+                        repeat_targets=torch.zeros(len(grouped)),
                     )
                 )
             sequence_residuals = infer_candidate_sequence_residuals(
@@ -574,11 +641,82 @@ def assign_detected_events(
                 )
                 for logits in candidate_logit_groups
             ]
+        refined_sequence_groups = (
+            [
+                replace(
+                    group,
+                    base_string_logits=torch.log_softmax(
+                        (
+                            group.base_string_logits
+                            + sequence_residual
+                        ).masked_fill(
+                            ~group.valid_strings,
+                            -30.0,
+                        ),
+                        dim=1,
+                    ),
+                )
+                for group, sequence_residual in zip(
+                    sequence_groups,
+                    sequence_residuals,
+                )
+            ]
+            if sequence_model is not None
+            else []
+        )
+        if sequence_activity_model is not None:
+            sequence_activity_residuals = (
+                infer_candidate_sequence_activity_residuals(
+                    sequence_activity_model,
+                    refined_sequence_groups,
+                    device,
+                    batch_size=batch_size,
+                )
+            )
+        else:
+            sequence_activity_residuals = [
+                torch.zeros(logits.shape[0], dtype=logits.dtype)
+                for logits in candidate_logit_groups
+            ]
+        if sequence_joint_model is not None:
+            sequence_joint_residuals = (
+                infer_candidate_sequence_joint_residuals(
+                    sequence_joint_model,
+                    refined_sequence_groups,
+                    device,
+                    batch_size=batch_size,
+                )
+            )
+        else:
+            sequence_joint_residuals = [
+                torch.zeros(
+                    logits.shape[0],
+                    7,
+                    dtype=logits.dtype,
+                )
+                for logits in candidate_logit_groups
+            ]
+        if sequence_confidence_model is not None:
+            sequence_confidence_logits = (
+                infer_candidate_sequence_confidence_logits(
+                    sequence_confidence_model,
+                    refined_sequence_groups,
+                    device,
+                    batch_size=batch_size,
+                )
+            )
+        else:
+            sequence_confidence_logits = [
+                None for _logits in candidate_logit_groups
+            ]
         for (
             candidate_logits,
             candidate_activity_logits,
             sequence_group,
             sequence_residual,
+            sequence_activity_residual,
+            sequence_joint_residual,
+            sequence_confidence_logit,
         ) in zip(
             candidate_logit_groups,
             candidate_activity_logit_groups,
@@ -588,12 +726,55 @@ def assign_detected_events(
                 else [None] * len(candidate_logit_groups)
             ),
             sequence_residuals,
+            sequence_activity_residuals,
+            sequence_joint_residuals,
+            sequence_confidence_logits,
         ):
             if sequence_group is not None:
                 candidate_logits = refine_candidate_position_logits(
                     candidate_logits,
                     sequence_residual,
                     sequence_group.valid_strings,
+                )
+            if sequence_joint_model is not None:
+                if (
+                    candidate_activity_logits is None
+                    or sequence_group is None
+                ):
+                    raise RuntimeError(
+                        "joint sequence refinement requires activity and "
+                        "string logits"
+                    )
+                (
+                    candidate_logits,
+                    candidate_activity_logits,
+                ) = refine_candidate_joint_logits(
+                    candidate_activity_logits,
+                    candidate_logits[:, 1:],
+                    sequence_group.valid_strings,
+                    sequence_joint_residual,
+                )
+            elif sequence_confidence_model is not None:
+                if (
+                    candidate_activity_logits is None
+                    or sequence_confidence_logit is None
+                ):
+                    raise RuntimeError(
+                        "confidence sequence refinement requires activity "
+                        "and confidence logits"
+                    )
+                candidate_activity_logits = (
+                    combine_candidate_activity_confidence_logits(
+                        candidate_activity_logits,
+                        sequence_confidence_logit,
+                    )
+                )
+            elif candidate_activity_logits is not None:
+                candidate_activity_logits = (
+                    refine_candidate_activity_logits(
+                        candidate_activity_logits,
+                        sequence_activity_residual,
+                    )
                 )
             if candidate_decision == "hierarchical":
                 (
@@ -763,6 +944,9 @@ def assign_detected_events(
                     ),
                     minimum_string_margin=(
                         candidate_minimum_string_margin
+                    ),
+                    string_margin_assignment_order=(
+                        candidate_string_margin_assignment_order
                     ),
                 )
                 categorical = False
@@ -1092,7 +1276,11 @@ def assign_fused_candidate_events(
     candidate_decision: str = "joint",
     candidate_minimum_activity_probability: float = 0.5,
     candidate_minimum_string_margin: float = 0.0,
+    candidate_string_margin_assignment_order: str = "pre_assignment",
     sequence_model: CandidateSequenceStringModel | None = None,
+    sequence_activity_model: CandidateSequenceActivityModel | None = None,
+    sequence_joint_model: CandidateSequenceJointModel | None = None,
+    sequence_confidence_model: CandidateSequenceConfidenceModel | None = None,
     onset_tolerance: float = 0.05,
     stage_trace: dict[str, object] | None = None,
 ) -> list[LabeledEvent]:
@@ -1156,7 +1344,13 @@ def assign_fused_candidate_events(
             candidate_minimum_activity_probability
         ),
         candidate_minimum_string_margin=candidate_minimum_string_margin,
+        candidate_string_margin_assignment_order=(
+            candidate_string_margin_assignment_order
+        ),
         sequence_model=sequence_model,
+        sequence_activity_model=sequence_activity_model,
+        sequence_joint_model=sequence_joint_model,
+        sequence_confidence_model=sequence_confidence_model,
         stage_trace=assignment_trace,
     )
     if stage_trace is not None:
@@ -1474,9 +1668,38 @@ def build_parser() -> argparse.ArgumentParser:
             "margin used only by hierarchical candidate decisions."
         ),
     )
+    parser.add_argument(
+        "--candidate-string-margin-calibration",
+        type=Path,
+        help=(
+            "Training-only calibration artifact that supplies the frozen "
+            "candidate string margin."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-string-margin-assignment-order",
+        choices=("pre_assignment", "post_assignment"),
+        default="pre_assignment",
+        help=(
+            "Apply the string margin before or after unique-string group "
+            "assignment. Calibration artifacts override this value."
+        ),
+    )
     parser.add_argument("--adapter-scale", type=float)
     parser.add_argument("--candidate-activity-checkpoint", type=Path)
     parser.add_argument("--candidate-sequence-checkpoint", type=Path)
+    parser.add_argument(
+        "--candidate-sequence-activity-checkpoint",
+        type=Path,
+    )
+    parser.add_argument(
+        "--candidate-sequence-joint-checkpoint",
+        type=Path,
+    )
+    parser.add_argument(
+        "--candidate-sequence-confidence-checkpoint",
+        type=Path,
+    )
     parser.add_argument(
         "--supplemental-candidate-activity-checkpoint",
         type=Path,
@@ -1626,11 +1849,90 @@ def parse_arguments(arguments: list[str] | None = None) -> Namespace:
             "--candidate-decision hierarchical"
         )
     if (
+        parsed.candidate_string_margin_assignment_order
+        != "pre_assignment"
+        and (
+            parsed.mode != "candidate"
+            or parsed.candidate_decision != "hierarchical"
+        )
+    ):
+        parser.error(
+            "--candidate-string-margin-assignment-order post_assignment "
+            "requires --mode candidate --candidate-decision hierarchical"
+        )
+    if parsed.candidate_string_margin_calibration is not None:
+        incompatible = (
+            parsed.mode != "candidate"
+            or parsed.candidate_decision != "hierarchical"
+            or parsed.candidate_sequence_checkpoint is None
+            or parsed.candidate_minimum_string_margin != 0
+            or parsed.candidate_minimum_activity_probability != 0.5
+            or parsed.minimum_output_confidence != 0
+            or parsed.adapter_scale is not None
+            or parsed.candidate_activity_checkpoint is not None
+            or parsed.candidate_sequence_activity_checkpoint is not None
+            or parsed.candidate_sequence_joint_checkpoint is not None
+            or parsed.candidate_sequence_confidence_checkpoint is not None
+            or parsed.supplemental_pitch_onset_threshold is not None
+            or parsed.onset_fusion_checkpoint is not None
+        )
+        if incompatible:
+            parser.error(
+                "--candidate-string-margin-calibration requires the "
+                "frozen candidate/hierarchical string-sequence path, "
+                "default activity threshold, and no additional rejection "
+                "or candidate sources"
+            )
+    if (
         parsed.candidate_sequence_checkpoint is not None
         and parsed.mode != "candidate"
     ):
         parser.error(
             "--candidate-sequence-checkpoint requires --mode candidate"
+        )
+    if (
+        parsed.candidate_sequence_activity_checkpoint is not None
+        and (
+            parsed.candidate_sequence_checkpoint is None
+            or parsed.mode != "candidate"
+            or parsed.candidate_decision != "hierarchical"
+        )
+    ):
+        parser.error(
+            "--candidate-sequence-activity-checkpoint requires "
+            "--candidate-sequence-checkpoint, --mode candidate and "
+            "--candidate-decision hierarchical"
+        )
+    if (
+        parsed.candidate_sequence_joint_checkpoint is not None
+        and (
+            parsed.candidate_sequence_checkpoint is None
+            or parsed.mode != "candidate"
+            or parsed.candidate_decision != "hierarchical"
+            or parsed.candidate_sequence_activity_checkpoint is not None
+        )
+    ):
+        parser.error(
+            "--candidate-sequence-joint-checkpoint requires "
+            "--candidate-sequence-checkpoint, --mode candidate, "
+            "--candidate-decision hierarchical and no separate sequence "
+            "activity checkpoint"
+        )
+    if (
+        parsed.candidate_sequence_confidence_checkpoint is not None
+        and (
+            parsed.candidate_sequence_checkpoint is None
+            or parsed.mode != "candidate"
+            or parsed.candidate_decision != "hierarchical"
+            or parsed.candidate_sequence_activity_checkpoint is not None
+            or parsed.candidate_sequence_joint_checkpoint is not None
+        )
+    ):
+        parser.error(
+            "--candidate-sequence-confidence-checkpoint requires "
+            "--candidate-sequence-checkpoint, --mode candidate, "
+            "--candidate-decision hierarchical and no separate sequence "
+            "activity or joint checkpoint"
         )
     if (
         parsed.candidate_decision == "hierarchical"
@@ -1760,6 +2062,72 @@ def main() -> None:
         sequence_model, sequence_metadata = load_candidate_sequence_model(
             arguments.candidate_sequence_checkpoint,
             arguments.checkpoint,
+            model_config,
+            feature_config,
+            device,
+        )
+    margin_calibration: dict[str, object] | None = None
+    if arguments.candidate_string_margin_calibration is not None:
+        assert arguments.candidate_sequence_checkpoint is not None
+        margin_calibration = load_candidate_margin_calibration(
+            arguments.candidate_string_margin_calibration,
+            position_checkpoint_path=arguments.checkpoint,
+            string_sequence_checkpoint_path=(
+                arguments.candidate_sequence_checkpoint
+            ),
+            candidate_onset_threshold=arguments.pitch_onset_threshold,
+            candidate_frame_threshold=arguments.pitch_frame_threshold,
+            candidate_minimum_note_length=(
+                arguments.pitch_minimum_note_length
+            ),
+        )
+        arguments.candidate_minimum_string_margin = float(
+            margin_calibration["selected_threshold"]
+        )
+        arguments.candidate_string_margin_assignment_order = str(
+            margin_calibration["assignment_order"]
+        )
+    sequence_activity_model = None
+    sequence_activity_metadata: dict[str, object] = {}
+    if arguments.candidate_sequence_activity_checkpoint is not None:
+        assert arguments.candidate_sequence_checkpoint is not None
+        (
+            sequence_activity_model,
+            sequence_activity_metadata,
+        ) = load_candidate_sequence_activity_model(
+            arguments.candidate_sequence_activity_checkpoint,
+            arguments.checkpoint,
+            arguments.candidate_sequence_checkpoint,
+            model_config,
+            feature_config,
+            device,
+        )
+    sequence_joint_model = None
+    sequence_joint_metadata: dict[str, object] = {}
+    if arguments.candidate_sequence_joint_checkpoint is not None:
+        assert arguments.candidate_sequence_checkpoint is not None
+        (
+            sequence_joint_model,
+            sequence_joint_metadata,
+        ) = load_candidate_sequence_joint_model(
+            arguments.candidate_sequence_joint_checkpoint,
+            arguments.checkpoint,
+            arguments.candidate_sequence_checkpoint,
+            model_config,
+            feature_config,
+            device,
+        )
+    sequence_confidence_model = None
+    sequence_confidence_metadata: dict[str, object] = {}
+    if arguments.candidate_sequence_confidence_checkpoint is not None:
+        assert arguments.candidate_sequence_checkpoint is not None
+        (
+            sequence_confidence_model,
+            sequence_confidence_metadata,
+        ) = load_candidate_sequence_confidence_model(
+            arguments.candidate_sequence_confidence_checkpoint,
+            arguments.checkpoint,
+            arguments.candidate_sequence_checkpoint,
             model_config,
             feature_config,
             device,
@@ -1907,7 +2275,13 @@ def main() -> None:
                 candidate_minimum_string_margin=(
                     arguments.candidate_minimum_string_margin
                 ),
+                candidate_string_margin_assignment_order=(
+                    arguments.candidate_string_margin_assignment_order
+                ),
                 sequence_model=sequence_model,
+                sequence_activity_model=sequence_activity_model,
+                sequence_joint_model=sequence_joint_model,
+                sequence_confidence_model=sequence_confidence_model,
                 stage_trace=primary_assignment_trace,
             )
             primary_stage_trace["assignment"] = primary_assignment_trace
@@ -1976,7 +2350,13 @@ def main() -> None:
                     candidate_minimum_string_margin=(
                         arguments.candidate_minimum_string_margin
                     ),
+                    candidate_string_margin_assignment_order=(
+                        arguments.candidate_string_margin_assignment_order
+                    ),
                     sequence_model=sequence_model,
+                    sequence_activity_model=sequence_activity_model,
+                    sequence_joint_model=sequence_joint_model,
+                    sequence_confidence_model=sequence_confidence_model,
                     onset_tolerance=arguments.onset_tolerance,
                     stage_trace=fused_trace,
                 )
@@ -2040,7 +2420,13 @@ def main() -> None:
                     candidate_minimum_string_margin=(
                         arguments.candidate_minimum_string_margin
                     ),
+                    candidate_string_margin_assignment_order=(
+                        arguments.candidate_string_margin_assignment_order
+                    ),
                     sequence_model=sequence_model,
+                    sequence_activity_model=sequence_activity_model,
+                    sequence_joint_model=sequence_joint_model,
+                    sequence_confidence_model=sequence_confidence_model,
                     stage_trace=supplemental_assignment_trace,
                 )
                 supplemental_merge_trace: dict[str, int] = {}
@@ -2139,7 +2525,13 @@ def main() -> None:
                 candidate_minimum_string_margin=(
                     arguments.candidate_minimum_string_margin
                 ),
+                candidate_string_margin_assignment_order=(
+                    arguments.candidate_string_margin_assignment_order
+                ),
                 sequence_model=sequence_model,
+                sequence_activity_model=sequence_activity_model,
+                sequence_joint_model=sequence_joint_model,
+                sequence_confidence_model=sequence_confidence_model,
                 stage_trace=fusion_assignment_trace,
             )
             fusion_merge_trace: dict[str, int] = {}
@@ -2276,6 +2668,39 @@ def main() -> None:
             "candidate_minimum_string_margin": (
                 arguments.candidate_minimum_string_margin
             ),
+            "candidate_string_margin_assignment_order": (
+                arguments.candidate_string_margin_assignment_order
+            ),
+            "candidate_string_margin_calibration": (
+                {
+                    "artifact": {
+                        "name": (
+                            arguments
+                            .candidate_string_margin_calibration
+                            .name
+                        ),
+                        "sha256": sha256_file(
+                            arguments
+                            .candidate_string_margin_calibration
+                        ),
+                    },
+                    "version": margin_calibration.get("version"),
+                    "assignment_order": margin_calibration.get(
+                        "assignment_order"
+                    ),
+                    "training_only": margin_calibration.get(
+                        "training_only"
+                    ),
+                    "partition": margin_calibration.get("partition"),
+                    "calibration_targets": margin_calibration.get(
+                        "calibration_targets"
+                    ),
+                    "baseline": margin_calibration.get("baseline"),
+                    "selected": margin_calibration.get("selected"),
+                }
+                if margin_calibration is not None
+                else None
+            ),
             "adapter_scale": (
                 arguments.adapter_scale
                 if arguments.adapter_scale is not None
@@ -2319,6 +2744,69 @@ def main() -> None:
                     "activity_path_frozen": True,
                 }
                 if arguments.candidate_sequence_checkpoint is not None
+                else None
+            ),
+            "candidate_sequence_activity": (
+                {
+                    **sequence_activity_metadata,
+                    "checkpoint": {
+                        "name": (
+                            arguments
+                            .candidate_sequence_activity_checkpoint
+                            .name
+                        ),
+                        "sha256": sha256_file(
+                            arguments
+                            .candidate_sequence_activity_checkpoint
+                        ),
+                    },
+                }
+                if (
+                    arguments.candidate_sequence_activity_checkpoint
+                    is not None
+                )
+                else None
+            ),
+            "candidate_sequence_joint": (
+                {
+                    **sequence_joint_metadata,
+                    "checkpoint": {
+                        "name": (
+                            arguments
+                            .candidate_sequence_joint_checkpoint
+                            .name
+                        ),
+                        "sha256": sha256_file(
+                            arguments
+                            .candidate_sequence_joint_checkpoint
+                        ),
+                    },
+                }
+                if (
+                    arguments.candidate_sequence_joint_checkpoint
+                    is not None
+                )
+                else None
+            ),
+            "candidate_sequence_confidence": (
+                {
+                    **sequence_confidence_metadata,
+                    "checkpoint": {
+                        "name": (
+                            arguments
+                            .candidate_sequence_confidence_checkpoint
+                            .name
+                        ),
+                        "sha256": sha256_file(
+                            arguments
+                            .candidate_sequence_confidence_checkpoint
+                        ),
+                    },
+                }
+                if (
+                    arguments.candidate_sequence_confidence_checkpoint
+                    is not None
+                )
                 else None
             ),
             "supplemental": (

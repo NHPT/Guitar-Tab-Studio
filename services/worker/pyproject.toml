@@ -54,6 +54,9 @@ stringtrace-technique-gate = "stringtrace_ml.technique_gate:main"
 stringtrace-train-onset-position = "stringtrace_ml.train_onset_position:main"
 stringtrace-train-candidate-activity = "stringtrace_ml.train_candidate_activity:main"
 stringtrace-train-candidate-sequence = "stringtrace_ml.train_candidate_sequence:main"
+stringtrace-train-candidate-sequence-activity = "stringtrace_ml.train_candidate_sequence_activity:main"
+stringtrace-analyze-candidate-sequence-activity = "stringtrace_ml.analyze_candidate_sequence_activity:main"
+stringtrace-prepare-candidate-cache = "stringtrace_ml.prepare_candidate_cache:main"
 stringtrace-evaluate-onset-position = "stringtrace_ml.evaluate_onset_position:main"
 stringtrace-scan-candidate-none-bias = "stringtrace_ml.scan_candidate_none_bias:main"
 stringtrace-build-onset-position-bundle = "stringtrace_ml.onset_position_bundle:main"
@@ -68,6 +71,7 @@ stringtrace-compose-training-manifest = "stringtrace_ml.compose_training_manifes
 stringtrace-reference-coverage = "stringtrace_ml.reference_coverage:main"
 stringtrace-generate-synthetic = "stringtrace_ml.generate_synthetic:main"
 stringtrace-data-source-audit = "stringtrace_ml.data_sources:main"
+stringtrace-manifest-isolation = "stringtrace_ml.manifest_isolation:main"
 stringtrace-checkpoint-governance = "stringtrace_ml.checkpoint_governance:main"
 
 [build-system]

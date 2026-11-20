@@ -2619,6 +2619,7 @@ def assign_hierarchical_candidate_pitch_group(
     *,
     minimum_activity_probability: float,
     minimum_string_margin: float = 0.0,
+    string_margin_assignment_order: str = "pre_assignment",
 ) -> list[tuple[int, int] | None]:
     if activity_probabilities.shape != (len(pitches),):
         raise ValueError(
@@ -2637,6 +2638,14 @@ def assign_hierarchical_candidate_pitch_group(
         )
     if not 0 <= minimum_string_margin <= 1:
         raise ValueError("minimum candidate string margin must be in 0..1")
+    if string_margin_assignment_order not in (
+        "pre_assignment",
+        "post_assignment",
+    ):
+        raise ValueError(
+            "candidate string margin assignment order must be "
+            "pre_assignment or post_assignment"
+        )
     sorted_probabilities = np.sort(
         conditional_string_probabilities,
         axis=1,
@@ -2644,11 +2653,16 @@ def assign_hierarchical_candidate_pitch_group(
     string_margins = (
         sorted_probabilities[:, -1] - sorted_probabilities[:, -2]
     )
+    activity_accepted = (
+        activity_probabilities >= minimum_activity_probability
+    )
     accepted_indexes = np.flatnonzero(
-        (
-            activity_probabilities >= minimum_activity_probability
+        activity_accepted
+        & (
+            (string_margins >= minimum_string_margin)
+            if string_margin_assignment_order == "pre_assignment"
+            else True
         )
-        & (string_margins >= minimum_string_margin)
     )
     assignments: list[tuple[int, int] | None] = [None] * len(pitches)
     if not len(accepted_indexes):
@@ -2661,7 +2675,11 @@ def assign_hierarchical_candidate_pitch_group(
         accepted_indexes.tolist(),
         accepted_assignments,
     ):
-        assignments[event_index] = position
+        if (
+            string_margin_assignment_order == "pre_assignment"
+            or string_margins[event_index] >= minimum_string_margin
+        ):
+            assignments[event_index] = position
     return assignments
 
 

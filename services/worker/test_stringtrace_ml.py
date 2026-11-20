@@ -22,6 +22,10 @@ from stringtrace_ml.beat_reference import (
     submit_review as submit_beat_review,
     validate_review as validate_beat_review,
 )
+from stringtrace_ml.analyze_candidate_sequence_confidence import (
+    distribution_summary as confidence_distribution_summary,
+    separation_metrics as confidence_separation_metrics,
+)
 from stringtrace_ml.candidate_activity import (
     CandidateActivityConfig,
     CandidateActivityDataset,
@@ -30,12 +34,32 @@ from stringtrace_ml.candidate_activity import (
     candidate_sampling_weights,
     candidate_temporal_context,
 )
+from stringtrace_ml.candidate_margin import (
+    calibration_partition_keys,
+    candidate_string_probability_margins,
+    collect_margin_calibration_values,
+    load_candidate_margin_calibration,
+    select_margin_threshold,
+    stratified_calibration_partition,
+)
 from stringtrace_ml.candidate_sequence import (
+    CandidateSequenceActivityModel,
+    CandidateSequenceConfidenceModel,
     CandidateSequenceConfig,
     CandidateSequenceGroup,
+    CandidateSequenceJointModel,
     CandidateSequenceStringModel,
+    CandidateSequenceWindowDataset,
+    candidate_joint_log_probabilities,
+    candidate_sequence_activity_audit,
+    candidate_sequence_activity_loss,
+    candidate_sequence_confidence_loss,
+    candidate_sequence_joint_loss,
     candidate_sequence_loss,
     collate_candidate_sequence_windows,
+    combine_candidate_activity_confidence_logits,
+    refine_candidate_activity_logits,
+    refine_candidate_joint_logits,
     refine_candidate_position_logits,
     sequence_window_ranges,
 )
@@ -112,6 +136,7 @@ from stringtrace_ml.metrics import (
     evaluate_chords,
     evaluate_events,
 )
+from stringtrace_ml.manifest_isolation import audit_manifest_isolation
 from stringtrace_ml.model import (
     OPEN_STRING_PITCHES,
     PITCH_MIN,
@@ -145,6 +170,11 @@ from stringtrace_ml.onset_position_bundle import (
     BUNDLE_KIND,
     build_research_bundle,
     load_research_bundle,
+)
+from stringtrace_ml.prepare_candidate_cache import (
+    collect_candidate_audio,
+    prepare_candidate_caches,
+    validate_candidate_cache,
 )
 from stringtrace_ml.prepare_reference import export_reference
 from stringtrace_ml.prepare_guitarset_stems import (
@@ -218,6 +248,9 @@ from stringtrace_ml.train import (
 )
 from stringtrace_ml.train_candidate_activity import (
     parse_dataset_sampling_weights as parse_candidate_dataset_sampling_weights,
+)
+from stringtrace_ml.train_candidate_sequence_activity import (
+    window_sampling_plan,
 )
 
 
@@ -812,6 +845,208 @@ class StringTraceMlTest(unittest.TestCase):
             rejected["violations"],
         )
         self.assertNotIn(str(root), json.dumps(identity))
+
+    def test_manifest_isolation_detects_scoped_and_audio_overlap(self) -> None:
+        reference = TrackAnnotation(
+            track_id="train-track",
+            group_id="train-group",
+            audio="train.wav",
+            split="train",
+            duration=1.0,
+            events=[],
+            provenance={
+                "dataset": "source-a",
+                "source_id": "source-a-v1",
+                "player_id": "player-1",
+                "audio_sha256": "a" * 64,
+            },
+        )
+        isolated = TrackAnnotation(
+            track_id="validation-track",
+            group_id="validation-group",
+            audio="validation.wav",
+            split="validation",
+            duration=1.0,
+            events=[],
+            provenance={
+                "dataset": "source-b",
+                "source_id": "source-b-v1",
+                "player_id": "player-1",
+                "audio_sha256": "b" * 64,
+            },
+        )
+        overlapping = TrackAnnotation(
+            track_id="other-track",
+            group_id="other-group",
+            audio="other.wav",
+            split="validation",
+            duration=1.0,
+            events=[],
+            provenance={
+                "dataset": "source-a",
+                "source_id": "source-a-v1",
+                "player_id": "player-1",
+                "source_audio_sha256": "a" * 64,
+            },
+        )
+
+        isolated_report = audit_manifest_isolation(
+            [reference],
+            [isolated],
+        )
+        overlap_report = audit_manifest_isolation(
+            [reference],
+            [overlapping],
+        )
+
+        self.assertTrue(isolated_report["passed"])
+        self.assertFalse(overlap_report["passed"])
+        self.assertEqual(
+            overlap_report["overlaps"]["performer"]["count"],
+            1,
+        )
+        self.assertEqual(
+            overlap_report["overlaps"]["audio_sha256"]["count"],
+            1,
+        )
+
+    def test_candidate_cache_collection_deduplicates_and_limits_root(
+        self,
+    ) -> None:
+        with self.temporary_directory() as temporary:
+            root = Path(temporary)
+            audio_path = root / "shared.wav"
+            audio_path.touch()
+            manifest_path = root / "manifest.jsonl"
+            write_manifest(
+                manifest_path,
+                [
+                    TrackAnnotation(
+                        track_id="train",
+                        group_id="train",
+                        audio=audio_path.name,
+                        split="train",
+                        duration=1.0,
+                        events=[],
+                    ),
+                    TrackAnnotation(
+                        track_id="validation",
+                        group_id="validation",
+                        audio=audio_path.name,
+                        split="validation",
+                        duration=1.0,
+                        events=[],
+                    ),
+                ],
+            )
+
+            audio_paths, reports = collect_candidate_audio(
+                [manifest_path],
+                splits=frozenset({"train"}),
+                allowed_root=root,
+            )
+
+            self.assertEqual(audio_paths, [audio_path])
+            self.assertEqual(reports[0]["records"], 2)
+            self.assertEqual(reports[0]["selected_records"], 1)
+            with self.assertRaisesRegex(ValueError, "outside allowed root"):
+                collect_candidate_audio(
+                    [manifest_path],
+                    allowed_root=root / "nested",
+                )
+
+    def test_candidate_cache_validation_rejects_malformed_event(self) -> None:
+        with self.temporary_directory() as temporary:
+            cache_path = Path(temporary) / "cache.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "events": [
+                            {
+                                "onset": 0.1,
+                                "offset": 0.2,
+                                "pitch": 64,
+                                "confidence": 2.0,
+                            }
+                        ],
+                        "dropped": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "out of range"):
+                validate_candidate_cache(cache_path)
+
+    def test_candidate_cache_preparation_counts_existing_and_generated(
+        self,
+    ) -> None:
+        with self.temporary_directory() as temporary:
+            root = Path(temporary)
+            cache_directory = root / "cache"
+            cache_directory.mkdir()
+            existing_audio = root / "existing.wav"
+            generated_audio = root / "generated.wav"
+            existing_audio.touch()
+            generated_audio.touch()
+
+            def write_cache(audio_path: Path) -> Path:
+                cache_path = basic_pitch_cache_path(
+                    audio_path,
+                    cache_directory,
+                    onset_threshold=0.35,
+                    frame_threshold=0.25,
+                    minimum_note_length=70.0,
+                )
+                cache_path.write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "events": [
+                                {
+                                    "onset": 0.1,
+                                    "offset": 0.2,
+                                    "pitch": 64,
+                                    "confidence": 0.8,
+                                }
+                            ],
+                            "dropped": 1,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return cache_path
+
+            write_cache(existing_audio)
+
+            def generate(
+                audio_path: Path,
+                *_args: object,
+                **_kwargs: object,
+            ) -> tuple[list[object], int]:
+                write_cache(audio_path)
+                return [], 1
+
+            with patch(
+                "stringtrace_ml.prepare_candidate_cache.basic_pitch_events",
+                side_effect=generate,
+            ) as mocked:
+                summary = prepare_candidate_caches(
+                    [existing_audio, generated_audio],
+                    cache_directory,
+                    onset_threshold=0.35,
+                    frame_threshold=0.25,
+                    minimum_note_length=70.0,
+                )
+
+            self.assertEqual(mocked.call_count, 1)
+            self.assertEqual(summary["audio_files"], 2)
+            self.assertEqual(summary["existing"], 1)
+            self.assertEqual(summary["generated"], 1)
+            self.assertEqual(summary["events"], 2)
+            self.assertEqual(summary["dropped"], 2)
+            self.assertEqual(len(str(summary["cache_set_sha256"])), 64)
 
     def test_checkpoint_governance_requires_current_release_sources(
         self,
@@ -2015,6 +2250,791 @@ class StringTraceMlTest(unittest.TestCase):
             )
         )
 
+    def test_candidate_sequence_activity_zero_initialization_preserves_logits(
+        self,
+    ) -> None:
+        torch.manual_seed(31)
+        model = CandidateSequenceActivityModel(
+            CandidateSequenceConfig(
+                sequence_length=3,
+                sequence_stride=2,
+                token_size=8,
+                hidden_size=6,
+                output_hidden_size=7,
+                dropout=0,
+            )
+        )
+        group = CandidateSequenceGroup(
+            annotation_index=0,
+            onset=0.1,
+            pitches=torch.tensor([0, 4]),
+            confidences=torch.tensor([0.8, 0.7]),
+            durations=torch.tensor([0.2, 0.3]),
+            base_string_logits=torch.log_softmax(
+                torch.randn(2, 6),
+                dim=1,
+            ),
+            valid_strings=torch.ones(2, 6, dtype=torch.bool),
+            string_targets=torch.zeros(2, 6),
+            target_weights=torch.ones(2),
+            base_activity_logits=torch.tensor([-0.4, 0.6]),
+            activity_targets=torch.tensor([0.0, 1.0]),
+            repeat_targets=torch.tensor([0.0, 1.0]),
+        )
+        batch = collate_candidate_sequence_windows([[group]])
+        residuals = model(
+            batch["pitches"],
+            batch["confidences"],
+            batch["durations"],
+            batch["base_string_logits"],
+            batch["valid_strings"],
+            batch["base_activity_logits"],
+            batch["candidate_mask"],
+            batch["group_mask"],
+            batch["group_onsets"],
+        )
+
+        self.assertTrue(torch.equal(residuals, torch.zeros_like(residuals)))
+        self.assertTrue(
+            torch.equal(
+                refine_candidate_activity_logits(
+                    batch["base_activity_logits"],
+                    residuals,
+                ),
+                batch["base_activity_logits"],
+            )
+        )
+
+    def test_candidate_sequence_activity_loss_weights_repeated_positives(
+        self,
+    ) -> None:
+        base_logits = torch.zeros(1, 1, 2)
+        residuals = torch.zeros(1, 1, 2, requires_grad=True)
+        targets = torch.ones(1, 1, 2)
+        repeats = torch.tensor([[[0.0, 1.0]]])
+        mask = torch.ones(1, 1, 2, dtype=torch.bool)
+
+        loss, counts = candidate_sequence_activity_loss(
+            base_logits,
+            residuals,
+            targets,
+            repeats,
+            mask,
+            activity_positive_weight=1.0,
+            repeat_positive_weight=4.0,
+        )
+
+        self.assertAlmostEqual(
+            float(loss.detach()),
+            float(torch.log(torch.tensor(2.0))) * 2.5,
+            places=6,
+        )
+        self.assertEqual(counts["true_positive"], 2)
+        self.assertEqual(counts["repeat_true_positive"], 1)
+        loss.backward()
+        self.assertIsNotNone(residuals.grad)
+        assert residuals.grad is not None
+        self.assertGreater(
+            abs(float(residuals.grad[0, 0, 1])),
+            abs(float(residuals.grad[0, 0, 0])),
+        )
+
+    def test_candidate_sequence_confidence_identity_preserves_activity(
+        self,
+    ) -> None:
+        model = CandidateSequenceConfidenceModel(
+            CandidateSequenceConfig(
+                sequence_length=3,
+                sequence_stride=2,
+                token_size=8,
+                hidden_size=6,
+                output_hidden_size=7,
+                dropout=0,
+            ),
+            identity_accept_probability=0.99,
+        )
+        group = CandidateSequenceGroup(
+            annotation_index=0,
+            onset=0.1,
+            pitches=torch.tensor([0, 4]),
+            confidences=torch.tensor([0.8, 0.7]),
+            durations=torch.tensor([0.2, 0.3]),
+            base_string_logits=torch.log_softmax(
+                torch.randn(2, 6),
+                dim=1,
+            ),
+            valid_strings=torch.ones(2, 6, dtype=torch.bool),
+            string_targets=torch.zeros(2, 6),
+            target_weights=torch.ones(2),
+            base_activity_logits=torch.tensor([-0.4, 0.6]),
+            activity_targets=torch.tensor([0.0, 1.0]),
+            repeat_targets=torch.tensor([0.0, 1.0]),
+        )
+        batch = collate_candidate_sequence_windows([[group]])
+        confidence_logits = model(
+            batch["pitches"],
+            batch["confidences"],
+            batch["durations"],
+            batch["base_string_logits"],
+            batch["valid_strings"],
+            batch["base_activity_logits"],
+            batch["candidate_mask"],
+            batch["group_mask"],
+            batch["group_onsets"],
+        )
+
+        self.assertTrue(bool((confidence_logits > 0).all()))
+        self.assertTrue(
+            torch.equal(
+                combine_candidate_activity_confidence_logits(
+                    batch["base_activity_logits"],
+                    confidence_logits,
+                ),
+                batch["base_activity_logits"],
+            )
+        )
+
+    def test_candidate_sequence_confidence_loss_rejects_wrong_top_string(
+        self,
+    ) -> None:
+        base_activity_logits = torch.tensor([2.0, 2.0, 2.0, -2.0])
+        base_string_logits = torch.tensor(
+            [
+                [4.0, -4.0, -4.0, -4.0, -4.0, -4.0],
+                [-4.0, 4.0, -4.0, -4.0, -4.0, -4.0],
+                [4.0, -4.0, -4.0, -4.0, -4.0, -4.0],
+                [4.0, -4.0, -4.0, -4.0, -4.0, -4.0],
+            ]
+        )
+        valid_strings = torch.ones(4, 6, dtype=torch.bool)
+        confidence_logits = torch.tensor(
+            [2.0, -2.0, 2.0, 2.0],
+            requires_grad=True,
+        )
+        activity_targets = torch.tensor([1.0, 1.0, 0.0, 0.0])
+        string_targets = torch.tensor(
+            [
+                [1.0, 0, 0, 0, 0, 0],
+                [1.0, 0, 0, 0, 0, 0],
+                [0.0, 0, 0, 0, 0, 0],
+                [0.0, 0, 0, 0, 0, 0],
+            ]
+        )
+        repeats = torch.tensor([1.0, 0.0, 0.0, 0.0])
+        mask = torch.ones(4, dtype=torch.bool)
+
+        loss, counts = candidate_sequence_confidence_loss(
+            base_activity_logits,
+            base_string_logits,
+            valid_strings,
+            confidence_logits,
+            activity_targets,
+            string_targets,
+            repeats,
+            mask,
+            repeat_positive_weight=1.5,
+        )
+
+        self.assertEqual(counts["supervised_active"], 2)
+        self.assertEqual(counts["correctness_true_positive"], 1)
+        self.assertEqual(counts["wrong_string"], 0)
+        self.assertEqual(counts["base_wrong_string"], 1)
+        self.assertEqual(counts["joint_true_positive"], 1)
+        self.assertEqual(counts["joint_false_positive"], 1)
+        self.assertEqual(counts["joint_false_negative"], 1)
+        self.assertEqual(counts["repeat_true_positive"], 1)
+        loss.backward()
+        self.assertIsNotNone(confidence_logits.grad)
+
+        inactive_logits = torch.tensor([2.0, 2.0], requires_grad=True)
+        inactive_loss, inactive_counts = (
+            candidate_sequence_confidence_loss(
+                torch.tensor([2.0, -2.0]),
+                base_string_logits[:2],
+                valid_strings[:2],
+                inactive_logits,
+                torch.zeros(2),
+                torch.zeros(2, 6),
+                torch.zeros(2),
+                torch.ones(2, dtype=torch.bool),
+                repeat_positive_weight=1.5,
+            )
+        )
+        self.assertEqual(float(inactive_loss.detach()), 0.0)
+        self.assertEqual(inactive_counts["supervised_active"], 0)
+        self.assertEqual(inactive_counts["joint_false_positive"], 1)
+        inactive_loss.backward()
+        assert inactive_logits.grad is not None
+        self.assertTrue(torch.equal(inactive_logits.grad, torch.zeros(2)))
+
+    def test_candidate_sequence_confidence_separability_metrics(
+        self,
+    ) -> None:
+        targets = np.array([0, 0, 1, 1], dtype=np.int64)
+        separated_scores = np.array([-2.0, -1.0, 1.0, 2.0])
+
+        separated = confidence_separation_metrics(
+            targets,
+            separated_scores,
+        )
+        tied = confidence_separation_metrics(
+            targets,
+            np.zeros(4),
+        )
+        distribution = confidence_distribution_summary(
+            separated_scores,
+        )
+
+        self.assertEqual(separated["auroc"], 1.0)
+        self.assertEqual(separated["average_precision"], 1.0)
+        self.assertEqual(
+            separated["zero_threshold_correct_retention"],
+            1.0,
+        )
+        self.assertEqual(
+            separated["zero_threshold_wrong_rejection"],
+            1.0,
+        )
+        self.assertEqual(tied["auroc"], 0.5)
+        self.assertEqual(tied["average_precision"], 0.5)
+        self.assertEqual(distribution["count"], 4)
+        self.assertEqual(distribution["mean"], 0.0)
+        self.assertEqual(distribution["fraction_below_zero"], 0.5)
+
+    def test_candidate_string_probability_margin_masks_unplayable_strings(
+        self,
+    ) -> None:
+        logits = torch.log(
+            torch.tensor(
+                [
+                    [0.6, 0.4, 0.5, 0.5, 0.5, 0.5],
+                    [0.1, 0.9, 0.5, 0.5, 0.5, 0.5],
+                ]
+            )
+        )
+        valid_strings = torch.tensor(
+            [
+                [True, True, False, False, False, False],
+                [False, True, False, False, False, False],
+            ]
+        )
+
+        margins = candidate_string_probability_margins(
+            logits,
+            valid_strings,
+        )
+
+        self.assertTrue(
+            torch.allclose(margins, torch.tensor([0.2, 1.0]), atol=1e-6)
+        )
+
+    def test_margin_calibration_partition_is_grouped_and_deterministic(
+        self,
+    ) -> None:
+        annotations = [
+            TrackAnnotation(
+                track_id=f"a-{index}",
+                group_id=group_id,
+                audio=f"a-{index}.wav",
+                split="train",
+                duration=1.0,
+                events=[],
+                provenance={"dataset": dataset},
+            )
+            for index, (dataset, group_id) in enumerate(
+                [
+                    ("A", "a1"),
+                    ("A", "a1"),
+                    ("A", "a2"),
+                    ("A", "a3"),
+                    ("A", "a4"),
+                    ("B", "b1"),
+                    ("B", "b2"),
+                ]
+            )
+        ]
+
+        selected, counts = calibration_partition_keys(
+            annotations,
+            fraction=0.5,
+            seed=20261120,
+        )
+        reversed_selected, reversed_counts = calibration_partition_keys(
+            list(reversed(annotations)),
+            fraction=0.5,
+            seed=20261120,
+        )
+
+        self.assertEqual(selected, reversed_selected)
+        self.assertEqual(counts, reversed_counts)
+        self.assertEqual(
+            counts,
+            {
+                "A": {
+                    "available_groups": 4,
+                    "selected_groups": 2,
+                },
+                "B": {
+                    "available_groups": 2,
+                    "selected_groups": 1,
+                },
+            },
+        )
+        self.assertEqual(
+            Counter(dataset for dataset, _group_id in selected),
+            Counter({"A": 2, "B": 1}),
+        )
+
+    def test_margin_calibration_partition_can_stratify_tracks_by_group(
+        self,
+    ) -> None:
+        annotations = [
+            TrackAnnotation(
+                track_id=f"{group_id}-{track_index}",
+                group_id=group_id,
+                audio=f"{group_id}-{track_index}.wav",
+                split="train",
+                duration=1.0,
+                events=[],
+                provenance={"dataset": dataset},
+            )
+            for dataset, group_id, track_index in [
+                ("A", "player-1", 0),
+                ("A", "player-1", 1),
+                ("A", "player-2", 0),
+                ("A", "player-2", 1),
+                ("B", "group-1", 0),
+                ("B", "group-2", 0),
+            ]
+        ]
+
+        selected, keys, counts = stratified_calibration_partition(
+            annotations,
+            fraction=0.5,
+            seed=20261121,
+            stratify_by_group_datasets={"A"},
+        )
+
+        selected_a_groups = {
+            annotations[index].group_id
+            for index in selected
+            if annotations[index].provenance["dataset"] == "A"
+        }
+        self.assertEqual(selected_a_groups, {"player-1", "player-2"})
+        self.assertEqual(len(selected_a_groups), 2)
+        self.assertEqual(dict(counts["A"])["selected_tracks"], 2)
+        self.assertTrue(
+            all(key[0] == "track" for key in keys if key[1] == "A")
+        )
+
+    def test_margin_calibration_post_assignment_uses_group_decisions(
+        self,
+    ) -> None:
+        probabilities = torch.tensor(
+            [
+                [0.163, 0.163, 0.163, 0.163, 0.184, 0.164],
+                [0.0925, 0.0925, 0.0925, 0.30, 0.33, 0.0925],
+            ]
+        )
+        group = CandidateSequenceGroup(
+            annotation_index=0,
+            onset=0.1,
+            pitches=torch.tensor([64 - PITCH_MIN, 64 - PITCH_MIN]),
+            confidences=torch.ones(2),
+            durations=torch.ones(2),
+            base_string_logits=torch.log(probabilities),
+            valid_strings=torch.ones(2, 6, dtype=torch.bool),
+            string_targets=torch.tensor(
+                [
+                    [0.0, 0, 0, 0, 0, 0],
+                    [0.0, 0, 0, 1, 0, 0],
+                ]
+            ),
+            target_weights=torch.ones(2),
+            base_activity_logits=torch.ones(2),
+            activity_targets=torch.tensor([0.0, 1.0]),
+            repeat_targets=torch.tensor([0.0, 1.0]),
+        )
+
+        independent = collect_margin_calibration_values([group])
+        assigned = collect_margin_calibration_values(
+            [group],
+            assignment_order="post_assignment",
+        )
+
+        self.assertEqual(
+            independent["top_string_matches"].tolist(),
+            [False, False],
+        )
+        self.assertEqual(
+            assigned["top_string_matches"].tolist(),
+            [False, True],
+        )
+
+    def test_margin_calibration_selects_best_eligible_threshold(
+        self,
+    ) -> None:
+        selection = select_margin_threshold(
+            {
+                "base_activity_logits": np.ones(4),
+                "string_margins": np.array([0.9, 0.8, 0.1, 0.2]),
+                "reference_active": np.array(
+                    [True, True, True, False]
+                ),
+                "top_string_matches": np.array(
+                    [True, True, False, False]
+                ),
+                "repeated": np.array([False, True, False, False]),
+            }
+        )
+
+        self.assertTrue(selection["calibration_gate_passed"])
+        self.assertEqual(selection["eligible_thresholds"], 2)
+        selected = dict(selection["selected"])
+        self.assertAlmostEqual(float(selected["threshold"]), 0.5)
+        self.assertEqual(selected["wrong_string"], 0)
+        self.assertEqual(selected["repeat_true_positive"], 1)
+        self.assertAlmostEqual(float(selected["joint_f1"]), 0.8)
+
+    def test_margin_calibration_falls_back_when_no_threshold_is_eligible(
+        self,
+    ) -> None:
+        selection = select_margin_threshold(
+            {
+                "base_activity_logits": np.ones(2),
+                "string_margins": np.array([0.1, 0.9]),
+                "reference_active": np.array([True, True]),
+                "top_string_matches": np.array([True, False]),
+                "repeated": np.array([False, False]),
+            }
+        )
+
+        self.assertFalse(selection["calibration_gate_passed"])
+        self.assertEqual(selection["eligible_thresholds"], 0)
+        self.assertEqual(selection["selected"], selection["baseline"])
+        self.assertEqual(dict(selection["selected"])["threshold"], 0.0)
+
+    def test_margin_calibration_loader_enforces_frozen_inputs(self) -> None:
+        with self.temporary_directory() as raw_root:
+            root = Path(raw_root)
+            position_path = root / "position.pt"
+            sequence_path = root / "sequence.pt"
+            artifact_path = root / "calibration.json"
+            position_path.write_bytes(b"position")
+            sequence_path.write_bytes(b"sequence")
+            artifact = {
+                "schema_version": 1,
+                "kind": "candidate-string-margin-calibration",
+                "version": "candidate-sequence-margin-v1",
+                "training_only": True,
+                "governed_validation_used": False,
+                "cross_source_used": False,
+                "calibration_gate_passed": True,
+                "position_checkpoint": {
+                    "sha256": sha256_file(position_path),
+                },
+                "string_sequence_checkpoint": {
+                    "sha256": sha256_file(sequence_path),
+                },
+                "candidate_frontend": {
+                    "kind": "spotify-basic-pitch-0.4",
+                    "onset_threshold": 0.35,
+                    "frame_threshold": 0.25,
+                    "minimum_note_length": 70.0,
+                },
+                "selected_threshold": 0.2,
+                "selected": {
+                    "threshold": 0.2,
+                },
+            }
+            artifact_path.write_text(
+                json.dumps(artifact),
+                encoding="utf-8",
+            )
+
+            loaded = load_candidate_margin_calibration(
+                artifact_path,
+                position_checkpoint_path=position_path,
+                string_sequence_checkpoint_path=sequence_path,
+                candidate_onset_threshold=0.35,
+                candidate_frame_threshold=0.25,
+                candidate_minimum_note_length=70.0,
+            )
+            self.assertEqual(loaded["selected_threshold"], 0.2)
+
+            artifact["governed_validation_used"] = True
+            artifact_path.write_text(
+                json.dumps(artifact),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "provenance"):
+                load_candidate_margin_calibration(
+                    artifact_path,
+                    position_checkpoint_path=position_path,
+                    string_sequence_checkpoint_path=sequence_path,
+                    candidate_onset_threshold=0.35,
+                    candidate_frame_threshold=0.25,
+                    candidate_minimum_note_length=70.0,
+                )
+
+            artifact["governed_validation_used"] = False
+            artifact_path.write_text(
+                json.dumps(artifact),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "frame_threshold"):
+                load_candidate_margin_calibration(
+                    artifact_path,
+                    position_checkpoint_path=position_path,
+                    string_sequence_checkpoint_path=sequence_path,
+                    candidate_onset_threshold=0.35,
+                    candidate_frame_threshold=0.3,
+                    candidate_minimum_note_length=70.0,
+                )
+
+            artifact["position_checkpoint"]["sha256"] = "wrong"
+            artifact_path.write_text(
+                json.dumps(artifact),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "position checkpoint"):
+                load_candidate_margin_calibration(
+                    artifact_path,
+                    position_checkpoint_path=position_path,
+                    string_sequence_checkpoint_path=sequence_path,
+                    candidate_onset_threshold=0.35,
+                    candidate_frame_threshold=0.25,
+                    candidate_minimum_note_length=70.0,
+                )
+
+    def test_margin_v2_calibration_loader_enforces_assignment_semantics(
+        self,
+    ) -> None:
+        with self.temporary_directory() as raw_root:
+            root = Path(raw_root)
+            position_path = root / "position.pt"
+            sequence_path = root / "sequence.pt"
+            artifact_path = root / "calibration.json"
+            position_path.write_bytes(b"position")
+            sequence_path.write_bytes(b"sequence")
+            artifact = {
+                "schema_version": 2,
+                "kind": "candidate-string-margin-calibration",
+                "version": "candidate-sequence-margin-v2",
+                "assignment_order": "post_assignment",
+                "calibration_match_mode": (
+                    "activity_then_full_group_assignment"
+                ),
+                "training_only": True,
+                "governed_validation_used": False,
+                "cross_source_used": False,
+                "calibration_gate_passed": True,
+                "position_checkpoint": {
+                    "sha256": sha256_file(position_path),
+                },
+                "string_sequence_checkpoint": {
+                    "sha256": sha256_file(sequence_path),
+                },
+                "candidate_frontend": {
+                    "kind": "spotify-basic-pitch-0.4",
+                    "onset_threshold": 0.35,
+                    "frame_threshold": 0.25,
+                    "minimum_note_length": 70.0,
+                },
+                "selected_threshold": 0.2,
+                "selected": {"threshold": 0.2},
+            }
+            artifact_path.write_text(
+                json.dumps(artifact),
+                encoding="utf-8",
+            )
+
+            loaded = load_candidate_margin_calibration(
+                artifact_path,
+                position_checkpoint_path=position_path,
+                string_sequence_checkpoint_path=sequence_path,
+                candidate_onset_threshold=0.35,
+                candidate_frame_threshold=0.25,
+                candidate_minimum_note_length=70.0,
+            )
+            self.assertEqual(loaded["assignment_order"], "post_assignment")
+
+            artifact["assignment_order"] = "pre_assignment"
+            artifact_path.write_text(
+                json.dumps(artifact),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "assignment order"):
+                load_candidate_margin_calibration(
+                    artifact_path,
+                    position_checkpoint_path=position_path,
+                    string_sequence_checkpoint_path=sequence_path,
+                    candidate_onset_threshold=0.35,
+                    candidate_frame_threshold=0.25,
+                    candidate_minimum_note_length=70.0,
+                )
+
+    def test_candidate_sequence_joint_zero_initialization_preserves_decision(
+        self,
+    ) -> None:
+        torch.manual_seed(37)
+        model = CandidateSequenceJointModel(
+            CandidateSequenceConfig(
+                sequence_length=3,
+                sequence_stride=2,
+                token_size=8,
+                hidden_size=6,
+                output_hidden_size=7,
+                dropout=0,
+            )
+        )
+        group = CandidateSequenceGroup(
+            annotation_index=0,
+            onset=0.1,
+            pitches=torch.tensor([0, 4]),
+            confidences=torch.tensor([0.8, 0.7]),
+            durations=torch.tensor([0.2, 0.3]),
+            base_string_logits=torch.log_softmax(
+                torch.randn(2, 6),
+                dim=1,
+            ),
+            valid_strings=torch.ones(2, 6, dtype=torch.bool),
+            string_targets=torch.tensor(
+                [
+                    [1.0, 0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0, 0],
+                ]
+            ),
+            target_weights=torch.ones(2),
+            base_activity_logits=torch.tensor([0.6, -0.4]),
+            activity_targets=torch.tensor([1.0, 0.0]),
+            repeat_targets=torch.tensor([0.0, 0.0]),
+        )
+        batch = collate_candidate_sequence_windows([[group]])
+        residuals = model(
+            batch["pitches"],
+            batch["confidences"],
+            batch["durations"],
+            batch["base_string_logits"],
+            batch["valid_strings"],
+            batch["base_activity_logits"],
+            batch["candidate_mask"],
+            batch["group_mask"],
+            batch["group_onsets"],
+        )
+        base_joint = candidate_joint_log_probabilities(
+            batch["base_activity_logits"],
+            batch["base_string_logits"],
+            batch["valid_strings"],
+        )
+        refined_joint, refined_activity = refine_candidate_joint_logits(
+            batch["base_activity_logits"],
+            batch["base_string_logits"],
+            batch["valid_strings"],
+            residuals,
+        )
+
+        self.assertTrue(torch.equal(residuals, torch.zeros_like(residuals)))
+        self.assertTrue(
+            torch.allclose(base_joint, refined_joint, atol=1e-6)
+        )
+        self.assertTrue(
+            torch.allclose(
+                batch["base_activity_logits"],
+                refined_activity,
+                atol=1e-6,
+            )
+        )
+
+    def test_candidate_sequence_joint_weights_and_corrects_wrong_string(
+        self,
+    ) -> None:
+        base_activity_logits = torch.tensor([2.0, 2.0])
+        base_string_logits = torch.tensor(
+            [
+                [4.0, -4.0, -4.0, -4.0, -4.0, -4.0],
+                [-4.0, 4.0, -4.0, -4.0, -4.0, -4.0],
+            ]
+        )
+        valid_strings = torch.ones(2, 6, dtype=torch.bool)
+        activity_targets = torch.ones(2)
+        string_targets = torch.tensor(
+            [
+                [1.0, 0, 0, 0, 0, 0],
+                [1.0, 0, 0, 0, 0, 0],
+            ]
+        )
+        repeats = torch.zeros(2)
+        mask = torch.ones(2, dtype=torch.bool)
+        residuals = torch.zeros(2, 7)
+
+        unweighted_loss, baseline_counts = candidate_sequence_joint_loss(
+            base_activity_logits,
+            base_string_logits,
+            valid_strings,
+            residuals,
+            activity_targets,
+            string_targets,
+            repeats,
+            mask,
+            wrong_string_weight=1.0,
+            repeat_positive_weight=1.0,
+        )
+        weighted_loss, weighted_counts = candidate_sequence_joint_loss(
+            base_activity_logits,
+            base_string_logits,
+            valid_strings,
+            residuals,
+            activity_targets,
+            string_targets,
+            repeats,
+            mask,
+            wrong_string_weight=2.0,
+            repeat_positive_weight=1.0,
+        )
+        corrected_residuals = residuals.clone()
+        corrected_residuals[1, 1] = 12.0
+        _corrected_loss, corrected_counts = (
+            candidate_sequence_joint_loss(
+                base_activity_logits,
+                base_string_logits,
+                valid_strings,
+                corrected_residuals,
+                activity_targets,
+                string_targets,
+                repeats,
+                mask,
+                wrong_string_weight=2.0,
+                repeat_positive_weight=1.0,
+            )
+        )
+
+        self.assertEqual(baseline_counts["wrong_string"], 1)
+        self.assertEqual(weighted_counts["base_wrong_string"], 1)
+        self.assertGreater(float(weighted_loss), float(unweighted_loss))
+        self.assertEqual(corrected_counts["wrong_string"], 0)
+        self.assertEqual(corrected_counts["joint_true_positive"], 2)
+
+    def test_candidate_sequence_joint_loss_has_no_target_probability_floor(
+        self,
+    ) -> None:
+        loss, _counts = candidate_sequence_joint_loss(
+            torch.tensor([10.0]),
+            torch.tensor(
+                [[-80.0, 80.0, -80.0, -80.0, -80.0, -80.0]]
+            ),
+            torch.ones(1, 6, dtype=torch.bool),
+            torch.zeros(1, 7),
+            torch.ones(1),
+            torch.tensor([[1.0, 0, 0, 0, 0, 0]]),
+            torch.zeros(1),
+            torch.ones(1, dtype=torch.bool),
+            wrong_string_weight=1.0,
+            repeat_positive_weight=1.0,
+        )
+
+        self.assertGreater(float(loss), 100.0)
+
     def test_candidate_sequence_masks_padding_and_backpropagates(
         self,
     ) -> None:
@@ -2103,6 +3123,63 @@ class StringTraceMlTest(unittest.TestCase):
                 sequence_stride=16,
             ),
             [(0, 11)],
+        )
+
+    def test_candidate_sequence_activity_sampling_weights_windows(
+        self,
+    ) -> None:
+        def group(annotation_index: int) -> CandidateSequenceGroup:
+            return CandidateSequenceGroup(
+                annotation_index=annotation_index,
+                onset=0.1,
+                pitches=torch.tensor([0]),
+                confidences=torch.tensor([1.0]),
+                durations=torch.tensor([0.1]),
+                base_string_logits=torch.zeros(1, 6),
+                valid_strings=torch.ones(1, 6, dtype=torch.bool),
+                string_targets=torch.zeros(1, 6),
+                target_weights=torch.ones(1),
+            )
+
+        annotations = [
+            TrackAnnotation(
+                track_id="guitarset",
+                group_id="guitarset",
+                audio="guitarset.wav",
+                split="train",
+                duration=1.0,
+                events=[],
+                provenance={"dataset": "GuitarSet"},
+            ),
+            TrackAnnotation(
+                track_id="agpt",
+                group_id="agpt",
+                audio="agpt.wav",
+                split="train",
+                duration=1.0,
+                events=[],
+                provenance={"dataset": "AG-PT-set"},
+            ),
+        ]
+        windows = CandidateSequenceWindowDataset(
+            [group(0), group(1)],
+            CandidateSequenceConfig(),
+        )
+
+        weights, plan = window_sampling_plan(
+            windows,
+            annotations,
+            {"AG-PT-set": 0.5},
+        )
+
+        self.assertEqual(weights, [1.0, 0.5])
+        self.assertAlmostEqual(
+            plan["expected_dataset_share"]["AG-PT-set"],
+            1 / 3,
+        )
+        self.assertAlmostEqual(
+            plan["expected_dataset_share"]["GuitarSet"],
+            2 / 3,
         )
 
     def test_candidate_position_queries_merge_unison_targets(self) -> None:
@@ -2698,6 +3775,25 @@ class StringTraceMlTest(unittest.TestCase):
                 positive_only_dataset.filtered_negative_groups,
                 1,
             )
+            raw_audit = candidate_sequence_activity_audit(dataset)
+            governed_audit = candidate_sequence_activity_audit(
+                positive_only_dataset
+            )
+            self.assertEqual(raw_audit["totals"]["groups"], 2)
+            self.assertEqual(raw_audit["totals"]["windows"], 1)
+            self.assertEqual(
+                raw_audit["totals"]["active_candidates"],
+                1,
+            )
+            self.assertEqual(
+                raw_audit["totals"]["inactive_candidates"],
+                2,
+            )
+            self.assertEqual(governed_audit["totals"]["groups"], 1)
+            self.assertEqual(
+                governed_audit["filtered_negative_groups"],
+                1,
+            )
 
     def test_onset_position_repeat_sampling_weights_rearticulations(
         self,
@@ -3231,6 +4327,31 @@ class StringTraceMlTest(unittest.TestCase):
                 },
                 sequence_path,
             )
+            sequence_activity_path = (
+                root / "candidate-sequence-activity.pt"
+            )
+            torch.save(
+                {
+                    "format_version": 1,
+                    "model_state": CandidateSequenceActivityModel(
+                        sequence_config
+                    ).state_dict(),
+                    "sequence_config": sequence_config.to_dict(),
+                    "position_config": candidate_config.to_dict(),
+                    "feature_config": feature_config.to_dict(),
+                    "metadata": {
+                        "base_checkpoint": {
+                            "name": candidate_path.name,
+                            "sha256": sha256_file(candidate_path),
+                        },
+                        "string_sequence_checkpoint": {
+                            "name": sequence_path.name,
+                            "sha256": sha256_file(sequence_path),
+                        },
+                    },
+                },
+                sequence_activity_path,
+            )
             bundle_path = root / "candidate-bundle.pt"
 
             build_research_bundle(
@@ -3240,6 +4361,9 @@ class StringTraceMlTest(unittest.TestCase):
                 bundle_path,
                 version="candidate-v1",
                 candidate_sequence_checkpoint_path=sequence_path,
+                candidate_sequence_activity_checkpoint_path=(
+                    sequence_activity_path
+                ),
             )
             loaded = load_research_bundle(
                 bundle_path,
@@ -3254,6 +4378,39 @@ class StringTraceMlTest(unittest.TestCase):
                 "candidate",
             )
             self.assertIsNotNone(loaded.candidate_sequence_model)
+            self.assertIsNotNone(
+                loaded.candidate_sequence_activity_model
+            )
+            self.assertEqual(
+                loaded.inference_config["assignment"][
+                    "candidate_decision"
+                ],
+                "hierarchical",
+            )
+            mismatched = torch.load(
+                sequence_activity_path,
+                map_location="cpu",
+                weights_only=False,
+            )
+            mismatched["metadata"]["string_sequence_checkpoint"][
+                "sha256"
+            ] = "0" * 64
+            torch.save(mismatched, sequence_activity_path)
+            with self.assertRaisesRegex(
+                ValueError,
+                "different string sequence checkpoint",
+            ):
+                build_research_bundle(
+                    candidate_path,
+                    primary_path,
+                    supplemental_path,
+                    root / "invalid-bundle.pt",
+                    version="candidate-invalid",
+                    candidate_sequence_checkpoint_path=sequence_path,
+                    candidate_sequence_activity_checkpoint_path=(
+                        sequence_activity_path
+                    ),
+                )
 
     def test_candidate_activity_dataset_sampling_weights(
         self,
@@ -3508,6 +4665,46 @@ class StringTraceMlTest(unittest.TestCase):
 
         self.assertEqual(positions, [None, (4, 19)])
 
+    def test_hierarchical_candidate_assignment_can_mask_after_grouping(
+        self,
+    ) -> None:
+        activity = np.array([0.8, 0.8], dtype=np.float32)
+        strings = np.array(
+            [
+                [0.163, 0.163, 0.163, 0.163, 0.184, 0.164],
+                [0.0925, 0.0925, 0.0925, 0.30, 0.33, 0.0925],
+            ],
+            dtype=np.float32,
+        )
+
+        baseline = assign_hierarchical_candidate_pitch_group(
+            activity,
+            strings,
+            [64, 64],
+            minimum_activity_probability=0.5,
+            string_margin_assignment_order="post_assignment",
+        )
+        pre_assignment = assign_hierarchical_candidate_pitch_group(
+            activity,
+            strings,
+            [64, 64],
+            minimum_activity_probability=0.5,
+            minimum_string_margin=0.025,
+            string_margin_assignment_order="pre_assignment",
+        )
+        post_assignment = assign_hierarchical_candidate_pitch_group(
+            activity,
+            strings,
+            [64, 64],
+            minimum_activity_probability=0.5,
+            minimum_string_margin=0.025,
+            string_margin_assignment_order="post_assignment",
+        )
+
+        self.assertEqual(baseline, [(4, 19), (3, 14)])
+        self.assertEqual(pre_assignment, [None, (4, 19)])
+        self.assertEqual(post_assignment, [None, baseline[1]])
+
     def test_candidate_assignment_mode_uses_candidate_position_head(
         self,
     ) -> None:
@@ -3588,6 +4785,16 @@ class StringTraceMlTest(unittest.TestCase):
         sequence_model = CandidateSequenceStringModel(
             CandidateSequenceConfig(dropout=0)
         ).eval()
+        sequence_activity_model = CandidateSequenceActivityModel(
+            CandidateSequenceConfig(dropout=0)
+        ).eval()
+        sequence_joint_model = CandidateSequenceJointModel(
+            CandidateSequenceConfig(dropout=0)
+        ).eval()
+        sequence_confidence_model = CandidateSequenceConfidenceModel(
+            CandidateSequenceConfig(dropout=0),
+            identity_accept_probability=0.99,
+        ).eval()
         base_logits = torch.full((1, 6, 26), -10.0)
         base_logits[..., 0] = 10.0
         candidate_logits = torch.full((2, 7), -5.0)
@@ -3621,6 +4828,11 @@ class StringTraceMlTest(unittest.TestCase):
                 "classify_candidate_positions",
                 return_value=candidate_logits,
             ),
+            patch.object(
+                model,
+                "classify_candidate_activity",
+                return_value=torch.ones(2),
+            ),
         ):
             baseline = assign_detected_events(
                 events,
@@ -3641,8 +4853,113 @@ class StringTraceMlTest(unittest.TestCase):
                 mode="candidate",
                 sequence_model=sequence_model,
             )
+            hierarchical_baseline = assign_detected_events(
+                events,
+                features,
+                model,
+                feature_config,
+                model_config,
+                torch.device("cpu"),
+                mode="candidate",
+                candidate_decision="hierarchical",
+                sequence_model=sequence_model,
+            )
+            activity_refined = assign_detected_events(
+                events,
+                features,
+                model,
+                feature_config,
+                model_config,
+                torch.device("cpu"),
+                mode="candidate",
+                candidate_decision="hierarchical",
+                sequence_model=sequence_model,
+                sequence_activity_model=sequence_activity_model,
+            )
+            joint_refined = assign_detected_events(
+                events,
+                features,
+                model,
+                feature_config,
+                model_config,
+                torch.device("cpu"),
+                mode="candidate",
+                candidate_decision="hierarchical",
+                sequence_model=sequence_model,
+                sequence_joint_model=sequence_joint_model,
+            )
+            confidence_refined = assign_detected_events(
+                events,
+                features,
+                model,
+                feature_config,
+                model_config,
+                torch.device("cpu"),
+                mode="candidate",
+                candidate_decision="hierarchical",
+                sequence_model=sequence_model,
+                sequence_confidence_model=sequence_confidence_model,
+            )
 
         self.assertEqual(baseline, refined)
+        self.assertEqual(hierarchical_baseline, activity_refined)
+        self.assertEqual(hierarchical_baseline, joint_refined)
+        self.assertEqual(hierarchical_baseline, confidence_refined)
+
+    def test_sequence_activity_keeps_group_activity_logits_across_batches(
+        self,
+    ) -> None:
+        feature_config = FeatureConfig()
+        model_config = OnsetPositionConfig(
+            dropout=0,
+            candidate_position_head=True,
+            candidate_position_objective="spectral_residual",
+            candidate_spectral_evidence=True,
+        )
+        model = OnsetPositionNet(feature_config, model_config).eval()
+        sequence_config = CandidateSequenceConfig(dropout=0)
+        sequence_model = CandidateSequenceStringModel(
+            sequence_config
+        ).eval()
+        sequence_activity_model = CandidateSequenceActivityModel(
+            sequence_config
+        ).eval()
+        events = [
+            {
+                "onset": 0.1 + index * 0.1,
+                "offset": 0.15 + index * 0.1,
+                "pitch": 52,
+                "confidence": 0.9,
+            }
+            for index in range(33)
+        ]
+        events.append(
+            {
+                "onset": events[-1]["onset"],
+                "offset": events[-1]["offset"],
+                "pitch": 55,
+                "confidence": 0.8,
+            }
+        )
+        features = np.zeros(
+            (400, feature_config.n_bins),
+            dtype=np.float32,
+        )
+
+        predictions = assign_detected_events(
+            events,
+            features,
+            model,
+            feature_config,
+            model_config,
+            torch.device("cpu"),
+            mode="candidate",
+            candidate_decision="hierarchical",
+            sequence_model=sequence_model,
+            sequence_activity_model=sequence_activity_model,
+        )
+
+        self.assertIsInstance(predictions, list)
 
     def test_categorical_candidate_assignment_honors_none_class(
         self,
@@ -4208,6 +5525,124 @@ class StringTraceMlTest(unittest.TestCase):
             parsed.candidate_sequence_checkpoint,
             Path("sequence.pt"),
         )
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            parse_arguments(
+                [
+                    "--manifest",
+                    "manifest.jsonl",
+                    "--checkpoint",
+                    "position.pt",
+                    "--mode",
+                    "candidate",
+                    "--candidate-sequence-activity-checkpoint",
+                    "activity-sequence.pt",
+                ]
+            )
+
+        parsed_activity = parse_arguments(
+            [
+                "--manifest",
+                "manifest.jsonl",
+                "--checkpoint",
+                "position.pt",
+                "--mode",
+                "candidate",
+                "--candidate-decision",
+                "hierarchical",
+                "--candidate-sequence-checkpoint",
+                "sequence.pt",
+                "--candidate-sequence-activity-checkpoint",
+                "activity-sequence.pt",
+            ]
+        )
+        self.assertEqual(
+            parsed_activity.candidate_sequence_activity_checkpoint,
+            Path("activity-sequence.pt"),
+        )
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            parse_arguments(
+                [
+                    "--manifest",
+                    "manifest.jsonl",
+                    "--checkpoint",
+                    "position.pt",
+                    "--mode",
+                    "candidate",
+                    "--candidate-sequence-confidence-checkpoint",
+                    "confidence-sequence.pt",
+                ]
+            )
+
+        parsed_confidence = parse_arguments(
+            [
+                "--manifest",
+                "manifest.jsonl",
+                "--checkpoint",
+                "position.pt",
+                "--mode",
+                "candidate",
+                "--candidate-decision",
+                "hierarchical",
+                "--candidate-sequence-checkpoint",
+                "sequence.pt",
+                "--candidate-sequence-confidence-checkpoint",
+                "confidence-sequence.pt",
+            ]
+        )
+        self.assertEqual(
+            parsed_confidence.candidate_sequence_confidence_checkpoint,
+            Path("confidence-sequence.pt"),
+        )
+
+    def test_margin_calibration_cli_requires_frozen_candidate_path(
+        self,
+    ) -> None:
+        base_arguments = [
+            "--manifest",
+            "manifest.jsonl",
+            "--checkpoint",
+            "position.pt",
+            "--mode",
+            "candidate",
+            "--candidate-decision",
+            "hierarchical",
+            "--candidate-sequence-checkpoint",
+            "sequence.pt",
+            "--candidate-string-margin-calibration",
+            "margin.json",
+        ]
+
+        parsed = parse_arguments(base_arguments)
+        self.assertEqual(
+            parsed.candidate_string_margin_calibration,
+            Path("margin.json"),
+        )
+
+        incompatible_arguments = [
+            [
+                "--candidate-minimum-string-margin",
+                "0.1",
+            ],
+            [
+                "--candidate-minimum-activity-probability",
+                "0.6",
+            ],
+            [
+                "--candidate-sequence-confidence-checkpoint",
+                "confidence.pt",
+            ],
+            [
+                "--supplemental-pitch-onset-threshold",
+                "0.2",
+            ],
+        ]
+        for extra_arguments in incompatible_arguments:
+            with (
+                self.subTest(arguments=extra_arguments),
+                patch("sys.stderr"),
+                self.assertRaises(SystemExit),
+            ):
+                parse_arguments(base_arguments + extra_arguments)
 
     def reference_fixture(self, root: Path) -> tuple[Path, Path]:
         project_path = root / "project.json"
