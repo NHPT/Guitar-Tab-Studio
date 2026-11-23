@@ -1411,6 +1411,36 @@ removing `--audit-only`:
     docs/candidate-sequence-string-v3-preregistration.md
 ```
 
-Implementation and input-audit validation are complete. The three-epoch
-training job has not started, and no governed or cross-source v3 result has
-been read.
+The v3 run later completed and failed every training-only preservation gate,
+so it did not authorize governed or cross-source evaluation. Follow-up work
+kept the same string-v1 initialization, data boundary, objective, decoder,
+and external evaluation order while isolating the source-scale and replay
+mechanisms:
+
+- a frozen gradient audit found no stable GuitarSet/P3 conflict interval, but
+  measured a `59.6x` complete-model P3/GuitarSet mean-gradient norm ratio;
+- v4 reduced P3 sampler mass from `20%` to `1%`, but still failed the
+  training-only preservation gate;
+- v5 removed P3 and showed that replacement replay alone still drifted;
+- v6 traversed every GuitarSet window exactly once per epoch and still
+  drifted;
+- v7 added frozen module trust regions and produced the first eligible
+  checkpoint;
+- v8 retained the v7 anchor and injected exactly `33 / 33 / 34` P3 windows,
+  selecting epoch 1 with the strongest training-only result;
+- v9 replaced those P3 injections with equal-step GuitarSet replay. Its
+  selected checkpoint exactly matched v7, while the preregistered
+  matched-epoch attribution remained `mixed_inconclusive`.
+
+After v9 closed the attribution control, v8 entered the fixed external
+evaluation order. It failed the first governed GuitarSet gate: TAB F1 changed
+from `0.664778984` to `0.664674113`, same-pitch wrong strings increased from
+`1672` to `1674`, and repeated TAB recall changed from `0.619705185` to
+`0.619620468`; onset F1 remained exactly unchanged. AG-PT held-out and
+Guitar-TECHS P2 therefore remained unread.
+
+V8 is rejected for promotion and remains research-only. No runtime bundle or
+default Worker model changed. Detailed contracts and evidence are in the
+string v4-v9 preregistration/result documents and the two gradient-audit
+reports. The final external decision is recorded in
+`candidate-sequence-string-v8-promotion-result.md`.

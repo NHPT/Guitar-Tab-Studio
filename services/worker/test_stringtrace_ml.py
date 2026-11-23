@@ -270,6 +270,50 @@ from stringtrace_ml.train_candidate_sequence_v3 import (
     validate_epoch_zero,
     verify_artifact_hashes,
 )
+from stringtrace_ml.analyze_candidate_gradient_conflict import (
+    bootstrap_cosines_from_grams,
+    classify_interval,
+    cosine_from_grams,
+    extract_unit_gradient,
+    identity_sha256,
+    pair_p3_tracks,
+    parameter_modules,
+    parameters_snapshot,
+    select_guitarset_panels,
+    verify_audit_plan,
+)
+from stringtrace_ml.analyze_candidate_guitarset_partition_gradient_conflict import (
+    expand_family_bootstrap_counts,
+    recording_family_root,
+)
+from stringtrace_ml.train_candidate_sequence_v4 import (
+    P3_EXPECTED_SHARE,
+    P3_SAMPLING_WEIGHT as V4_P3_SAMPLING_WEIGHT,
+    RecordingWeightedRandomSampler,
+    expected_p3_share,
+    sampled_source_report,
+)
+from stringtrace_ml.train_candidate_sequence_v5 import (
+    P3_SAMPLING_WEIGHT as V5_P3_SAMPLING_WEIGHT,
+)
+from stringtrace_ml.train_candidate_sequence_v6 import (
+    RecordingPermutationSampler,
+    full_coverage_report,
+)
+from stringtrace_ml.train_candidate_sequence_v7 import (
+    drift_was_prevented,
+    module_displacement_norm,
+    project_modules_to_anchor,
+    virtual_adamw_update,
+)
+from stringtrace_ml.train_candidate_sequence_v8 import (
+    P3InjectionSampler,
+    p3_injection_count,
+)
+from stringtrace_ml.train_candidate_sequence_v9 import (
+    GuitarSetReplayInjectionSampler,
+    source_content_attribution,
+)
 
 
 class StringTraceMlTest(unittest.TestCase):
@@ -2899,6 +2943,679 @@ class StringTraceMlTest(unittest.TestCase):
             artifact.write_text('{"version": 2}\n', encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "hash mismatch"):
                 verify_artifact_hashes(root, specs)
+
+    def test_gradient_audit_track_panels_are_balanced_and_deterministic(
+        self,
+    ) -> None:
+        annotations = [
+            TrackAnnotation(
+                track_id=f"player-{player}-track-{track:02d}",
+                group_id=f"guitarset-player-{player:02d}",
+                audio=f"player-{player}-track-{track:02d}.wav",
+                split="train",
+                duration=1.0,
+                events=[],
+                provenance={"dataset": "GuitarSet"},
+            )
+            for player in range(4)
+            for track in range(20)
+        ]
+        eligible = {item.track_id for item in annotations}
+
+        selected, panels = select_guitarset_panels(
+            annotations,
+            eligible,
+        )
+        repeated_selected, repeated_panels = select_guitarset_panels(
+            list(reversed(annotations)),
+            eligible,
+        )
+
+        self.assertEqual(selected, repeated_selected)
+        self.assertEqual(panels, repeated_panels)
+        self.assertEqual(len(selected), 48)
+        self.assertEqual(len(identity_sha256(selected)), 64)
+        group_by_track = {
+            item.track_id: item.group_id for item in annotations
+        }
+        for panel in panels.values():
+            self.assertEqual(len(panel), 12)
+            self.assertEqual(
+                Counter(group_by_track[track_id] for track_id in panel),
+                Counter(
+                    {
+                        "guitarset-player-00": 3,
+                        "guitarset-player-01": 3,
+                        "guitarset-player-02": 3,
+                        "guitarset-player-03": 3,
+                    }
+                ),
+            )
+
+    def test_gradient_audit_pairs_p3_modalities(self) -> None:
+        annotations = [
+            TrackAnnotation(
+                track_id=f"p3-{source_label}-{modality}",
+                group_id="guitar-techs-P3",
+                audio=f"{source_label}-{modality}.wav",
+                split="train",
+                duration=1.0,
+                events=[],
+                provenance={
+                    "dataset": "Guitar-TECHS",
+                    "source_label": source_label,
+                    "audio_modality": modality,
+                },
+            )
+            for source_label in ("01", "02")
+            for modality in ("micamp", "directinput")
+        ]
+
+        pairs = pair_p3_tracks(list(reversed(annotations)))
+
+        self.assertEqual(
+            [
+                (
+                    pair.source_label,
+                    pair.direct_track_id,
+                    pair.mic_track_id,
+                )
+                for pair in pairs
+            ],
+            [
+                ("01", "p3-01-directinput", "p3-01-micamp"),
+                ("02", "p3-02-directinput", "p3-02-micamp"),
+            ],
+        )
+
+    def test_gradient_audit_module_partition_and_extraction_do_not_mutate(
+        self,
+    ) -> None:
+        model = CandidateSequenceStringModel(
+            CandidateSequenceConfig(
+                sequence_length=2,
+                sequence_stride=1,
+                token_size=8,
+                hidden_size=6,
+                output_hidden_size=7,
+                dropout=0,
+            )
+        )
+        modules = parameter_modules(model)
+        parameter_names = {
+            name for name, _parameter in model.named_parameters()
+        }
+        partitioned_names = {
+            name
+            for parameters in modules.values()
+            for name, _parameter in parameters
+        }
+        self.assertEqual(partitioned_names, parameter_names)
+        self.assertEqual(
+            sum(len(parameters) for parameters in modules.values()),
+            len(parameter_names),
+        )
+        group = CandidateSequenceGroup(
+            annotation_index=0,
+            onset=0.1,
+            pitches=torch.tensor([12]),
+            confidences=torch.ones(1),
+            durations=torch.ones(1),
+            base_string_logits=torch.log_softmax(
+                torch.randn(1, 6),
+                dim=1,
+            ),
+            valid_strings=torch.ones(1, 6, dtype=torch.bool),
+            string_targets=torch.tensor([[1.0, 0, 0, 0, 0, 0]]),
+            target_weights=torch.ones(1),
+        )
+        snapshot = parameters_snapshot(model)
+
+        unit = extract_unit_gradient(
+            model,
+            [[group]],
+            modules,
+            track_id="unit",
+            batch_size=1,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(unit.active_candidate_exposures, 1)
+        self.assertEqual(set(unit.vectors), set(modules))
+        for name, parameter in model.named_parameters():
+            self.assertTrue(torch.equal(parameter, snapshot[name]))
+
+    def test_gradient_audit_gram_bootstrap_classifies_fixed_conflict(
+        self,
+    ) -> None:
+        aa = np.ones((4, 4), dtype=np.float64)
+        bb = np.ones((3, 3), dtype=np.float64)
+        conflict_ab = -np.ones((4, 3), dtype=np.float64)
+        aligned_ab = np.ones((4, 3), dtype=np.float64)
+        rng = np.random.default_rng(20261123)
+        a_counts = rng.multinomial(
+            4,
+            np.full(4, 0.25),
+            size=100,
+        )
+        b_counts = rng.multinomial(
+            3,
+            np.full(3, 1 / 3),
+            size=100,
+        )
+
+        point, a_norm, b_norm = cosine_from_grams(
+            aa,
+            bb,
+            conflict_ab,
+            np.ones(4),
+            np.ones(3),
+        )
+        conflict = bootstrap_cosines_from_grams(
+            aa,
+            bb,
+            conflict_ab,
+            a_counts,
+            b_counts,
+        )
+        aligned = bootstrap_cosines_from_grams(
+            aa,
+            bb,
+            aligned_ab,
+            a_counts,
+            b_counts,
+        )
+
+        self.assertAlmostEqual(point, -1.0)
+        self.assertAlmostEqual(a_norm, 1.0)
+        self.assertAlmostEqual(b_norm, 1.0)
+        self.assertTrue(np.allclose(conflict, -1.0))
+        self.assertTrue(np.allclose(aligned, 1.0))
+        self.assertEqual(
+            classify_interval(
+                float(conflict.min()),
+                float(conflict.max()),
+            ),
+            "conflict",
+        )
+        self.assertEqual(
+            classify_interval(
+                float(aligned.min()),
+                float(aligned.max()),
+            ),
+            "aligned",
+        )
+        self.assertEqual(classify_interval(-0.1, 0.1), "inconclusive")
+
+    def test_gradient_audit_plan_hash_mismatch_fails_closed(self) -> None:
+        with self.temporary_directory() as directory:
+            path = Path(directory) / "plan.md"
+            path.write_text("frozen\n", encoding="utf-8")
+            expected = sha256_file(path)
+            self.assertEqual(
+                verify_audit_plan(path, expected)["sha256"],
+                expected,
+            )
+
+            path.write_text("changed\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                verify_audit_plan(path, expected)
+
+    def test_guitarset_partition_audit_preserves_recording_family_clusters(
+        self,
+    ) -> None:
+        original = TrackAnnotation(
+            track_id="player-piece",
+            group_id="player",
+            audio="original.wav",
+            split="train",
+            duration=1.0,
+            events=[],
+            provenance={"dataset": "GuitarSet"},
+        )
+        derived = TrackAnnotation(
+            track_id="player-piece-derived",
+            group_id="player",
+            audio="derived.wav",
+            split="train",
+            duration=1.0,
+            events=[],
+            provenance={
+                "dataset": "GuitarSet",
+                "derived_from_track_id": "player-piece",
+            },
+        )
+        self.assertEqual(recording_family_root(original), "player-piece")
+        self.assertEqual(recording_family_root(derived), "player-piece")
+
+        family_counts = np.asarray([[2, 0], [1, 1], [0, 2]])
+        expanded = expand_family_bootstrap_counts(
+            ("gradient-a", "gradient-b"),
+            {
+                "gradient-a": "family-a",
+                "gradient-b": "family-b",
+                "calibration-a": "family-a",
+            },
+            ("family-a", "family-b"),
+            family_counts,
+        )
+        calibration_expanded = expand_family_bootstrap_counts(
+            ("calibration-a",),
+            {
+                "gradient-a": "family-a",
+                "gradient-b": "family-b",
+                "calibration-a": "family-a",
+            },
+            ("family-a", "family-b"),
+            family_counts,
+        )
+
+        self.assertTrue(
+            np.array_equal(
+                expanded,
+                np.asarray([[2, 0], [1, 1], [0, 2]]),
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                calibration_expanded[:, 0],
+                expanded[:, 0],
+            )
+        )
+
+    def test_v4_p3_weight_produces_one_percent_sampler_mass(self) -> None:
+        share = expected_p3_share(
+            3288,
+            201,
+            V4_P3_SAMPLING_WEIGHT,
+        )
+
+        self.assertAlmostEqual(
+            share,
+            P3_EXPECTED_SHARE,
+            places=15,
+        )
+
+    def test_v4_recording_sampler_preserves_weighted_sampler_draws(
+        self,
+    ) -> None:
+        weights = [1.0, 1.0, 0.2, 0.2]
+        standard = torch.utils.data.WeightedRandomSampler(
+            weights,
+            num_samples=20,
+            replacement=True,
+            generator=torch.Generator().manual_seed(20261122),
+        )
+        recording = RecordingWeightedRandomSampler(
+            weights,
+            20,
+            generator=torch.Generator().manual_seed(20261122),
+        )
+
+        expected_indexes = list(standard)
+        actual_indexes = list(recording)
+        report = sampled_source_report(
+            recording,
+            ["GuitarSet", "GuitarSet", "Guitar-TECHS", "Guitar-TECHS"],
+        )
+
+        self.assertEqual(actual_indexes, expected_indexes)
+        self.assertEqual(recording.last_indices, expected_indexes)
+        self.assertEqual(report["draws"], 20)
+        self.assertEqual(sum(dict(report["counts"]).values()), 20)
+        self.assertAlmostEqual(sum(dict(report["shares"]).values()), 1.0)
+
+    def test_v5_zero_p3_weight_samples_only_guitarset(self) -> None:
+        weights = [1.0] * 10 + [V5_P3_SAMPLING_WEIGHT] * 2
+        sampler = RecordingWeightedRandomSampler(
+            weights,
+            100,
+            generator=torch.Generator().manual_seed(20261122),
+        )
+
+        indexes = list(sampler)
+        report = sampled_source_report(
+            sampler,
+            ["GuitarSet"] * 10 + ["Guitar-TECHS"] * 2,
+        )
+
+        self.assertTrue(all(index < 10 for index in indexes))
+        self.assertEqual(report["counts"], {"GuitarSet": 100})
+        self.assertEqual(report["shares"], {"GuitarSet": 1.0})
+
+    def test_v6_permutation_sampler_covers_each_eligible_window_once(
+        self,
+    ) -> None:
+        generator = torch.Generator().manual_seed(20261122)
+        sampler = RecordingPermutationSampler(
+            (1, 3, 4, 7),
+            generator=generator,
+        )
+
+        first_epoch = list(sampler)
+        second_epoch = list(sampler)
+
+        self.assertEqual(len(first_epoch), 4)
+        self.assertEqual(len(set(first_epoch)), 4)
+        self.assertEqual(set(first_epoch), {1, 3, 4, 7})
+        self.assertEqual(len(second_epoch), 4)
+        self.assertEqual(len(set(second_epoch)), 4)
+        self.assertEqual(set(second_epoch), {1, 3, 4, 7})
+        self.assertEqual(sampler.last_indices, second_epoch)
+        self.assertNotEqual(first_epoch, second_epoch)
+
+    def test_v6_full_coverage_report_tracks_partition_dimensions(
+        self,
+    ) -> None:
+        annotations = {
+            "original": TrackAnnotation(
+                track_id="original",
+                group_id="player-00",
+                audio="original.wav",
+                split="train",
+                duration=1.0,
+                events=[],
+                provenance={"dataset": "GuitarSet"},
+            ),
+            "derived": TrackAnnotation(
+                track_id="derived",
+                group_id="player-00",
+                audio="derived.wav",
+                split="train",
+                duration=1.0,
+                events=[],
+                provenance={
+                    "dataset": "GuitarSet",
+                    "derived_from_track_id": "original",
+                },
+            ),
+        }
+        sampler = RecordingPermutationSampler(
+            (0, 2, 3),
+            generator=torch.Generator().manual_seed(7),
+        )
+        list(sampler)
+
+        report = full_coverage_report(
+            sampler,
+            (0, 2, 3),
+            ["w0", "p3", "w2", "w3"],
+            ["GuitarSet", "Guitar-TECHS", "GuitarSet", "GuitarSet"],
+            ["original", "p3", "derived", "original"],
+            annotations,
+        )
+
+        self.assertEqual(report["draws"], 3)
+        self.assertEqual(report["unique_windows"], 3)
+        self.assertEqual(report["duplicate_draws"], 0)
+        self.assertEqual(report["omitted_eligible_windows"], 0)
+        self.assertEqual(report["unexpected_windows"], 0)
+        self.assertEqual(report["counts"], {"GuitarSet": 3})
+        self.assertEqual(report["tracks"]["count"], 2)
+        self.assertEqual(report["players"], {"player-00": 3})
+        self.assertEqual(
+            report["variants"],
+            {"derived": 1, "original": 2},
+        )
+        self.assertEqual(report["families"]["count"], 1)
+        self.assertEqual(
+            report["eligible_window_identity_sha256"],
+            report["observed_window_identity_sha256"],
+        )
+
+    def test_v7_virtual_adamw_update_uses_frozen_formula(self) -> None:
+        parameter = torch.tensor([2.0, -4.0], dtype=torch.float64)
+        gradients = {
+            "weight": torch.tensor([0.5, -0.25], dtype=torch.float64)
+        }
+
+        report = virtual_adamw_update(
+            [("weight", parameter)],
+            gradients,
+            clip_scale=0.5,
+            learning_rate=0.1,
+            epsilon=1e-8,
+            weight_decay=0.01,
+        )
+
+        clipped = gradients["weight"] * 0.5
+        adaptive = -0.1 * clipped / (clipped.abs() + 1e-8)
+        decay = -0.1 * 0.01 * parameter
+        expected = adaptive + decay
+        self.assertTrue(
+            torch.equal(report["updates"]["weight"], expected)
+        )
+        self.assertAlmostEqual(
+            report["raw_task_gradient_norm"],
+            float(torch.linalg.vector_norm(gradients["weight"])),
+        )
+        self.assertAlmostEqual(
+            report["clipped_task_gradient_norm"],
+            float(torch.linalg.vector_norm(clipped)),
+        )
+        self.assertAlmostEqual(
+            report["virtual_update_norm"],
+            float(torch.linalg.vector_norm(expected)),
+        )
+
+    def test_v7_projects_each_module_without_touching_other_module(
+        self,
+    ) -> None:
+        first = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
+        second = torch.nn.Parameter(torch.tensor([0.3, 0.4]))
+        modules = {
+            "first": [("first.weight", first)],
+            "second": [("second.weight", second)],
+        }
+        anchor = {
+            "first.weight": torch.zeros(2),
+            "second.weight": torch.zeros(2),
+        }
+
+        report = project_modules_to_anchor(
+            modules,
+            anchor,
+            {"first": 2.0, "second": 1.0},
+        )
+
+        self.assertTrue(report["first"]["projected"])
+        self.assertFalse(report["second"]["projected"])
+        self.assertAlmostEqual(
+            module_displacement_norm(modules["first"], anchor),
+            2.0,
+            places=6,
+        )
+        self.assertTrue(torch.equal(second, torch.tensor([0.3, 0.4])))
+
+    def test_v7_projection_refines_float32_rounding_at_nonzero_anchor(
+        self,
+    ) -> None:
+        generator = torch.Generator().manual_seed(7)
+        center = torch.randn(20_000, generator=generator)
+        parameter = torch.nn.Parameter(
+            center + torch.randn(20_000, generator=generator) * 0.01
+        )
+        modules = {"module": [("module.weight", parameter)]}
+        anchor = {"module.weight": center.clone()}
+        radius = 0.0035978438540137402
+
+        report = project_modules_to_anchor(
+            modules,
+            anchor,
+            {"module": radius},
+        )
+
+        tolerance = max(1e-12, radius * 1e-6)
+        self.assertTrue(report["module"]["projected"])
+        self.assertLessEqual(
+            module_displacement_norm(modules["module"], anchor),
+            radius + tolerance,
+        )
+
+    def test_v7_drift_gate_allows_equality_but_not_single_regression(
+        self,
+    ) -> None:
+        baseline = {
+            "aggregate_accuracy": 0.8,
+            "aggregate_wrong_strings": 20,
+            "repeat_true_positive": 12,
+            "guitarset_accuracy": 0.9,
+            "agpt_accuracy": 0.5,
+            "guitar_techs_p1_accuracy": 0.4,
+            "cross_source_macro_accuracy": 0.45,
+        }
+
+        self.assertTrue(drift_was_prevented(dict(baseline), baseline))
+        regressed = dict(baseline)
+        regressed["agpt_accuracy"] = 0.499
+        self.assertFalse(drift_was_prevented(regressed, baseline))
+
+    def test_v8_p3_injection_uses_frozen_error_balanced_schedule(
+        self,
+    ) -> None:
+        schedule = [p3_injection_count(epoch) for epoch in range(1, 4)]
+
+        self.assertEqual(schedule, [33, 33, 34])
+        self.assertEqual(sum(schedule), 100)
+        self.assertAlmostEqual(
+            sum(schedule) / (3 * 3288 + sum(schedule)),
+            0.010036130068245684,
+        )
+
+    def test_v8_p3_injection_preserves_v7_guitarset_permutations(
+        self,
+    ) -> None:
+        guitarset_indices = tuple(range(3288))
+        p3_indices = tuple(range(4000, 4201))
+        injection = P3InjectionSampler(
+            guitarset_indices,
+            p3_indices,
+            guitarset_generator=torch.Generator().manual_seed(20261122),
+            p3_generator=torch.Generator().manual_seed(20261123),
+        )
+        v7 = RecordingPermutationSampler(
+            guitarset_indices,
+            generator=torch.Generator().manual_seed(20261122),
+        )
+
+        for expected_p3 in (33, 33, 34):
+            combined = list(injection)
+            v7_order = list(v7)
+
+            self.assertEqual(
+                injection.last_guitarset_indices,
+                v7_order,
+            )
+            self.assertEqual(
+                len(injection.last_p3_indices),
+                expected_p3,
+            )
+            self.assertEqual(
+                len(set(injection.last_p3_indices)),
+                expected_p3,
+            )
+            self.assertTrue(
+                set(injection.last_p3_indices).issubset(p3_indices)
+            )
+            self.assertEqual(
+                len(combined),
+                len(guitarset_indices) + expected_p3,
+            )
+            self.assertEqual(
+                [
+                    index
+                    for index in combined
+                    if index in set(guitarset_indices)
+                ],
+                v7_order,
+            )
+
+    def test_v9_equal_step_control_matches_v8_positions_and_base_order(
+        self,
+    ) -> None:
+        guitarset_indices = tuple(range(3288))
+        p3_indices = tuple(range(4000, 4201))
+        v8 = P3InjectionSampler(
+            guitarset_indices,
+            p3_indices,
+            guitarset_generator=torch.Generator().manual_seed(20261122),
+            p3_generator=torch.Generator().manual_seed(20261123),
+        )
+        v9 = GuitarSetReplayInjectionSampler(
+            guitarset_indices,
+            base_generator=torch.Generator().manual_seed(20261122),
+            injection_generator=torch.Generator().manual_seed(20261123),
+        )
+        p3_set = set(p3_indices)
+
+        for expected_injected in (33, 33, 34):
+            v8_combined = list(v8)
+            v9_combined = list(v9)
+            base_position = 0
+            v8_insertion_positions = []
+            for index in v8_combined:
+                if index in p3_set:
+                    v8_insertion_positions.append(base_position)
+                else:
+                    base_position += 1
+
+            self.assertEqual(
+                v9.last_base_indices,
+                v8.last_guitarset_indices,
+            )
+            self.assertEqual(
+                v9.last_insertion_positions,
+                v8_insertion_positions,
+            )
+            self.assertEqual(
+                len(v9.last_injected_indices),
+                expected_injected,
+            )
+            self.assertEqual(
+                len(set(v9.last_injected_indices)),
+                expected_injected,
+            )
+            self.assertTrue(
+                set(v9.last_injected_indices).issubset(
+                    guitarset_indices
+                )
+            )
+            self.assertEqual(len(v9_combined), len(v8_combined))
+
+    def test_v9_source_attribution_uses_frozen_pareto_rule(self) -> None:
+        v8 = {
+            "aggregate_accuracy": 0.81,
+            "aggregate_wrong_strings": 100,
+            "repeat_true_positive": 50,
+            "guitarset_accuracy": 0.96,
+            "agpt_accuracy": 0.46,
+            "guitar_techs_p1_accuracy": 0.44,
+            "cross_source_macro_accuracy": 0.45,
+        }
+        v9_worse = dict(v8)
+        v9_worse["aggregate_accuracy"] = 0.80
+        v9_better = dict(v8)
+        v9_better["aggregate_wrong_strings"] = 99
+        mixed = dict(v8)
+        mixed["aggregate_accuracy"] = 0.82
+        mixed["repeat_true_positive"] = 49
+
+        self.assertEqual(
+            source_content_attribution(v8, v9_worse),
+            "p3_content_advantage",
+        )
+        self.assertEqual(
+            source_content_attribution(v8, v9_better),
+            "extra_steps_sufficient",
+        )
+        self.assertEqual(
+            source_content_attribution(v8, mixed),
+            "mixed_inconclusive",
+        )
+        self.assertEqual(
+            source_content_attribution(v8, dict(v8)),
+            "extra_steps_sufficient",
+        )
 
     def test_margin_calibration_post_assignment_uses_group_decisions(
         self,
