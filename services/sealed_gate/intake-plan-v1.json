@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "kind": "sealed-evaluation-intake-plan",
+  "target_works": 100,
+  "minimum_duration_seconds": 30,
+  "performer_batches": [
+    {
+      "batch_id": "performer-slot-01",
+      "work_slots": 20,
+      "capture_quota": {
+        "microphone": 10,
+        "pickup": 10
+      },
+      "nonzero_capo_minimum": 4
+    },
+    {
+      "batch_id": "performer-slot-02",
+      "work_slots": 20,
+      "capture_quota": {
+        "microphone": 10,
+        "pickup": 10
+      },
+      "nonzero_capo_minimum": 4
+    },
+    {
+      "batch_id": "performer-slot-03",
+      "work_slots": 20,
+      "capture_quota": {
+        "microphone": 10,
+        "pickup": 10
+      },
+      "nonzero_capo_minimum": 4
+    },
+    {
+      "batch_id": "performer-slot-04",
+      "work_slots": 20,
+      "capture_quota": {
+        "microphone": 10,
+        "pickup": 10
+      },
+      "nonzero_capo_minimum": 4
+    },
+    {
+      "batch_id": "performer-slot-05",
+      "work_slots": 20,
+      "capture_quota": {
+        "microphone": 10,
+        "pickup": 10
+      },
+      "nonzero_capo_minimum": 4
+    }
+  ],
+  "global_quota": {
+    "guitars_minimum": 3,
+    "pickup_identities_minimum": 2,
+    "microphone_identities_minimum": 1,
+    "tempo_buckets": {
+      "slow_below_90_bpm": 25,
+      "medium_90_to_129_bpm": 50,
+      "fast_130_bpm_or_above": 25
+    },
+    "known_techniques_minimum": 3,
+    "open_position_works_minimum": 80,
+    "nonzero_capo_works_minimum": 20
+  },
+  "counting_rule": "A slot counts only after rights, audio, tablature, identity, diversity and isolation checks pass.",
+  "selection_rule": "Works are assigned before any candidate model is run and may not be selected from model errors."
+}

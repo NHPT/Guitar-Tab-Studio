@@ -1,0 +1,19 @@
+{
+  "response": {
+    "numFound": 2,
+    "docs": [
+      {
+        "identifier": "open-guitar-item",
+        "title": "Open Guitar Archive",
+        "creator": "Archive Artist",
+        "licenseurl": "https://creativecommons.org/publicdomain/zero/1.0/"
+      },
+      {
+        "identifier": "research-guitar-item",
+        "title": "Research Guitar Archive",
+        "creator": ["Artist One", "Artist Two"],
+        "licenseurl": "https://creativecommons.org/licenses/by-nc-sa/3.0/"
+      }
+    ]
+  }
+}

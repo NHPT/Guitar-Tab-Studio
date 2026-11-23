@@ -1,0 +1,44 @@
+# Every manifest that has participated in training, calibration, evaluation,
+# review selection, error analysis, or model design. Paths are relative to
+# this file. Add new manifests before using their contents anywhere outside
+# the sealed gate.
+../../apps/api/data/training/ag-pt-set/technique-manifest.jsonl
+../../apps/api/data/training/candidate-activity-manual-v22/manifest.jsonl
+../../apps/api/data/training/cross-source-mixture-stem-v4/manifest.jsonl
+../../apps/api/data/training/cross-source-mixture-v3/manifest.jsonl
+../../apps/api/data/training/frame-onset-manual-v23/manifest.jsonl
+../../apps/api/data/training/governed-v1/agpt-position-train.jsonl
+../../apps/api/data/training/governed-v1/agpt-position-validation.jsonl
+../../apps/api/data/training/governed-v1/formal-training-manifest-v2.jsonl
+../../apps/api/data/training/governed-v1/formal-training-manifest-v3.jsonl
+../../apps/api/data/training/governed-v1/formal-training-manifest.jsonl
+../../apps/api/data/training/governed-v1/guitar-techs-p3-music-position-train-candidate-v1.jsonl
+../../apps/api/data/training/governed-v1/guitar-techs-position-train.jsonl
+../../apps/api/data/training/governed-v1/guitar-techs-position-validation.jsonl
+../../apps/api/data/training/governed-v1/guitar-techs-technique.jsonl
+../../apps/api/data/training/governed-v1/guitarset-mixture-combined.jsonl
+../../apps/api/data/training/governed-v1/guitarset-mixture-derived.jsonl
+../../apps/api/data/training/governed-v1/guitarset-source-calibration.jsonl
+../../apps/api/data/training/governed-v1/synthetic-physical-fret-v1/manifest.jsonl
+../../apps/api/data/training/guitar-techs/p3-music-technique-manifest-v1.jsonl
+../../apps/api/data/training/guitar-techs/technique-manifest-v2.jsonl
+../../apps/api/data/training/guitar-techs/technique-manifest.jsonl
+../../apps/api/data/training/guitarset-demucs/manifest-combined.jsonl
+../../apps/api/data/training/guitarset-demucs/manifest.jsonl
+../../apps/api/data/training/guitarset-mixture-demucs-v2/manifest-combined.jsonl
+../../apps/api/data/training/guitarset-mixture-demucs-v2/manifest.jsonl
+../../apps/api/data/training/guitarset/manifest.jsonl
+../../apps/api/data/training/idmt-smt-guitar/technique-manifest-locked-test.jsonl
+../../apps/api/data/training/idmt-smt-guitar/technique-manifest-split.jsonl
+../../apps/api/data/training/idmt-smt-guitar/technique-manifest.jsonl
+../../apps/api/data/training/reference-guitar-stem-approved/manifest.jsonl
+../../apps/api/data/training/reference-guitar-stem/manifest.jsonl
+../../apps/api/data/training/reference/manifest-approved.jsonl
+../../apps/api/data/training/reference/manifest.jsonl
+../../apps/api/data/training/residual-onset-manual-v1/manifest.jsonl
+../../apps/api/data/training/synthetic-smoke/manifest.jsonl
+../../apps/api/data/training/technique-mixture-demucs-v1/manifest-combined.jsonl
+../../apps/api/data/training/technique-mixture-demucs-v1/manifest.jsonl
+../../apps/api/data/training/technique-mixture-demucs-validation-v1/manifest-combined.jsonl
+../../apps/api/data/training/technique-mixture-demucs-validation-v1/manifest-source.jsonl
+../../apps/api/data/training/technique-mixture-demucs-validation-v1/manifest.jsonl

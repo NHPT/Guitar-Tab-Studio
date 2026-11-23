@@ -15,8 +15,19 @@ from typing import Any
 
 from stringtrace_ml.gate import evaluate_gate
 
+try:
+    from .seal import (
+        MINIMUM_TRACKS,
+        load_exclusion_index,
+        validate_sealed_manifest,
+    )
+except ImportError:
+    from seal import (
+        MINIMUM_TRACKS,
+        load_exclusion_index,
+        validate_sealed_manifest,
+    )
 
-MINIMUM_TRACKS = 100
 MINIMUM_ONSET_F1 = 0.80
 MINIMUM_TABLATURE_F1 = 0.75
 MINIMUM_BASELINE_IMPROVEMENT = 0.15
@@ -30,6 +41,8 @@ class SealedGateConfig:
     gate_secret: str
     manifest: Path
     manifest_sha256: str
+    exclusion_index: Path
+    exclusion_index_sha256: str
     baseline: Path
     baseline_sha256: str
     basic_pitch_cache: Path
@@ -104,28 +117,20 @@ def download_artifact(
 def validate_sealed_inputs(config: SealedGateConfig) -> dict[str, int]:
     if sha256_file(config.manifest) != config.manifest_sha256:
         raise ValueError("Sealed manifest SHA-256 mismatch")
+    if sha256_file(config.exclusion_index) != config.exclusion_index_sha256:
+        raise ValueError("Sealed exclusion index SHA-256 mismatch")
     if sha256_file(config.baseline) != config.baseline_sha256:
         raise ValueError("Sealed baseline SHA-256 mismatch")
-    tracks = []
-    groups = set()
-    for line_number, raw_line in enumerate(
-        config.manifest.read_text(encoding="utf-8").splitlines(),
-        start=1,
-    ):
-        if not raw_line.strip():
-            continue
-        record = json.loads(raw_line)
-        if record.get("split") != "test":
-            raise ValueError(
-                f"Sealed manifest line {line_number} is not in the test split"
-            )
-        tracks.append(str(record["track_id"]))
-        groups.add(str(record["group_id"]))
-    if len(set(tracks)) < MINIMUM_TRACKS:
-        raise ValueError("Sealed evaluation requires at least 100 unique tracks")
-    if len(groups) < 5:
-        raise ValueError("Sealed evaluation requires at least five source groups")
-    return {"tracks": len(set(tracks)), "groups": len(groups)}
+    summary = validate_sealed_manifest(
+        config.manifest,
+        load_exclusion_index(config.exclusion_index),
+    )
+    return {
+        "tracks": int(summary["tracks"]),
+        "groups": int(summary["groups"]),
+        "works": int(summary["works"]),
+        "performers": int(summary["performers"]),
+    }
 
 
 def sandboxed_evaluation_command(
@@ -221,6 +226,7 @@ def evaluate_job(config: SealedGateConfig, job: dict[str, Any]) -> dict[str, Any
         "promotionId": promotion["id"],
         "experimentId": experiment["id"],
         "manifestSha256": config.manifest_sha256,
+        "exclusionIndexSha256": config.exclusion_index_sha256,
         "baselineSha256": config.baseline_sha256,
         "artifactSha256": experiment["artifactSha256"],
         "reportSha256": sha256_file(report_path),
@@ -291,6 +297,8 @@ def main() -> None:
     )
     parser.add_argument("--manifest")
     parser.add_argument("--manifest-sha256", required=True)
+    parser.add_argument("--exclusion-index")
+    parser.add_argument("--exclusion-index-sha256", required=True)
     parser.add_argument("--baseline")
     parser.add_argument("--baseline-sha256", required=True)
     parser.add_argument("--basic-pitch-cache", required=True)
@@ -310,6 +318,11 @@ def main() -> None:
         gate_secret=arguments.gate_secret,
         manifest=required_path(arguments.manifest, "manifest"),
         manifest_sha256=arguments.manifest_sha256,
+        exclusion_index=required_path(
+            arguments.exclusion_index,
+            "exclusion index",
+        ),
+        exclusion_index_sha256=arguments.exclusion_index_sha256,
         baseline=required_path(arguments.baseline, "baseline"),
         baseline_sha256=arguments.baseline_sha256,
         basic_pitch_cache=required_directory(

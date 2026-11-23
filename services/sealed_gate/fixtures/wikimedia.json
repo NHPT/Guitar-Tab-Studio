@@ -1,0 +1,44 @@
+{
+  "query": {
+    "pages": [
+      {
+        "pageid": 200,
+        "title": "File:Restricted guitar.ogg",
+        "imageinfo": [
+          {
+            "duration": 42.5,
+            "width": 0,
+            "url": "https://upload.wikimedia.org/restricted.ogg",
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:Restricted_guitar.ogg",
+            "mime": "audio/ogg",
+            "extmetadata": {
+              "ObjectName": {"value": "Restricted Guitar"},
+              "Artist": {"value": "<a href=\"/wiki/User:Example\">Example Artist</a>"},
+              "LicenseShortName": {"value": "CC BY-NC-ND 4.0"},
+              "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-nc-nd/4.0/"}
+            }
+          }
+        ]
+      },
+      {
+        "pageid": 100,
+        "title": "File:Open guitar.ogg",
+        "imageinfo": [
+          {
+            "duration": 125.0,
+            "width": 0,
+            "url": "https://upload.wikimedia.org/open.ogg",
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:Open_guitar.ogg",
+            "mime": "audio/ogg",
+            "extmetadata": {
+              "ObjectName": {"value": "Open Guitar"},
+              "Artist": {"value": "Open Artist"},
+              "LicenseShortName": {"value": "CC BY 4.0"},
+              "LicenseUrl": {"value": "https://creativecommons.org/licenses/by/4.0/"}
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

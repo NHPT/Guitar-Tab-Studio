@@ -1,0 +1,44 @@
+{
+  "metadata": {
+    "identifier": "open-guitar-item",
+    "title": "Open Guitar Archive",
+    "creator": "Archive Artist",
+    "description": "A guitar performance.",
+    "subject": ["guitar", "solo"],
+    "collection": ["opensource_audio"],
+    "licenseurl": "https://creativecommons.org/publicdomain/zero/1.0/"
+  },
+  "files": [
+    {
+      "name": "performance.ogg",
+      "source": "original",
+      "format": "Ogg Vorbis",
+      "length": "2:05",
+      "size": "12000000",
+      "track": "01"
+    },
+    {
+      "name": "performance.mp3",
+      "source": "derivative",
+      "original": "performance.ogg",
+      "format": "VBR MP3",
+      "length": "2:05",
+      "size": "5000000",
+      "track": "01"
+    },
+    {
+      "name": "short-sample.flac",
+      "source": "original",
+      "format": "Flac",
+      "length": "0:12",
+      "size": "1000000",
+      "track": "02"
+    },
+    {
+      "name": "cover.jpg",
+      "source": "original",
+      "format": "JPEG",
+      "size": "50000"
+    }
+  ]
+}

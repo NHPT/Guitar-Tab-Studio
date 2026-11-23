@@ -1,0 +1,27 @@
+{
+  "results": [
+    {
+      "id": "ov-open",
+      "title": "Open Guitar",
+      "creator": "Open Artist",
+      "foreign_landing_url": "https://example.org/open-guitar",
+      "url": "https://cdn.example.org/open-guitar.flac",
+      "license": "by",
+      "license_version": "4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "provider": "wikimedia",
+      "duration": 125000
+    },
+    {
+      "id": "ov-unknown",
+      "title": "Unknown Guitar",
+      "creator": null,
+      "foreign_landing_url": "https://example.org/unknown-guitar",
+      "url": "https://cdn.example.org/unknown-guitar.mp3",
+      "license": null,
+      "license_url": null,
+      "provider": "jamendo",
+      "duration": null
+    }
+  ]
+}
